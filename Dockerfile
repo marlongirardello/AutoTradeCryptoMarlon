@@ -22,4 +22,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Comando para executar a aplicação
-CMD ["python", "AutoTradeCrypoBot.py"]
+CMD ["python", "AutoCrypoMarlon.py"]
