@@ -19,25 +19,7 @@ from solana.rpc.api import Client
 from solana.rpc.types import TxOpts
 from spl.token.instructions import get_associated_token_address
 
-from flask import Flask
-from threading import Thread
-
-# --- CÓDIGO DO SERVIDOR WEB ---
-app = Flask('')
-
-@app.route('/')
-def home():
-    return "Bot is alive!"
-
-def run_server():
-  app.run(host='0.0.0.0',port=8080)
-
-def keep_alive():
-    t = Thread(target=run_server)
-    t.start()
-# --- FIM DO CÓDIGO DO SERVIDOR ---
-
-# --- Carrega as variáveis de ambiente (funciona localmente e no Replit) ---
+# --- Carrega as variáveis de ambiente (funciona localmente e no Replit/Railway) ---
 load_dotenv()
 
 # --- Configurações Iniciais ---
@@ -95,7 +77,7 @@ application = None
 async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, slippage_bps=100):
     logger.info(f"Iniciando swap de {amount} do token {input_mint_str} para {output_mint_str}")
     amount_wei = int(amount * (10**input_decimals))
-
+    
     async with httpx.AsyncClient() as client:
         try:
             quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={input_mint_str}&outputMint={output_mint_str}&amount={amount_wei}&slippageBps={slippage_bps}"
@@ -118,13 +100,13 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
 
             raw_tx_bytes = b64decode(swap_tx_b64)
             swap_tx = VersionedTransaction.from_bytes(raw_tx_bytes)
-
+            
             signature = payer.sign_message(to_bytes_versioned(swap_tx.message))
             signed_tx = VersionedTransaction.populate(swap_tx.message, [signature])
 
             tx_opts = TxOpts(skip_preflight=False, preflight_commitment="confirmed")
             tx_signature = solana_client.send_raw_transaction(bytes(signed_tx), opts=tx_opts).value
-
+            
             logger.info(f"Transação enviada com sucesso! Assinatura: {tx_signature}")
             solana_client.confirm_transaction(tx_signature, commitment="confirmed")
             logger.info(f"Transação confirmada! Link: https://solscan.io/tx/{tx_signature}")
@@ -139,7 +121,7 @@ async def execute_buy_order(amount, price):
     global in_position, entry_price
     details = parameters["trade_pair_details"]
     logger.info(f"EXECUTANDO ORDEM DE COMPRA REAL de {amount} {details['quote_symbol']} para {details['base_symbol']} ao preço de {price}")
-
+    
     entry_price = price
 
     tx_sig = await execute_swap(details['quote_address'], details['base_address'], amount, details['quote_decimals'])
@@ -173,20 +155,20 @@ async def execute_sell_order(reason="Venda Manual"):
     except Exception as e:
         logger.error(f"Erro ao buscar saldo para venda: {e}"); await send_telegram_message(f"⚠️ Falha ao buscar saldo do token para venda: {e}")
 
-# --- NOVA FUNÇÃO PARA BUSCAR DADOS DO GECKOTERMINAL ---
+# --- FUNÇÃO PARA BUSCAR DADOS DO GECKOTERMINAL ---
 async def fetch_geckoterminal_ohlcv(pair_address, timeframe):
     timeframe_map = {"1m": "minute", "5m": "minute", "15m": "minute", "1h": "hour", "4h": "hour", "1d": "day"}
     aggregate_map = {"1m": 1, "5m": 5, "15m": 15, "1h": 1, "4h": 4, "1d": 1}
-
+    
     gt_timeframe = timeframe_map.get(timeframe)
     gt_aggregate = aggregate_map.get(timeframe)
-
+    
     if not gt_timeframe:
         logger.error(f"Timeframe '{timeframe}' não suportado pelo GeckoTerminal.")
         return None
 
     url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools/{pair_address}/ohlcv/{gt_timeframe}?aggregate={gt_aggregate}&limit=300"
-
+    
     try:
         async with httpx.AsyncClient() as client:
             response = await client.get(url)
@@ -218,7 +200,7 @@ async def check_strategy():
         pair_details = parameters["trade_pair_details"]
         timeframe, ma_period = parameters["timeframe"], int(parameters["ma_period"])
         amount, stop_loss_percent = parameters["amount"], parameters["stop_loss_percent"]
-
+        
         logger.info(f"Buscando dados de candles para {pair_details['base_symbol']}/{pair_details['quote_symbol']} no GeckoTerminal...")
 
         data = await fetch_geckoterminal_ohlcv(pair_details['pair_address'], timeframe)
@@ -234,33 +216,41 @@ async def check_strategy():
 
         sma_col = f'SMA_{ma_period}'
         data.ta.sma(length=ma_period, append=True)
-
+        
         previous_candle = data.iloc[-3]
         current_candle = data.iloc[-2]
-
+        
         current_close, current_sma = current_candle['Close'], current_candle[sma_col]
         previous_close, previous_sma = previous_candle['Close'], previous_candle[sma_col]
-
+        
         logger.info(f"Análise ({pair_details['base_symbol']}): Preço Atual {current_close:.8f} | Média Atual {current_sma:.8f}")
 
         if in_position:
             stop_loss_price = entry_price * (1 - stop_loss_percent / 100)
             logger.info(f"Posição aberta. Preço de entrada: {entry_price:.8f}, Stop-Loss: {stop_loss_price:.8f}")
-
+            
+            # 1. A verificação do stop-loss de emergência é a prioridade máxima
             if current_close <= stop_loss_price:
                 await execute_sell_order(reason=f"Stop-Loss atingido em {stop_loss_price:.8f}")
                 return
 
+            # 2. Verifica o sinal de venda da média móvel
             sell_signal = previous_close >= previous_sma and current_close < current_sma
             if sell_signal:
-                await execute_sell_order(reason="Cruzamento de Média Móvel")
-                return
+                # 3. NOVA CONDIÇÃO: Só vende se o preço atual for maior ou igual ao preço de entrada
+                if current_close >= entry_price:
+                    logger.info(f"Sinal de venda com lucro detectado. Preço atual ({current_close:.8f}) >= Preço de entrada ({entry_price:.8f}). Vendendo.")
+                    await execute_sell_order(reason="Cruzamento de Média Móvel com Lucro")
+                    return
+                else:
+                    logger.info(f"Sinal de venda ignorado. Preço atual ({current_close:.8f}) < Preço de entrada ({entry_price:.8f}). Mantendo posição.")
 
+        # A lógica de compra permanece a mesma
         buy_signal = previous_close <= previous_sma and current_close > current_sma
         if not in_position and buy_signal:
             logger.info("Sinal de COMPRA detectado.")
             await execute_buy_order(amount, current_close)
-
+            
     except Exception as e:
         logger.error(f"Ocorreu um erro em check_strategy: {e}")
         await send_telegram_message(f"⚠️ Erro inesperado ao executar a estratégia: {e}")
@@ -279,9 +269,7 @@ async def start(update, context):
         '`/set EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzL7M6fV2zY2g6 SOL 1h 21 0.1 7`\n\n'
         '**Comandos:**\n'
         '• `/run` - Inicia o bot.\n'
-        '• `/stop` - Para o bot.\n'
-        '• `/buy` - Força uma compra (teste).\n'
-        '• `/sell` - Força uma venda (teste).',
+        '• `/stop` - Para o bot.',
         parse_mode='Markdown'
     )
 
@@ -293,7 +281,7 @@ async def set_params(update, context):
     try:
         base_token_contract = context.args[0]
         quote_symbol_input = context.args[1].upper()
-
+        
         timeframe, ma_period = context.args[2].lower(), int(context.args[3])
         amount, stop_loss_percent = float(context.args[4]), float(context.args[5])
 
@@ -313,13 +301,13 @@ async def set_params(update, context):
         if not token_res.get('pairs'):
             await update.effective_message.reply_text(f"⚠️ Nenhum par encontrado no Dexscreener para o contrato fornecido.")
             return
-
+        
         accepted_symbols = [quote_symbol_input]
         if quote_symbol_input == 'SOL':
             accepted_symbols.append('WSOL')
 
         valid_pairs = [p for p in token_res['pairs'] if p.get('quoteToken', {}).get('symbol') in accepted_symbols]
-
+        
         if not valid_pairs:
             await update.effective_message.reply_text(f"⚠️ Nenhum par com `{quote_symbol_input}` encontrado para este contrato.")
             return
@@ -374,14 +362,14 @@ async def run_bot(update, context):
     if bot_running:
         await update.effective_message.reply_text("O bot já está em execução.")
         return
-
+    
     bot_running = True
     logger.info("Bot de trade iniciado.")
     await update.effective_message.reply_text("🚀 Bot iniciado! Verificando a estratégia via GeckoTerminal...")
-
+    
     if periodic_task is None or periodic_task.done():
         periodic_task = asyncio.create_task(periodic_checker())
-
+    
     await check_strategy()
 
 async def stop_bot(update, context):
@@ -389,7 +377,7 @@ async def stop_bot(update, context):
     if not bot_running:
         await update.effective_message.reply_text("O bot já está parado.")
         return
-
+    
     bot_running = False
     if periodic_task:
         periodic_task.cancel()
@@ -398,56 +386,6 @@ async def stop_bot(update, context):
     in_position, entry_price = False, 0.0
     logger.info("Bot de trade parado.")
     await update.effective_message.reply_text("🛑 Bot parado. Posição e tarefas resetadas.")
-
-# --- COMANDOS MANUAIS ---
-async def manual_buy(update, context):
-    if not bot_running:
-        await update.effective_message.reply_text("O bot precisa estar rodando. Use /run primeiro.")
-        return
-    if in_position:
-        await update.effective_message.reply_text("Já existe uma posição aberta. Venda primeiro com /sell.")
-        return
-
-    logger.info("Comando /buy recebido. Forçando compra...")
-    await update.effective_message.reply_text("Forçando ordem de compra...")
-    try:
-        pair_details = parameters['trade_pair_details']
-        pair_address = pair_details['pair_address']
-        quote_symbol = pair_details['quote_symbol']
-
-        # Busca o preço atual no Dexscreener para ser mais rápido
-        url = f"https://api.dexscreener.com/latest/dex/pairs/solana/{pair_address}"
-        async with httpx.AsyncClient() as client:
-            res = await client.get(url)
-            res.raise_for_status()
-            pair_data = res.json()['pair']
-
-            current_price = 0.0
-            if quote_symbol in ['SOL', 'WSOL']:
-                current_price = float(pair_data['priceNative'])
-            else: # Assume USDC ou outra stablecoin
-                current_price = float(pair_data['priceUsd'])
-
-            if current_price > 0:
-                await execute_buy_order(parameters["amount"], current_price)
-            else:
-                raise ValueError("Preço obtido inválido")
-
-    except Exception as e:
-        logger.error(f"Erro ao buscar preço para compra manual: {e}")
-        await update.effective_message.reply_text("⚠️ Não foi possível obter o preço atual para a compra manual.")
-
-async def manual_sell(update, context):
-    if not bot_running:
-        await update.effective_message.reply_text("O bot precisa estar rodando. Use /run primeiro.")
-        return
-    if not in_position:
-        await update.effective_message.reply_text("Nenhuma posição aberta para vender.")
-        return
-
-    logger.info("Comando /sell recebido. Forçando venda...")
-    await update.effective_message.reply_text("Forçando ordem de venda...")
-    await execute_sell_order()
 
 async def periodic_checker():
     logger.info(f"Verificador periódico iniciado com intervalo de {check_interval_seconds} segundos.")
@@ -465,20 +403,17 @@ async def periodic_checker():
 
 def main():
     global application
-    keep_alive() # Adicione esta linha
     application = (
         Application.builder()
         .token(TELEGRAM_TOKEN)
         .build()
     )
-
+    
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("set", set_params))
     application.add_handler(CommandHandler("run", run_bot))
     application.add_handler(CommandHandler("stop", stop_bot))
-    application.add_handler(CommandHandler("buy", manual_buy))
-    application.add_handler(CommandHandler("sell", manual_sell))
-
+    
     logger.info("Bot do Telegram iniciado e aguardando comandos...")
     application.run_polling()
 
