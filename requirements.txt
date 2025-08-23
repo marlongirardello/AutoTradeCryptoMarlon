@@ -1,0 +1,9 @@
+python-telegram-bot
+pandas
+pandas_ta
+httpx
+python-dotenv
+solders==0.18.0
+solana==0.30.2
+numpy==1.26.4
+Flask
