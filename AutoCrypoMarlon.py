@@ -212,12 +212,20 @@ async def check_strategy():
 
         htf_sma_col = f'SMA_{period}'
         htf_data.ta.sma(length=period, append=True)
+        htf_previous_candle = htf_data.iloc[-3]
         htf_current_candle = htf_data.iloc[-2]
+        
         htf_current_close = htf_current_candle['Close']
         htf_current_sma = htf_current_candle[htf_sma_col]
+        htf_previous_sma = htf_previous_candle[htf_sma_col]
 
-        main_trend_is_up = htf_current_close > htf_current_sma
-        logger.info(f"Tendência Principal ({htf}): {'ALTA' if main_trend_is_up else 'BAIXA'} (Preço {htf_current_close:.8f} vs Média {htf_current_sma:.8f})")
+        # --- NOVA LÓGICA DE TENDÊNCIA ADAPTATIVA ---
+        price_above_sma = htf_current_close > htf_current_sma
+        sma_is_rising = htf_current_sma > htf_previous_sma
+        main_trend_is_up = price_above_sma or sma_is_rising
+        
+        trend_reason = f"Preço > Média ({price_above_sma}) OU Média a Subir ({sma_is_rising})"
+        logger.info(f"Tendência Principal ({htf}): {'ALTA' if main_trend_is_up else 'BAIXA'} | {trend_reason}")
 
         # --- LÓGICA DE SAÍDA BASEADA NA "MARÉ" ---
         if in_position and not main_trend_is_up:
@@ -278,7 +286,7 @@ async def send_telegram_message(message):
 async def start(update, context):
     await update.effective_message.reply_text(
         'Olá! Sou seu bot de autotrade para a rede Solana.\n'
-        'Estratégia: **Análise de Múltiplos Timeframes (MTA)**.\n'
+        'Estratégia: **MTA Adaptativa**.\n'
         'Fonte de Dados: **GeckoTerminal**.\n'
         'Use o comando `/set` para configurar:\n'
         '`/set <CONTRATO> <COTAÇÃO> <TF_MARÉ> <TF_ONDA> <PERÍODO> <VALOR> <STOP_%>`\n\n'
@@ -307,7 +315,6 @@ async def set_params(update, context):
             await update.effective_message.reply_text(f"⚠️ Timeframe inválido. Use 1m, 5m, 15m, 1h, 4h, 1d.")
             return
         
-        # O bot verifica na frequência do timeframe menor (Onda)
         check_interval_seconds = interval_map[ltf]
 
         token_search_url = f"https://api.dexscreener.com/latest/dex/tokens/{base_token_contract}"
@@ -356,10 +363,10 @@ async def set_params(update, context):
             f"✅ *Parâmetros definidos com sucesso!*\n\n"
             f"📊 *Fonte de Dados:* `GeckoTerminal`\n"
             f"🪙 *Par de Negociação:* `{base_token_symbol}/{quote_token_symbol}`\n"
-            f"🌊 *Estratégia:* MTA (Maré: `{htf}`, Onda: `{ltf}`)\n"
+            f"🌊 *Estratégia:* MTA Adaptativa (Maré: `{htf}`, Onda: `{ltf}`)\n"
             f"📈 *Indicadores:* Média Móvel + RSI (ambos com `{period}` períodos) + ATR(14)\n"
             f"💰 *Valor por Ordem:* `{amount}` {quote_symbol_input}\n"
-            f"� *Stop-Loss:* `{stop_loss_percent}%`",
+            f"📉 *Stop-Loss:* `{stop_loss_percent}%`",
             parse_mode='Markdown'
         )
     except (IndexError, ValueError):
@@ -386,7 +393,7 @@ async def run_bot(update, context):
     
     bot_running = True
     logger.info("Bot de trade iniciado.")
-    await update.effective_message.reply_text("🚀 Bot iniciado! Verificando a estratégia MTA via GeckoTerminal...")
+    await update.effective_message.reply_text("🚀 Bot iniciado! Verificando a estratégia MTA Adaptativa via GeckoTerminal...")
     
     if periodic_task is None or periodic_task.done():
         periodic_task = asyncio.create_task(periodic_checker())
