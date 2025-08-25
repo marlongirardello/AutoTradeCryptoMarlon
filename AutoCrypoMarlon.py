@@ -59,14 +59,15 @@ except Exception as e:
 bot_running = False
 in_position = False
 entry_price = 0.0
-check_interval_seconds = 3600 # Valor padrão
+check_interval_seconds = 900 # Padrão para 15 minutos
 periodic_task = None
 WRAPPED_SOL_MINT_ADDRESS = "So11111111111111111111111111111111111111112"
 parameters = {
     "base_token_symbol": None,
     "quote_token_symbol": None,
-    "timeframe": None,
-    "period": None, # Período unificado para MA e RSI
+    "htf": None, # High Timeframe (Maré)
+    "ltf": None, # Low Timeframe (Onda)
+    "period": None,
     "amount": None,
     "stop_loss_percent": None,
     "trade_pair_details": {}
@@ -198,60 +199,74 @@ async def check_strategy():
 
     try:
         pair_details = parameters["trade_pair_details"]
-        timeframe, period = parameters["timeframe"], int(parameters["period"])
+        htf, ltf, period = parameters["htf"], parameters["ltf"], int(parameters["period"])
         amount, stop_loss_percent = parameters["amount"], parameters["stop_loss_percent"]
         
-        logger.info(f"Buscando dados de candles para {pair_details['base_symbol']}/{pair_details['quote_symbol']} no GeckoTerminal...")
+        # --- FASE 1: ANÁLISE DA "MARÉ" (TIMEFRAME ALTO) ---
+        logger.info(f"Analisando a tendência principal no timeframe de {htf}...")
+        htf_data = await fetch_geckoterminal_ohlcv(pair_details['pair_address'], htf)
 
-        data = await fetch_geckoterminal_ohlcv(pair_details['pair_address'], timeframe)
-
-        if data is None or data.empty:
-            await send_telegram_message(f"⚠️ Não foi possível obter dados de velas do GeckoTerminal. Verifique se o par tem liquidez e um histórico de negociação.")
+        if htf_data is None or htf_data.empty or len(htf_data) < period + 2:
+            await send_telegram_message(f"⚠️ Não foi possível obter dados suficientes do GeckoTerminal para a análise de tendência principal ({htf}).")
             return
 
-        if len(data) < period + 15: # Garante dados suficientes para o ATR e a MA
-            logger.warning(f"Dados insuficientes do GeckoTerminal ({len(data)} velas).")
-            await send_telegram_message(f"⚠️ Dados insuficientes do GeckoTerminal para a análise do par.")
+        htf_sma_col = f'SMA_{period}'
+        htf_data.ta.sma(length=period, append=True)
+        htf_current_candle = htf_data.iloc[-2]
+        htf_current_close = htf_current_candle['Close']
+        htf_current_sma = htf_current_candle[htf_sma_col]
+
+        main_trend_is_up = htf_current_close > htf_current_sma
+        logger.info(f"Tendência Principal ({htf}): {'ALTA' if main_trend_is_up else 'BAIXA'} (Preço {htf_current_close:.8f} vs Média {htf_current_sma:.8f})")
+
+        # --- LÓGICA DE SAÍDA BASEADA NA "MARÉ" ---
+        if in_position and not main_trend_is_up:
+            logger.info("A tendência principal virou para BAIXA. Vendendo posição para alinhar com a maré.")
+            await execute_sell_order(reason="Mudança de Tendência Principal para Baixa")
             return
 
-        # --- CÁLCULO DOS INDICADORES ---
+        # --- FASE 2: ANÁLISE DA "ONDA" (TIMEFRAME BAIXO) ---
+        if not main_trend_is_up:
+            logger.info("A tendência principal é de BAIXA. Nenhuma compra será considerada.")
+            return
+
+        logger.info(f"Buscando sinal de entrada no timeframe de {ltf}...")
+        ltf_data = await fetch_geckoterminal_ohlcv(pair_details['pair_address'], ltf)
+
+        if ltf_data is None or ltf_data.empty or len(ltf_data) < period + 15:
+            await send_telegram_message(f"⚠️ Não foi possível obter dados suficientes do GeckoTerminal para a análise de entrada ({ltf}).")
+            return
+        
         sma_col = f'SMA_{period}'
         rsi_col = f'RSI_{period}'
-        atr_col = 'ATRr_14' # ATR padrão de 14 períodos
-        data.ta.sma(length=period, append=True)
-        data.ta.rsi(length=period, append=True)
-        data.ta.atr(length=14, append=True)
+        atr_col = 'ATRr_14'
+        ltf_data.ta.sma(length=period, append=True)
+        ltf_data.ta.rsi(length=period, append=True)
+        ltf_data.ta.atr(length=14, append=True)
         
-        previous_candle = data.iloc[-3]
-        current_candle = data.iloc[-2]
+        previous_candle = ltf_data.iloc[-3]
+        current_candle = ltf_data.iloc[-2]
         
         current_close, current_sma = current_candle['Close'], current_candle[sma_col]
         previous_close, previous_sma = previous_candle['Close'], previous_candle[sma_col]
         current_rsi = current_candle[rsi_col]
         current_atr = current_candle[atr_col]
         previous_atr = previous_candle[atr_col]
-        
-        logger.info(f"Análise ({pair_details['base_symbol']}): Preço Atual {current_close:.8f} | Média Atual {current_sma:.8f} | RSI Atual {current_rsi:.2f} | ATR Atual {current_atr:.8f}")
+
+        logger.info(f"Análise de Entrada ({ltf}): Preço {current_close:.8f} | Média {current_sma:.8f} | RSI {current_rsi:.2f} | ATR {current_atr:.8f}")
 
         if in_position:
             stop_loss_price = entry_price * (1 - stop_loss_percent / 100)
             logger.info(f"Posição aberta. Preço de entrada: {entry_price:.8f}, Stop-Loss: {stop_loss_price:.8f}")
-            
             if current_close <= stop_loss_price:
                 await execute_sell_order(reason=f"Stop-Loss atingido em {stop_loss_price:.8f}")
                 return
+        else: # Só procura por compras se não estiver posicionado
+            buy_signal = previous_close <= previous_sma and current_close > current_sma and current_rsi > 50 and current_atr > previous_atr
+            if buy_signal:
+                logger.info("Sinal de COMPRA (Onda) com confirmação da Maré detectado.")
+                await execute_buy_order(amount, current_close)
 
-            sell_signal = previous_close >= previous_sma and current_close < current_sma and current_rsi < 50
-            if sell_signal:
-                await execute_sell_order(reason="Cruzamento de Média Móvel com Confirmação RSI")
-                return
-
-        # NOVA LÓGICA DE COMPRA COM FILTRO ATR
-        buy_signal = previous_close <= previous_sma and current_close > current_sma and current_rsi > 50 and current_atr > previous_atr
-        if not in_position and buy_signal:
-            logger.info("Sinal de COMPRA com confirmação RSI e ATR detectado.")
-            await execute_buy_order(amount, current_close)
-            
     except Exception as e:
         logger.error(f"Ocorreu um erro em check_strategy: {e}")
         await send_telegram_message(f"⚠️ Erro inesperado ao executar a estratégia: {e}")
@@ -263,16 +278,15 @@ async def send_telegram_message(message):
 async def start(update, context):
     await update.effective_message.reply_text(
         'Olá! Sou seu bot de autotrade para a rede Solana.\n'
-        'A análise é feita via **GeckoTerminal** usando **Média Móvel + RSI + ATR**.\n'
+        'Estratégia: **Análise de Múltiplos Timeframes (MTA)**.\n'
+        'Fonte de Dados: **GeckoTerminal**.\n'
         'Use o comando `/set` para configurar:\n'
-        '`/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <PERÍODO> <VALOR> <STOP_%>`\n\n'
+        '`/set <CONTRATO> <COTAÇÃO> <TF_MARÉ> <TF_ONDA> <PERÍODO> <VALOR> <STOP_%>`\n\n'
         '**Exemplo (WIF/SOL):**\n'
-        '`/set EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzL7M6fV2zY2g6 SOL 1h 21 0.1 7`\n\n'
+        '`/set EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzL7M6fV2zY2g6 SOL 1h 15m 21 0.1 7`\n\n'
         '**Comandos:**\n'
         '• `/run` - Inicia o bot.\n'
-        '• `/stop` - Para o bot.\n'
-        '• `/buy` - Força uma compra (teste).\n'
-        '• `/sell` - Força uma venda (teste).',
+        '• `/stop` - Para o bot.',
         parse_mode='Markdown'
     )
 
@@ -285,14 +299,16 @@ async def set_params(update, context):
         base_token_contract = context.args[0]
         quote_symbol_input = context.args[1].upper()
         
-        timeframe, period = context.args[2].lower(), int(context.args[3])
-        amount, stop_loss_percent = float(context.args[4]), float(context.args[5])
+        htf, ltf, period = context.args[2].lower(), context.args[3].lower(), int(context.args[4])
+        amount, stop_loss_percent = float(context.args[5]), float(context.args[6])
 
         interval_map = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
-        if timeframe not in interval_map:
-            await update.effective_message.reply_text(f"⚠️ Timeframe '{timeframe}' não suportado.")
+        if ltf not in interval_map or htf not in interval_map:
+            await update.effective_message.reply_text(f"⚠️ Timeframe inválido. Use 1m, 5m, 15m, 1h, 4h, 1d.")
             return
-        check_interval_seconds = interval_map[timeframe]
+        
+        # O bot verifica na frequência do timeframe menor (Onda)
+        check_interval_seconds = interval_map[ltf]
 
         token_search_url = f"https://api.dexscreener.com/latest/dex/tokens/{base_token_contract}"
         async with httpx.AsyncClient() as client:
@@ -322,7 +338,8 @@ async def set_params(update, context):
         parameters = {
             "base_token_symbol": base_token_symbol, 
             "quote_token_symbol": quote_token_symbol,
-            "timeframe": timeframe, 
+            "htf": htf,
+            "ltf": ltf, 
             "period": period,
             "amount": amount,
             "stop_loss_percent": stop_loss_percent,
@@ -339,17 +356,17 @@ async def set_params(update, context):
             f"✅ *Parâmetros definidos com sucesso!*\n\n"
             f"📊 *Fonte de Dados:* `GeckoTerminal`\n"
             f"🪙 *Par de Negociação:* `{base_token_symbol}/{quote_token_symbol}`\n"
-            f"⏰ *Timeframe:* `{timeframe}`\n"
-            f"📈 *Estratégia:* Média Móvel + RSI (ambos com `{period}` períodos) + ATR(14)\n"
+            f"🌊 *Estratégia:* MTA (Maré: `{htf}`, Onda: `{ltf}`)\n"
+            f"📈 *Indicadores:* Média Móvel + RSI (ambos com `{period}` períodos) + ATR(14)\n"
             f"💰 *Valor por Ordem:* `{amount}` {quote_symbol_input}\n"
-            f"📉 *Stop-Loss:* `{stop_loss_percent}%`",
+            f"� *Stop-Loss:* `{stop_loss_percent}%`",
             parse_mode='Markdown'
         )
     except (IndexError, ValueError):
         await update.effective_message.reply_text(
             "⚠️ *Erro: Formato incorreto.*\n"
-            "Use: `/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <PERÍODO> <VALOR> <STOP_%>`\n"
-            "Exemplo: `/set EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzL7M6fV2zY2g6 SOL 1h 21 0.1 7`",
+            "Use: `/set <CONTRATO> <COTAÇÃO> <TF_MARÉ> <TF_ONDA> <PERÍODO> <VALOR> <STOP_%>`\n"
+            "Exemplo: `/set ... SOL 1h 15m 21 0.1 7`",
             parse_mode='Markdown'
         )
     except httpx.HTTPStatusError as e:
@@ -369,7 +386,7 @@ async def run_bot(update, context):
     
     bot_running = True
     logger.info("Bot de trade iniciado.")
-    await update.effective_message.reply_text("🚀 Bot iniciado! Verificando a estratégia via GeckoTerminal...")
+    await update.effective_message.reply_text("🚀 Bot iniciado! Verificando a estratégia MTA via GeckoTerminal...")
     
     if periodic_task is None or periodic_task.done():
         periodic_task = asyncio.create_task(periodic_checker())
@@ -390,54 +407,6 @@ async def stop_bot(update, context):
     in_position, entry_price = False, 0.0
     logger.info("Bot de trade parado.")
     await update.effective_message.reply_text("🛑 Bot parado. Posição e tarefas resetadas.")
-
-async def manual_buy(update, context):
-    if not bot_running:
-        await update.effective_message.reply_text("O bot precisa estar rodando. Use /run primeiro.")
-        return
-    if in_position:
-        await update.effective_message.reply_text("Já existe uma posição aberta. Venda primeiro com /sell.")
-        return
-    
-    logger.info("Comando /buy recebido. Forçando compra...")
-    await update.effective_message.reply_text("Forçando ordem de compra...")
-    try:
-        pair_details = parameters['trade_pair_details']
-        pair_address = pair_details['pair_address']
-        quote_symbol = pair_details['quote_symbol']
-        
-        url = f"https://api.dexscreener.com/latest/dex/pairs/solana/{pair_address}"
-        async with httpx.AsyncClient() as client:
-            res = await client.get(url)
-            res.raise_for_status()
-            pair_data = res.json()['pair']
-            
-            current_price = 0.0
-            if quote_symbol in ['SOL', 'WSOL']:
-                current_price = float(pair_data['priceNative'])
-            else: 
-                current_price = float(pair_data['priceUsd'])
-
-            if current_price > 0:
-                await execute_buy_order(parameters["amount"], current_price)
-            else:
-                raise ValueError("Preço obtido inválido")
-
-    except Exception as e:
-        logger.error(f"Erro ao buscar preço para compra manual: {e}")
-        await update.effective_message.reply_text("⚠️ Não foi possível obter o preço atual para a compra manual.")
-
-async def manual_sell(update, context):
-    if not bot_running:
-        await update.effective_message.reply_text("O bot precisa estar rodando. Use /run primeiro.")
-        return
-    if not in_position:
-        await update.effective_message.reply_text("Nenhuma posição aberta para vender.")
-        return
-        
-    logger.info("Comando /sell recebido. Forçando venda...")
-    await update.effective_message.reply_text("Forçando ordem de venda...")
-    await execute_sell_order()
 
 async def periodic_checker():
     logger.info(f"Verificador periódico iniciado com intervalo de {check_interval_seconds} segundos.")
@@ -465,8 +434,6 @@ def main():
     application.add_handler(CommandHandler("set", set_params))
     application.add_handler(CommandHandler("run", run_bot))
     application.add_handler(CommandHandler("stop", stop_bot))
-    application.add_handler(CommandHandler("buy", manual_buy))
-    application.add_handler(CommandHandler("sell", manual_sell))
     
     logger.info("Bot do Telegram iniciado e aguardando comandos...")
     application.run_polling()
