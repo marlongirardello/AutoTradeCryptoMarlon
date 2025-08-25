@@ -209,7 +209,7 @@ async def check_strategy():
             await send_telegram_message(f"⚠️ Não foi possível obter dados de velas do GeckoTerminal. Verifique se o par tem liquidez e um histórico de negociação.")
             return
 
-        if len(data) < period + 2:
+        if len(data) < period + 15: # Garante dados suficientes para o ATR e a MA
             logger.warning(f"Dados insuficientes do GeckoTerminal ({len(data)} velas).")
             await send_telegram_message(f"⚠️ Dados insuficientes do GeckoTerminal para a análise do par.")
             return
@@ -217,8 +217,10 @@ async def check_strategy():
         # --- CÁLCULO DOS INDICADORES ---
         sma_col = f'SMA_{period}'
         rsi_col = f'RSI_{period}'
+        atr_col = 'ATRr_14' # ATR padrão de 14 períodos
         data.ta.sma(length=period, append=True)
         data.ta.rsi(length=period, append=True)
+        data.ta.atr(length=14, append=True)
         
         previous_candle = data.iloc[-3]
         current_candle = data.iloc[-2]
@@ -226,8 +228,10 @@ async def check_strategy():
         current_close, current_sma = current_candle['Close'], current_candle[sma_col]
         previous_close, previous_sma = previous_candle['Close'], previous_candle[sma_col]
         current_rsi = current_candle[rsi_col]
+        current_atr = current_candle[atr_col]
+        previous_atr = previous_candle[atr_col]
         
-        logger.info(f"Análise ({pair_details['base_symbol']}): Preço Atual {current_close:.8f} | Média Atual {current_sma:.8f} | RSI Atual {current_rsi:.2f}")
+        logger.info(f"Análise ({pair_details['base_symbol']}): Preço Atual {current_close:.8f} | Média Atual {current_sma:.8f} | RSI Atual {current_rsi:.2f} | ATR Atual {current_atr:.8f}")
 
         if in_position:
             stop_loss_price = entry_price * (1 - stop_loss_percent / 100)
@@ -242,9 +246,10 @@ async def check_strategy():
                 await execute_sell_order(reason="Cruzamento de Média Móvel com Confirmação RSI")
                 return
 
-        buy_signal = previous_close <= previous_sma and current_close > current_sma and current_rsi > 50
+        # NOVA LÓGICA DE COMPRA COM FILTRO ATR
+        buy_signal = previous_close <= previous_sma and current_close > current_sma and current_rsi > 50 and current_atr > previous_atr
         if not in_position and buy_signal:
-            logger.info("Sinal de COMPRA com confirmação RSI detectado.")
+            logger.info("Sinal de COMPRA com confirmação RSI e ATR detectado.")
             await execute_buy_order(amount, current_close)
             
     except Exception as e:
@@ -258,7 +263,7 @@ async def send_telegram_message(message):
 async def start(update, context):
     await update.effective_message.reply_text(
         'Olá! Sou seu bot de autotrade para a rede Solana.\n'
-        'A análise é feita via **GeckoTerminal** usando **Média Móvel + RSI**.\n'
+        'A análise é feita via **GeckoTerminal** usando **Média Móvel + RSI + ATR**.\n'
         'Use o comando `/set` para configurar:\n'
         '`/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <PERÍODO> <VALOR> <STOP_%>`\n\n'
         '**Exemplo (WIF/SOL):**\n'
@@ -335,7 +340,7 @@ async def set_params(update, context):
             f"📊 *Fonte de Dados:* `GeckoTerminal`\n"
             f"🪙 *Par de Negociação:* `{base_token_symbol}/{quote_token_symbol}`\n"
             f"⏰ *Timeframe:* `{timeframe}`\n"
-            f"📈 *Estratégia:* Média Móvel + RSI (ambos com `{period}` períodos)\n"
+            f"📈 *Estratégia:* Média Móvel + RSI (ambos com `{period}` períodos) + ATR(14)\n"
             f"💰 *Valor por Ordem:* `{amount}` {quote_symbol_input}\n"
             f"📉 *Stop-Loss:* `{stop_loss_percent}%`",
             parse_mode='Markdown'
