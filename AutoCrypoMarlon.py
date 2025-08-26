@@ -160,7 +160,7 @@ async def execute_sell_order(reason="Venda Manual"):
     except Exception as e:
         logger.error(f"Erro ao buscar saldo para venda: {e}"); await send_telegram_message(f"⚠️ Falha ao buscar saldo do token para venda: {e}")
 
-# --- FUNÇÃO PARA BUSCAR DADOS DO GECKOTERMINAL ---
+# --- FUNÇÃO PARA BUSCAR DADOS DO GECKOTERMINAL (COM CORREÇÃO DE CACHE) ---
 async def fetch_geckoterminal_ohlcv(pair_address, timeframe):
     timeframe_map = {"1m": "minute", "5m": "minute", "15m": "minute", "1h": "hour", "4h": "hour", "1d": "day"}
     aggregate_map = {"1m": 1, "5m": 5, "15m": 15, "1h": 1, "4h": 4, "1d": 1}
@@ -172,7 +172,9 @@ async def fetch_geckoterminal_ohlcv(pair_address, timeframe):
         logger.error(f"Timeframe '{timeframe}' não suportado pelo GeckoTerminal.")
         return None
 
-    url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools/{pair_address}/ohlcv/{gt_timeframe}?aggregate={gt_aggregate}&limit=300"
+    # CORREÇÃO: Adiciona o timestamp atual para evitar o cache da API
+    current_timestamp = int(time.time())
+    url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools/{pair_address}/ohlcv/{gt_timeframe}?aggregate={gt_aggregate}&limit=300&before_timestamp={current_timestamp}"
     
     try:
         async with httpx.AsyncClient() as client:
