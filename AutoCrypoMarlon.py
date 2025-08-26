@@ -59,17 +59,17 @@ except Exception as e:
 bot_running = False
 in_position = False
 entry_price = 0.0
+highest_price_since_entry = 0.0 # Para o Trailing Stop
 check_interval_seconds = 900 # Padrão para 15 minutos
 periodic_task = None
 WRAPPED_SOL_MINT_ADDRESS = "So11111111111111111111111111111111111111112"
 parameters = {
     "base_token_symbol": None,
     "quote_token_symbol": None,
-    "htf": None, # High Timeframe (Maré)
-    "ltf": None, # Low Timeframe (Onda)
+    "timeframe": None,
     "period": None,
     "amount": None,
-    "stop_loss_percent": None,
+    "trailing_stop_percent": None,
     "trade_pair_details": {}
 }
 application = None
@@ -119,11 +119,12 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
             logger.error(f"Falha na transação: {e}"); await send_telegram_message(f"⚠️ Falha na transação on-chain: {e}"); return None
 
 async def execute_buy_order(amount, price):
-    global in_position, entry_price
+    global in_position, entry_price, highest_price_since_entry
     details = parameters["trade_pair_details"]
     logger.info(f"EXECUTANDO ORDEM DE COMPRA REAL de {amount} {details['quote_symbol']} para {details['base_symbol']} ao preço de {price}")
     
     entry_price = price
+    highest_price_since_entry = price # Inicia o trailing stop
 
     tx_sig = await execute_swap(details['quote_address'], details['base_address'], amount, details['quote_decimals'])
     if tx_sig:
@@ -131,10 +132,11 @@ async def execute_buy_order(amount, price):
         await send_telegram_message(f"✅ COMPRA REALIZADA: {amount} {details['quote_symbol']} para {details['base_symbol']}\nhttps://solscan.io/tx/{tx_sig}")
     else:
         entry_price = 0.0
+        highest_price_since_entry = 0.0
         await send_telegram_message(f"❌ FALHA NA COMPRA do token {details['base_symbol']}")
 
 async def execute_sell_order(reason="Venda Manual"):
-    global in_position, entry_price
+    global in_position, entry_price, highest_price_since_entry
     details = parameters["trade_pair_details"]
     logger.info(f"EXECUTANDO ORDEM DE VENDA REAL do token {details['base_symbol']}. Motivo: {reason}")
     try:
@@ -146,10 +148,12 @@ async def execute_sell_order(reason="Venda Manual"):
         token_decimals = token_balance_data.decimals
         amount_to_sell = amount_to_sell_wei / (10**token_decimals)
         if amount_to_sell_wei == 0:
-            logger.warning("Tentativa de venda com saldo zero."); in_position = False; entry_price = 0.0; return
+            logger.warning("Tentativa de venda com saldo zero."); in_position = False; entry_price = 0.0; highest_price_since_entry = 0.0; return
         tx_sig = await execute_swap(details['base_address'], details['quote_address'], amount_to_sell, token_decimals)
         if tx_sig:
-            in_position = False; entry_price = 0.0
+            in_position = False
+            entry_price = 0.0
+            highest_price_since_entry = 0.0
             await send_telegram_message(f"🛑 VENDA REALIZADA: {amount_to_sell:.6f} de {details['base_symbol']}\nMotivo: {reason}\nhttps://solscan.io/tx/{tx_sig}")
         else:
             await send_telegram_message(f"❌ FALHA NA VENDA do token {details['base_symbol']}")
@@ -194,85 +198,60 @@ async def fetch_geckoterminal_ohlcv(pair_address, timeframe):
         return None
 
 async def check_strategy():
-    global in_position, entry_price
+    global in_position, entry_price, highest_price_since_entry
     if not bot_running or not all(p is not None for p in parameters.values() if p != parameters['trade_pair_details']): return
 
     try:
         pair_details = parameters["trade_pair_details"]
-        htf, ltf, period = parameters["htf"], parameters["ltf"], int(parameters["period"])
-        amount, stop_loss_percent = parameters["amount"], parameters["stop_loss_percent"]
+        timeframe, period = parameters["timeframe"], int(parameters["period"])
+        amount, trailing_stop_percent = parameters["amount"], parameters["trailing_stop_percent"]
         
-        # --- FASE 1: ANÁLISE DA "MARÉ" (TIMEFRAME ALTO) ---
-        logger.info(f"Analisando a tendência principal no timeframe de {htf}...")
-        htf_data = await fetch_geckoterminal_ohlcv(pair_details['pair_address'], htf)
+        logger.info(f"Buscando dados de candles para {pair_details['base_symbol']}/{pair_details['quote_symbol']} no GeckoTerminal...")
 
-        if htf_data is None or htf_data.empty or len(htf_data) < period + 2:
-            await send_telegram_message(f"⚠️ Não foi possível obter dados suficientes do GeckoTerminal para a análise de tendência principal ({htf}).")
+        data = await fetch_geckoterminal_ohlcv(pair_details['pair_address'], timeframe)
+
+        if data is None or data.empty:
+            await send_telegram_message(f"⚠️ Não foi possível obter dados de velas do GeckoTerminal.")
             return
 
-        htf_sma_col = f'SMA_{period}'
-        htf_data.ta.sma(length=period, append=True)
-        htf_previous_candle = htf_data.iloc[-3]
-        htf_current_candle = htf_data.iloc[-2]
-        
-        htf_current_close = htf_current_candle['Close']
-        htf_current_sma = htf_current_candle[htf_sma_col]
-        htf_previous_sma = htf_previous_candle[htf_sma_col]
-
-        # --- NOVA LÓGICA DE TENDÊNCIA ADAPTATIVA ---
-        price_above_sma = htf_current_close > htf_current_sma
-        sma_is_rising = htf_current_sma > htf_previous_sma
-        main_trend_is_up = price_above_sma or sma_is_rising
-        
-        trend_reason = f"Preço > Média ({price_above_sma}) OU Média a Subir ({sma_is_rising})"
-        logger.info(f"Tendência Principal ({htf}): {'ALTA' if main_trend_is_up else 'BAIXA'} | {trend_reason}")
-
-        # --- LÓGICA DE SAÍDA BASEADA NA "MARÉ" ---
-        if in_position and not main_trend_is_up:
-            logger.info("A tendência principal virou para BAIXA. Vendendo posição para alinhar com a maré.")
-            await execute_sell_order(reason="Mudança de Tendência Principal para Baixa")
+        if len(data) < period + 2:
+            logger.warning(f"Dados insuficientes do GeckoTerminal ({len(data)} velas).")
+            await send_telegram_message(f"⚠️ Dados insuficientes para a análise do par.")
             return
 
-        # --- FASE 2: ANÁLISE DA "ONDA" (TIMEFRAME BAIXO) ---
-        if not main_trend_is_up:
-            logger.info("A tendência principal é de BAIXA. Nenhuma compra será considerada.")
-            return
-
-        logger.info(f"Buscando sinal de entrada no timeframe de {ltf}...")
-        ltf_data = await fetch_geckoterminal_ohlcv(pair_details['pair_address'], ltf)
-
-        if ltf_data is None or ltf_data.empty or len(ltf_data) < period + 15:
-            await send_telegram_message(f"⚠️ Não foi possível obter dados suficientes do GeckoTerminal para a análise de entrada ({ltf}).")
-            return
-        
         sma_col = f'SMA_{period}'
-        rsi_col = f'RSI_{period}'
-        atr_col = 'ATRr_14'
-        ltf_data.ta.sma(length=period, append=True)
-        ltf_data.ta.rsi(length=period, append=True)
-        ltf_data.ta.atr(length=14, append=True)
+        data.ta.sma(length=period, append=True)
         
-        previous_candle = ltf_data.iloc[-3]
-        current_candle = ltf_data.iloc[-2]
+        previous_candle = data.iloc[-3]
+        current_candle = data.iloc[-2]
         
         current_close, current_sma = current_candle['Close'], current_candle[sma_col]
         previous_close, previous_sma = previous_candle['Close'], previous_candle[sma_col]
-        current_rsi = current_candle[rsi_col]
-        current_atr = current_candle[atr_col]
-        previous_atr = previous_candle[atr_col]
-
-        logger.info(f"Análise de Entrada ({ltf}): Preço {current_close:.8f} | Média {current_sma:.8f} | RSI {current_rsi:.2f} | ATR {current_atr:.8f}")
+        
+        logger.info(f"Análise ({pair_details['base_symbol']}): Preço Atual {current_close:.8f} | Média Atual {current_sma:.8f}")
 
         if in_position:
-            stop_loss_price = entry_price * (1 - stop_loss_percent / 100)
-            logger.info(f"Posição aberta. Preço de entrada: {entry_price:.8f}, Stop-Loss: {stop_loss_price:.8f}")
-            if current_close <= stop_loss_price:
-                await execute_sell_order(reason=f"Stop-Loss atingido em {stop_loss_price:.8f}")
+            # --- LÓGICA DO TRAILING STOP ---
+            highest_price_since_entry = max(highest_price_since_entry, current_close)
+            trailing_stop_price = highest_price_since_entry * (1 - trailing_stop_percent / 100)
+            
+            logger.info(f"Posição aberta. Preço de entrada: {entry_price:.8f}, Preço Máximo: {highest_price_since_entry:.8f}, Trailing Stop: {trailing_stop_price:.8f}")
+            
+            # Condição de Venda 1: Trailing Stop é atingido
+            if current_close <= trailing_stop_price:
+                await execute_sell_order(reason=f"Trailing Stop atingido em {trailing_stop_price:.8f}")
                 return
+            
+            # Condição de Venda 2: Cruzamento da Média Móvel
+            sell_signal = previous_close >= previous_sma and current_close < current_sma
+            if sell_signal:
+                await execute_sell_order(reason="Cruzamento de Média Móvel")
+                return
+
         else: # Só procura por compras se não estiver posicionado
-            buy_signal = previous_close <= previous_sma and current_close > current_sma and current_rsi > 50 and current_atr > previous_atr
+            buy_signal = previous_close <= previous_sma and current_close > current_sma
             if buy_signal:
-                logger.info("Sinal de COMPRA (Onda) com confirmação da Maré detectado.")
+                logger.info("Sinal de COMPRA detectado.")
                 await execute_buy_order(amount, current_close)
 
     except Exception as e:
@@ -286,12 +265,12 @@ async def send_telegram_message(message):
 async def start(update, context):
     await update.effective_message.reply_text(
         'Olá! Sou seu bot de autotrade para a rede Solana.\n'
-        'Estratégia: **MTA Adaptativa**.\n'
+        'Estratégia: **Média Móvel + Trailing Stop**.\n'
         'Fonte de Dados: **GeckoTerminal**.\n'
         'Use o comando `/set` para configurar:\n'
-        '`/set <CONTRATO> <COTAÇÃO> <TF_MARÉ> <TF_ONDA> <PERÍODO> <VALOR> <STOP_%>`\n\n'
+        '`/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <PERÍODO> <VALOR> <TRAILING_STOP_%>`\n\n'
         '**Exemplo (WIF/SOL):**\n'
-        '`/set EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzL7M6fV2zY2g6 SOL 1h 15m 21 0.1 7`\n\n'
+        '`/set EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzL7M6fV2zY2g6 SOL 1h 21 0.1 10`\n\n'
         '**Comandos:**\n'
         '• `/run` - Inicia o bot.\n'
         '• `/stop` - Para o bot.',
@@ -307,15 +286,15 @@ async def set_params(update, context):
         base_token_contract = context.args[0]
         quote_symbol_input = context.args[1].upper()
         
-        htf, ltf, period = context.args[2].lower(), context.args[3].lower(), int(context.args[4])
-        amount, stop_loss_percent = float(context.args[5]), float(context.args[6])
+        timeframe, period = context.args[2].lower(), int(context.args[3])
+        amount, trailing_stop_percent = float(context.args[4]), float(context.args[5])
 
         interval_map = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
-        if ltf not in interval_map or htf not in interval_map:
-            await update.effective_message.reply_text(f"⚠️ Timeframe inválido. Use 1m, 5m, 15m, 1h, 4h, 1d.")
+        if timeframe not in interval_map:
+            await update.effective_message.reply_text(f"⚠️ Timeframe '{timeframe}' não suportado.")
             return
         
-        check_interval_seconds = interval_map[ltf]
+        check_interval_seconds = interval_map[timeframe]
 
         token_search_url = f"https://api.dexscreener.com/latest/dex/tokens/{base_token_contract}"
         async with httpx.AsyncClient() as client:
@@ -345,11 +324,10 @@ async def set_params(update, context):
         parameters = {
             "base_token_symbol": base_token_symbol, 
             "quote_token_symbol": quote_token_symbol,
-            "htf": htf,
-            "ltf": ltf, 
+            "timeframe": timeframe, 
             "period": period,
             "amount": amount,
-            "stop_loss_percent": stop_loss_percent,
+            "trailing_stop_percent": trailing_stop_percent,
             "trade_pair_details": {
                 "base_symbol": base_token_symbol,
                 "quote_symbol": quote_token_symbol,
@@ -363,17 +341,17 @@ async def set_params(update, context):
             f"✅ *Parâmetros definidos com sucesso!*\n\n"
             f"📊 *Fonte de Dados:* `GeckoTerminal`\n"
             f"🪙 *Par de Negociação:* `{base_token_symbol}/{quote_token_symbol}`\n"
-            f"🌊 *Estratégia:* MTA Adaptativa (Maré: `{htf}`, Onda: `{ltf}`)\n"
-            f"📈 *Indicadores:* Média Móvel + RSI (ambos com `{period}` períodos) + ATR(14)\n"
+            f"⏰ *Timeframe:* `{timeframe}`\n"
+            f"📈 *Estratégia:* Média Móvel de `{period}` períodos\n"
             f"💰 *Valor por Ordem:* `{amount}` {quote_symbol_input}\n"
-            f"📉 *Stop-Loss:* `{stop_loss_percent}%`",
+            f"📉 *Trailing Stop:* `{trailing_stop_percent}%`",
             parse_mode='Markdown'
         )
     except (IndexError, ValueError):
         await update.effective_message.reply_text(
             "⚠️ *Erro: Formato incorreto.*\n"
-            "Use: `/set <CONTRATO> <COTAÇÃO> <TF_MARÉ> <TF_ONDA> <PERÍODO> <VALOR> <STOP_%>`\n"
-            "Exemplo: `/set ... SOL 1h 15m 21 0.1 7`",
+            "Use: `/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <PERÍODO> <VALOR> <TRAILING_STOP_%>`\n"
+            "Exemplo: `/set ... SOL 1h 21 0.1 10`",
             parse_mode='Markdown'
         )
     except httpx.HTTPStatusError as e:
@@ -393,7 +371,7 @@ async def run_bot(update, context):
     
     bot_running = True
     logger.info("Bot de trade iniciado.")
-    await update.effective_message.reply_text("🚀 Bot iniciado! Verificando a estratégia MTA Adaptativa via GeckoTerminal...")
+    await update.effective_message.reply_text("🚀 Bot iniciado! Verificando a estratégia de Trailing Stop via GeckoTerminal...")
     
     if periodic_task is None or periodic_task.done():
         periodic_task = asyncio.create_task(periodic_checker())
