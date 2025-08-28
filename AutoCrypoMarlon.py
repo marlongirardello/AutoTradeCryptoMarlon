@@ -69,7 +69,6 @@ parameters = {
     "timeframe": None,
     "amount": None,
     "trailing_stop_percent": None,
-    "min_profit_percent": None, # NOVO PARÂMETRO
     "trade_pair_details": {}
 }
 application = None
@@ -205,7 +204,7 @@ async def check_strategy():
     try:
         pair_details = parameters["trade_pair_details"]
         timeframe = parameters["timeframe"]
-        amount, trailing_stop_percent, min_profit_percent = parameters["amount"], parameters["trailing_stop_percent"], parameters["min_profit_percent"]
+        amount, trailing_stop_percent = parameters["amount"], parameters["trailing_stop_percent"]
         
         logger.info(f"Buscando dados de candles para {pair_details['base_symbol']}/{pair_details['quote_symbol']} no GeckoTerminal...")
 
@@ -230,7 +229,12 @@ async def check_strategy():
         upper_band = current_candle['BBU_20_2.0']
         stoch_k = current_candle['STOCHk_14_3_3']
         
-        logger.info(f"Análise ({pair_details['base_symbol']}): Preço {current_close:.8f} | BB Inf {lower_band:.8f} | BB Sup {upper_band:.8f} | Estocástico {stoch_k:.2f}")
+        # --- LÓGICA DAS ZONAS DE OPORTUNIDADE ---
+        band_width = upper_band - lower_band
+        buy_zone_threshold = lower_band + (0.25 * band_width)
+        sell_zone_threshold = upper_band - (0.25 * band_width)
+        
+        logger.info(f"Análise ({pair_details['base_symbol']}): Preço {current_close:.8f} | Zona Compra < {buy_zone_threshold:.8f} | Zona Venda > {sell_zone_threshold:.8f} | Estocástico {stoch_k:.2f}")
 
         if in_position:
             # --- LÓGICA DE VENDA ---
@@ -243,21 +247,15 @@ async def check_strategy():
                 await execute_sell_order(reason=f"Trailing Stop atingido em {trailing_stop_price:.8f}")
                 return
             
-            # --- NOVA LÓGICA DE VENDA COM FILTRO DE LUCRO ---
-            sell_signal = current_close >= upper_band and stoch_k > 80
+            sell_signal = current_close >= sell_zone_threshold and stoch_k > 70
             if sell_signal:
-                profit_target_price = entry_price * (1 + min_profit_percent / 100)
-                if current_close >= profit_target_price:
-                    logger.info(f"Sinal de venda com lucro mínimo atingido. Preço atual ({current_close:.8f}) >= Meta ({profit_target_price:.8f}).")
-                    await execute_sell_order(reason="Sinal de Reversão com Lucro Mínimo")
-                else:
-                    logger.info(f"Sinal de venda ignorado. Lucro mínimo de {min_profit_percent}% não atingido.")
+                await execute_sell_order(reason="Sinal de Venda na Zona de Oportunidade")
                 return
 
         else: # Só procura por compras se não estiver posicionado
-            buy_signal = current_close <= lower_band and stoch_k < 20
+            buy_signal = current_close <= buy_zone_threshold and stoch_k < 30
             if buy_signal:
-                logger.info("Sinal de COMPRA por Reversão detectado.")
+                logger.info("Sinal de COMPRA na Zona de Oportunidade detectado.")
                 await execute_buy_order(amount, current_close)
 
     except Exception as e:
@@ -271,12 +269,12 @@ async def send_telegram_message(message):
 async def start(update, context):
     await update.effective_message.reply_text(
         'Olá! Sou seu bot de autotrade para a rede Solana.\n'
-        'Estratégia: **Reversão à Média com Filtro de Lucro**.\n'
+        'Estratégia: **Reversão à Média (Zonas de Oportunidade)**.\n'
         'Fonte de Dados: **GeckoTerminal**.\n'
         'Use o comando `/set` para configurar:\n'
-        '`/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <TRAILING_STOP_%> <LUCRO_MIN_%>`\n\n'
+        '`/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <TRAILING_STOP_%>`\n\n'
         '**Exemplo (POPCAT/SOL):**\n'
-        '`/set 7c5f7j... SOL 5m 0.1 7 1.5`\n\n'
+        '`/set 7c5f7j... SOL 5m 0.1 7`\n\n'
         '**Comandos:**\n'
         '• `/run` - Inicia o bot.\n'
         '• `/stop` - Para o bot.',
@@ -293,7 +291,7 @@ async def set_params(update, context):
         quote_symbol_input = context.args[1].upper()
         
         timeframe = context.args[2].lower()
-        amount, trailing_stop_percent, min_profit_percent = float(context.args[3]), float(context.args[4]), float(context.args[5])
+        amount, trailing_stop_percent = float(context.args[3]), float(context.args[4])
 
         interval_map = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
         if timeframe not in interval_map:
@@ -333,7 +331,6 @@ async def set_params(update, context):
             "timeframe": timeframe, 
             "amount": amount,
             "trailing_stop_percent": trailing_stop_percent,
-            "min_profit_percent": min_profit_percent,
             "trade_pair_details": {
                 "base_symbol": base_token_symbol,
                 "quote_symbol": quote_token_symbol,
@@ -348,17 +345,16 @@ async def set_params(update, context):
             f"📊 *Fonte de Dados:* `GeckoTerminal`\n"
             f"🪙 *Par de Negociação:* `{base_token_symbol}/{quote_token_symbol}`\n"
             f"⏰ *Timeframe:* `{timeframe}`\n"
-            f"📈 *Estratégia:* Reversão à Média com Filtro de Lucro\n"
+            f"📈 *Estratégia:* Reversão à Média (Zonas de Oportunidade)\n"
             f"💰 *Valor por Ordem:* `{amount}` {quote_symbol_input}\n"
-            f"📉 *Trailing Stop:* `{trailing_stop_percent}%`\n"
-            f"🎯 *Lucro Mínimo para Venda:* `{min_profit_percent}%`",
+            f"📉 *Trailing Stop:* `{trailing_stop_percent}%`",
             parse_mode='Markdown'
         )
     except (IndexError, ValueError):
         await update.effective_message.reply_text(
             "⚠️ *Erro: Formato incorreto.*\n"
-            "Use: `/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <TRAILING_STOP_%> <LUCRO_MIN_%>`\n"
-            "Exemplo: `/set ... SOL 5m 0.1 7 1.5`",
+            "Use: `/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <TRAILING_STOP_%>`\n"
+            "Exemplo: `/set ... SOL 5m 0.1 7`",
             parse_mode='Markdown'
         )
     except httpx.HTTPStatusError as e:
@@ -378,7 +374,7 @@ async def run_bot(update, context):
     
     bot_running = True
     logger.info("Bot de trade iniciado.")
-    await update.effective_message.reply_text("🚀 Bot iniciado! Verificando a estratégia de Reversão à Média via GeckoTerminal...")
+    await update.effective_message.reply_text("🚀 Bot iniciado! Verificando a estratégia de Zonas de Oportunidade via GeckoTerminal...")
     
     if periodic_task is None or periodic_task.done():
         periodic_task = asyncio.create_task(periodic_checker())
