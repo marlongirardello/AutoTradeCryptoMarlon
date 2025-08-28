@@ -216,19 +216,27 @@ async def check_strategy():
             return
 
         # --- CÁLCULO DO OSCILADOR ESTOCÁSTICO ---
-        stoch = data.ta.stoch(length=period, append=True)
+        stoch_data = data.ta.stoch(length=period)
+        if stoch_data is None or stoch_data.empty:
+            logger.warning("Cálculo do Estocástico não retornou dados.")
+            return
+        data = pd.concat([data, stoch_data], axis=1)
         
         if len(data) < period + 2: # Garante dados suficientes para o indicador
             logger.warning(f"Dados insuficientes do GeckoTerminal ({len(data)} velas).")
             return
 
+        stoch_k_col = f'STOCHk_{period}_3_3'
+        stoch_d_col = f'STOCHd_{period}_3_3'
+
+        if stoch_k_col not in data.columns or stoch_d_col not in data.columns:
+            logger.error(f"As colunas do Estocástico ({stoch_k_col}, {stoch_d_col}) não foram encontradas.")
+            return
+            
         previous_candle = data.iloc[-3]
         current_candle = data.iloc[-2]
         
         current_close = current_candle['Close']
-        stoch_k_col = f'STOCHk_{period}_3_3'
-        stoch_d_col = f'STOCHd_{period}_3_3'
-
         current_stoch_k = current_candle[stoch_k_col]
         current_stoch_d = current_candle[stoch_d_col]
         previous_stoch_k = previous_candle[stoch_k_col]
