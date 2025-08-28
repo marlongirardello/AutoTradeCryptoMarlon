@@ -342,7 +342,7 @@ async def set_params(update, context):
         }
         await update.effective_message.reply_text(
             f"✅ *Parâmetros definidos com sucesso!*\n\n"
-            f"� *Fonte de Dados:* `GeckoTerminal`\n"
+            f"📊 *Fonte de Dados:* `GeckoTerminal`\n"
             f"🪙 *Par de Negociação:* `{base_token_symbol}/{quote_token_symbol}`\n"
             f"⏰ *Timeframe:* `{timeframe}`\n"
             f"📈 *Estratégia:* Cruzamento do Estocástico (14,3,3)\n"
