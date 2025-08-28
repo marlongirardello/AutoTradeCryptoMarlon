@@ -220,17 +220,15 @@ async def check_strategy():
         if stoch_data is None or stoch_data.empty:
             logger.warning("Cálculo do Estocástico não retornou dados.")
             return
+        
+        # Pega os nomes das colunas dinamicamente para evitar erros
+        stoch_k_col = stoch_data.columns[0]
+        stoch_d_col = stoch_data.columns[1]
+
         data = pd.concat([data, stoch_data], axis=1)
         
         if len(data) < period + 2: # Garante dados suficientes para o indicador
             logger.warning(f"Dados insuficientes do GeckoTerminal ({len(data)} velas).")
-            return
-
-        stoch_k_col = f'STOCHk_{period}_3_3'
-        stoch_d_col = f'STOCHd_{period}_3_3'
-
-        if stoch_k_col not in data.columns or stoch_d_col not in data.columns:
-            logger.error(f"As colunas do Estocástico ({stoch_k_col}, {stoch_d_col}) não foram encontradas.")
             return
             
         previous_candle = data.iloc[-3]
@@ -353,7 +351,7 @@ async def set_params(update, context):
         }
         await update.effective_message.reply_text(
             f"✅ *Parâmetros definidos com sucesso!*\n\n"
-            f"📊 *Fonte de Dados:* `GeckoTerminal`\n"
+            f"� *Fonte de Dados:* `GeckoTerminal`\n"
             f"🪙 *Par de Negociação:* `{base_token_symbol}/{quote_token_symbol}`\n"
             f"⏰ *Timeframe:* `{timeframe}`\n"
             f"📈 *Estratégia:* Cruzamento do Estocástico ({period},3,3)\n"
