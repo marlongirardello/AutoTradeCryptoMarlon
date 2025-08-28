@@ -222,19 +222,22 @@ async def check_strategy():
             logger.warning(f"Dados insuficientes do GeckoTerminal ({len(data)} velas).")
             return
 
+        previous_candle = data.iloc[-3]
         current_candle = data.iloc[-2]
         
         current_close = current_candle['Close']
         lower_band = current_candle['BBL_20_2.0']
         upper_band = current_candle['BBU_20_2.0']
-        stoch_k = current_candle['STOCHk_14_3_3']
+        
+        current_stoch_k = current_candle['STOCHk_14_3_3']
+        previous_stoch_k = previous_candle['STOCHk_14_3_3']
         
         # --- LÓGICA DAS ZONAS DE OPORTUNIDADE ---
         band_width = upper_band - lower_band
         buy_zone_threshold = lower_band + (0.25 * band_width)
         sell_zone_threshold = upper_band - (0.25 * band_width)
         
-        logger.info(f"Análise ({pair_details['base_symbol']}): Preço {current_close:.8f} | Zona Compra < {buy_zone_threshold:.8f} | Zona Venda > {sell_zone_threshold:.8f} | Estocástico {stoch_k:.2f}")
+        logger.info(f"Análise ({pair_details['base_symbol']}): Preço {current_close:.8f} | Zona Compra < {buy_zone_threshold:.8f} | Zona Venda > {sell_zone_threshold:.8f} | Estocástico {current_stoch_k:.2f}")
 
         if in_position:
             # --- LÓGICA DE VENDA ---
@@ -247,13 +250,14 @@ async def check_strategy():
                 await execute_sell_order(reason=f"Trailing Stop atingido em {trailing_stop_price:.8f}")
                 return
             
-            sell_signal = current_close >= sell_zone_threshold and stoch_k > 70
+            # --- NOVA LÓGICA DE VENDA COM CONFIRMAÇÃO DE REVERSÃO ---
+            sell_signal = current_close >= sell_zone_threshold and previous_stoch_k > 70 and current_stoch_k < 70
             if sell_signal:
-                await execute_sell_order(reason="Sinal de Venda na Zona de Oportunidade")
+                await execute_sell_order(reason="Sinal de Venda com Confirmação de Reversão")
                 return
 
         else: # Só procura por compras se não estiver posicionado
-            buy_signal = current_close <= buy_zone_threshold and stoch_k < 30
+            buy_signal = current_close <= buy_zone_threshold and current_stoch_k < 30
             if buy_signal:
                 logger.info("Sinal de COMPRA na Zona de Oportunidade detectado.")
                 await execute_buy_order(amount, current_close)
@@ -269,7 +273,7 @@ async def send_telegram_message(message):
 async def start(update, context):
     await update.effective_message.reply_text(
         'Olá! Sou seu bot de autotrade para a rede Solana.\n'
-        'Estratégia: **Reversão à Média (Zonas de Oportunidade)**.\n'
+        'Estratégia: **Reversão à Média com Confirmação**.\n'
         'Fonte de Dados: **GeckoTerminal**.\n'
         'Use o comando `/set` para configurar:\n'
         '`/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <TRAILING_STOP_%>`\n\n'
@@ -342,10 +346,10 @@ async def set_params(update, context):
         }
         await update.effective_message.reply_text(
             f"✅ *Parâmetros definidos com sucesso!*\n\n"
-            f"📊 *Fonte de Dados:* `GeckoTerminal`\n"
+            f"� *Fonte de Dados:* `GeckoTerminal`\n"
             f"🪙 *Par de Negociação:* `{base_token_symbol}/{quote_token_symbol}`\n"
             f"⏰ *Timeframe:* `{timeframe}`\n"
-            f"📈 *Estratégia:* Reversão à Média (Zonas de Oportunidade)\n"
+            f"📈 *Estratégia:* Reversão à Média com Confirmação\n"
             f"💰 *Valor por Ordem:* `{amount}` {quote_symbol_input}\n"
             f"📉 *Trailing Stop:* `{trailing_stop_percent}%`",
             parse_mode='Markdown'
@@ -374,7 +378,7 @@ async def run_bot(update, context):
     
     bot_running = True
     logger.info("Bot de trade iniciado.")
-    await update.effective_message.reply_text("🚀 Bot iniciado! Verificando a estratégia de Zonas de Oportunidade via GeckoTerminal...")
+    await update.effective_message.reply_text("🚀 Bot iniciado! Verificando a estratégia de Reversão com Confirmação via GeckoTerminal...")
     
     if periodic_task is None or periodic_task.done():
         periodic_task = asyncio.create_task(periodic_checker())
