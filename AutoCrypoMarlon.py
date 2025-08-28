@@ -67,6 +67,7 @@ parameters = {
     "base_token_symbol": None,
     "quote_token_symbol": None,
     "timeframe": None,
+    "period": None,
     "amount": None,
     "trailing_stop_percent": None,
     "trade_pair_details": {}
@@ -203,7 +204,7 @@ async def check_strategy():
 
     try:
         pair_details = parameters["trade_pair_details"]
-        timeframe = parameters["timeframe"]
+        timeframe, period = parameters["timeframe"], int(parameters["period"])
         amount, trailing_stop_percent = parameters["amount"], parameters["trailing_stop_percent"]
         
         logger.info(f"Buscando dados de candles para {pair_details['base_symbol']}/{pair_details['quote_symbol']} no GeckoTerminal...")
@@ -214,10 +215,12 @@ async def check_strategy():
             await send_telegram_message(f"⚠️ Não foi possível obter dados de velas do GeckoTerminal.")
             return
 
-        # --- CÁLCULO DO OSCILADOR ESTOCÁSTICO ---
+        # --- CÁLCULO DOS INDICADORES ---
         stoch = data.ta.stoch(length=14, append=True)
+        sma = data.ta.sma(length=period, append=True)
+        atr = data.ta.atr(length=14, append=True)
         
-        if len(data) < 16: # Garante dados suficientes para o indicador
+        if len(data) < 20: # Garante dados suficientes para os indicadores
             logger.warning(f"Dados insuficientes do GeckoTerminal ({len(data)} velas).")
             return
 
@@ -225,12 +228,26 @@ async def check_strategy():
         current_candle = data.iloc[-2]
         
         current_close = current_candle['Close']
+        
+        # Dados do Estocástico
         current_stoch_k = current_candle['STOCHk_14_3_3']
         current_stoch_d = current_candle['STOCHd_14_3_3']
         previous_stoch_k = previous_candle['STOCHk_14_3_3']
         previous_stoch_d = previous_candle['STOCHd_14_3_3']
         
-        logger.info(f"Análise ({pair_details['base_symbol']}): Preço {current_close:.8f} | Estocástico %K: {current_stoch_k:.2f}, %D: {current_stoch_d:.2f}")
+        # Dados da Média Móvel
+        current_sma = current_candle[f'SMA_{period}']
+        previous_close = previous_candle['Close']
+        
+        # Dados do ATR (para o filtro de regime)
+        current_atr = current_candle['ATRr_14']
+        atr_sma = data['ATRr_14'].rolling(window=20).mean().iloc[-2] # Média do ATR para definir o regime
+
+        # --- LÓGICA DO FILTRO DE REGIME ---
+        is_trending_market = current_atr > (atr_sma * 1.5) # Se o ATR atual for 50% maior que a sua média, é um mercado de tendência
+        
+        market_regime = "TENDÊNCIA" if is_trending_market else "REVERSÃO"
+        logger.info(f"Análise ({pair_details['base_symbol']}): Preço {current_close:.8f} | Regime: {market_regime} | ATR: {current_atr:.2f}")
 
         if in_position:
             # --- LÓGICA DE VENDA ---
@@ -243,20 +260,32 @@ async def check_strategy():
                 await execute_sell_order(reason=f"Trailing Stop atingido em {trailing_stop_price:.8f}")
                 return
             
-            # --- NOVA LÓGICA DE VENDA COM CRUZAMENTO DO ESTOCÁSTICO ---
-            sell_setup = current_stoch_k > 75
-            sell_trigger = previous_stoch_k > previous_stoch_d and current_stoch_k < current_stoch_d
-            if sell_setup and sell_trigger:
-                await execute_sell_order(reason="Sinal de Venda por Cruzamento do Estocástico")
-                return
+            # Venda em Modo Reversão (Mercado Lateral)
+            if not is_trending_market:
+                sell_setup = current_stoch_k > 75
+                sell_trigger = previous_stoch_k > previous_stoch_d and current_stoch_k < current_stoch_d
+                if sell_setup and sell_trigger:
+                    await execute_sell_order(reason="Sinal de Venda (Modo Reversão)")
+                    return
+            
+            # Venda em Modo Tendência (só pelo Trailing Stop)
+            # Nenhuma outra regra de venda é necessária, pois queremos "surfar" a onda.
 
         else: # Só procura por compras se não estiver posicionado
-            # --- NOVA LÓGICA DE COMPRA COM CRUZAMENTO DO ESTOCÁSTICO ---
-            buy_setup = current_stoch_k < 25
-            buy_trigger = previous_stoch_k < previous_stoch_d and current_stoch_k > current_stoch_d
-            if buy_setup and buy_trigger:
-                logger.info("Sinal de COMPRA por Cruzamento do Estocástico detectado.")
-                await execute_buy_order(amount, current_close)
+            # Compra em Modo Reversão (Mercado Lateral)
+            if not is_trending_market:
+                buy_setup = current_stoch_k < 25
+                buy_trigger = previous_stoch_k < previous_stoch_d and current_stoch_k > current_stoch_d
+                if buy_setup and buy_trigger:
+                    logger.info("Sinal de COMPRA (Modo Reversão) detectado.")
+                    await execute_buy_order(amount, current_close)
+            
+            # Compra em Modo Tendência
+            else:
+                buy_trigger = previous_close <= current_sma and current_close > current_sma
+                if buy_trigger:
+                    logger.info("Sinal de COMPRA (Modo Tendência) detectado.")
+                    await execute_buy_order(amount, current_close)
 
     except Exception as e:
         logger.error(f"Ocorreu um erro em check_strategy: {e}")
@@ -269,12 +298,12 @@ async def send_telegram_message(message):
 async def start(update, context):
     await update.effective_message.reply_text(
         'Olá! Sou seu bot de autotrade para a rede Solana.\n'
-        'Estratégia: **Cruzamento do Estocástico**.\n'
+        'Estratégia: **Modelo Híbrido (Reversão + Tendência)**.\n'
         'Fonte de Dados: **GeckoTerminal**.\n'
         'Use o comando `/set` para configurar:\n'
-        '`/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <TRAILING_STOP_%>`\n\n'
-        '**Exemplo (POPCAT/SOL):**\n'
-        '`/set 7c5f7j... SOL 5m 0.1 7`\n\n'
+        '`/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <PERÍODO_MA> <VALOR> <TRAILING_STOP_%>`\n\n'
+        '**Exemplo (WIF/SOL):**\n'
+        '`/set EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzL7M6fV2zY2g6 SOL 5m 13 0.1 8`\n\n'
         '**Comandos:**\n'
         '• `/run` - Inicia o bot.\n'
         '• `/stop` - Para o bot.',
@@ -290,8 +319,8 @@ async def set_params(update, context):
         base_token_contract = context.args[0]
         quote_symbol_input = context.args[1].upper()
         
-        timeframe = context.args[2].lower()
-        amount, trailing_stop_percent = float(context.args[3]), float(context.args[4])
+        timeframe, period = context.args[2].lower(), int(context.args[3])
+        amount, trailing_stop_percent = float(context.args[4]), float(context.args[5])
 
         interval_map = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
         if timeframe not in interval_map:
@@ -329,6 +358,7 @@ async def set_params(update, context):
             "base_token_symbol": base_token_symbol, 
             "quote_token_symbol": quote_token_symbol,
             "timeframe": timeframe, 
+            "period": period,
             "amount": amount,
             "trailing_stop_percent": trailing_stop_percent,
             "trade_pair_details": {
@@ -345,7 +375,7 @@ async def set_params(update, context):
             f"📊 *Fonte de Dados:* `GeckoTerminal`\n"
             f"🪙 *Par de Negociação:* `{base_token_symbol}/{quote_token_symbol}`\n"
             f"⏰ *Timeframe:* `{timeframe}`\n"
-            f"📈 *Estratégia:* Cruzamento do Estocástico (14,3,3)\n"
+            f"📈 *Estratégia:* Modelo Híbrido (Reversão + Tendência)\n"
             f"💰 *Valor por Ordem:* `{amount}` {quote_symbol_input}\n"
             f"📉 *Trailing Stop:* `{trailing_stop_percent}%`",
             parse_mode='Markdown'
@@ -353,8 +383,8 @@ async def set_params(update, context):
     except (IndexError, ValueError):
         await update.effective_message.reply_text(
             "⚠️ *Erro: Formato incorreto.*\n"
-            "Use: `/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <TRAILING_STOP_%>`\n"
-            "Exemplo: `/set ... SOL 5m 0.1 7`",
+            "Use: `/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <PERÍODO_MA> <VALOR> <TRAILING_STOP_%>`\n"
+            "Exemplo: `/set ... SOL 5m 13 0.1 8`",
             parse_mode='Markdown'
         )
     except httpx.HTTPStatusError as e:
@@ -374,7 +404,7 @@ async def run_bot(update, context):
     
     bot_running = True
     logger.info("Bot de trade iniciado.")
-    await update.effective_message.reply_text("🚀 Bot iniciado! Verificando a estratégia de Cruzamento do Estocástico via GeckoTerminal...")
+    await update.effective_message.reply_text("🚀 Bot iniciado! Verificando a estratégia Híbrida via GeckoTerminal...")
     
     if periodic_task is None or periodic_task.done():
         periodic_task = asyncio.create_task(periodic_checker())
