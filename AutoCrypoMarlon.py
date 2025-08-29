@@ -216,14 +216,12 @@ async def check_strategy():
         
         logger.info(f"Recebidas {len(data)} velas do GeckoTerminal. Iniciando pré-processamento...")
         
-        # --- PASSO 1: LIMPEZA DE DADOS INVÁLIDOS ---
         data.replace([np.inf, -np.inf], np.nan, inplace=True)
         data.dropna(inplace=True)
         if len(data) < 2:
             logger.warning(f"Dados insuficientes ({len(data)} velas) após limpeza inicial.")
             return
 
-        # --- PASSO 2: REAMOSTRAGEM PARA GARANTIR SEQUÊNCIA DE TEMPO ---
         data.set_index('timestamp', inplace=True)
         
         timeframe_freq_map = {"1m": "1min", "5m": "5min", "15m": "15min", "1h": "1H", "4h": "4H", "1d": "1D"}
@@ -244,31 +242,29 @@ async def check_strategy():
         data = resampled_data.reset_index()
         logger.info(f"Dados reamostrados e limpos. Total de velas para análise: {len(data)}")
 
-        # --- PASSO 3: VERIFICAÇÃO FINAL E CÁLCULO DE INDICADORES ---
         if len(data) < 22:
             logger.warning(f"Dados insuficientes após reamostragem ({len(data)} velas).")
             return
         
         # --- LÓGICA DE CÁLCULO REORDENADA ---
-        # 1. Calcule os indicadores que retornam DataFrames primeiro, usando o DF limpo.
         rvi_data = data.ta.rvi()
         if rvi_data is None or rvi_data.empty:
             logger.error("ERRO CRÍTICO: Cálculo do RVI falhou mesmo com dados perfeitos.")
             logger.info(f"Últimos 5 dados enviados para o indicador:\n{data.tail(5)}")
             return
 
-        # 2. Calcule outros indicadores que retornam Series.
         data['volume_sma'] = data['volume'].rolling(window=20).mean()
-
-        # 3. Junte os DataFrames dos indicadores.
         data = pd.concat([data, rvi_data], axis=1)
-
-        # 4. AGORA, faça a limpeza final de TODOS os NaNs gerados pelos indicadores.
         data.dropna(inplace=True)
+
         if data.empty:
             logger.warning("Não há dados suficientes após o período de aquecimento dos indicadores.")
             return
-        # --- FIM DA LÓGICA REORDENADA ---
+        
+        # Pega os nomes das colunas pela posição (0 para RVI, 1 para Sinal), que é mais seguro.
+        rvi_col_name = rvi_data.columns[0]
+        rvi_signal_col_name = rvi_data.columns[1]
+        logger.info(f"Colunas do indicador RVI identificadas como: '{rvi_col_name}' e '{rvi_signal_col_name}'")
 
         current_candle = data.iloc[-2]
         previous_candle = data.iloc[-3]
@@ -277,14 +273,10 @@ async def check_strategy():
         current_volume = current_candle['volume']
         current_volume_sma = current_candle['volume_sma']
         
-        # Nomes das colunas do RVI podem variar, pegue dinamicamente
-        rvi_col = [col for col in data.columns if 'RVI' in col][0]
-        rvi_signal_col = [col for col in data.columns if 'RVIS' in col][0]
-
-        current_rvi = current_candle[rvi_col]
-        current_rvi_signal = current_candle[rvi_signal_col]
-        previous_rvi = previous_candle[rvi_col]
-        previous_rvi_signal = previous_candle[rvi_signal_col]
+        current_rvi = current_candle[rvi_col_name]
+        current_rvi_signal = current_candle[rvi_signal_col_name]
+        previous_rvi = previous_candle[rvi_col_name]
+        previous_rvi_signal = previous_candle[rvi_signal_col_name]
         
         logger.info(f"Análise ({pair_details['base_symbol']}): Preço {current_close:.8f} | Volume {current_volume:.2f} | Média Vol {current_volume_sma:.2f} | RVI {current_rvi:.2f}")
 
