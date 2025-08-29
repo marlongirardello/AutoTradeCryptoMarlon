@@ -1,6 +1,6 @@
 python-telegram-bot
 pandas
-pandas_ta
+pandas-ta==0.3.14b0
 httpx
 python-dotenv
 solders==0.18.0
