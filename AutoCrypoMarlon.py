@@ -246,26 +246,32 @@ async def check_strategy():
             logger.warning(f"Dados insuficientes após reamostragem ({len(data)} velas).")
             return
         
-        # --- LÓGICA DE CÁLCULO REORDENADA ---
-        # Assume-se que com a versão correta da pandas-ta, rvi() retornará um DataFrame.
-        # Se isto falhar com `AttributeError`, a biblioteca ainda está retornando uma Series.
         rvi_data = data.ta.rvi()
+
         if rvi_data is None or rvi_data.empty:
             logger.error("ERRO: Cálculo do RVI retornou um valor nulo ou vazio.")
             return
 
+        # --- LÓGICA À PROVA DE FALHAS ---
+        if isinstance(rvi_data, pd.DataFrame):
+            logger.info("Cálculo do RVI retornou um DataFrame (RVI + Sinal).")
+            rvi_col_name = rvi_data.columns[0]
+            rvi_signal_col_name = rvi_data.columns[1]
+            data = pd.concat([data, rvi_data], axis=1)
+        else: # O resultado é uma Series
+            logger.warning("RVI retornou uma Série. Calculando a linha de Sinal manualmente (SMA de 4 períodos).")
+            rvi_col_name = rvi_data.name if rvi_data.name else 'RVI_14_4'
+            rvi_signal_col_name = f"{rvi_col_name}_Signal"
+            
+            data[rvi_col_name] = rvi_data
+            data[rvi_signal_col_name] = ta.sma(rvi_data, length=4)
+
         data['volume_sma'] = data['volume'].rolling(window=20).mean()
-        data = pd.concat([data, rvi_data], axis=1)
         data.dropna(inplace=True)
 
         if data.empty:
             logger.warning("Não há dados suficientes após o período de aquecimento dos indicadores.")
             return
-        
-        # Pega os nomes das colunas pela posição (0 para RVI, 1 para Sinal), que é mais seguro.
-        rvi_col_name = rvi_data.columns[0]
-        rvi_signal_col_name = rvi_data.columns[1]
-        logger.info(f"Colunas do indicador RVI identificadas como: '{rvi_col_name}' e '{rvi_signal_col_name}'")
 
         current_candle = data.iloc[-2]
         previous_candle = data.iloc[-3]
@@ -279,7 +285,7 @@ async def check_strategy():
         previous_rvi = previous_candle[rvi_col_name]
         previous_rvi_signal = previous_candle[rvi_signal_col_name]
         
-        logger.info(f"Análise ({pair_details['base_symbol']}): Preço {current_close:.8f} | Volume {current_volume:.2f} | Média Vol {current_volume_sma:.2f} | RVI {current_rvi:.2f}")
+        logger.info(f"Análise ({pair_details['base_symbol']}): Preço {current_close:.8f} | Volume {current_volume:.2f} | Média Vol {current_volume_sma:.2f} | RVI {current_rvi:.2f} | Sinal {current_rvi_signal:.2f}")
 
         if in_position:
             take_profit_price = entry_price * (1 + take_profit_percent / 100)
