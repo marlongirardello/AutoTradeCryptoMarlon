@@ -184,8 +184,6 @@ async def fetch_geckoterminal_ohlcv(pair_address, timeframe):
                 for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
                     df[col] = pd.to_numeric(df[col])
                 
-                # --- CORREÇÃO APLICADA AQUI ---
-                # Converte os nomes das colunas para minúsculas para compatibilidade com pandas_ta
                 df.columns = [col.lower() for col in df.columns]
 
                 return df.sort_values(by='timestamp').reset_index(drop=True)
@@ -199,6 +197,7 @@ async def fetch_geckoterminal_ohlcv(pair_address, timeframe):
         logger.error(f"Erro inesperado ao processar dados do GeckoTerminal: {e}")
         return None
 
+# --- FUNÇÃO DE ESTRATÉGIA COM LÓGICA CORRIGIDA ---
 async def check_strategy():
     global in_position, entry_price
     if not bot_running or not all(p is not None for p in parameters.values() if p != parameters['trade_pair_details']): return
@@ -215,25 +214,29 @@ async def check_strategy():
         if data is None or data.empty:
             await send_telegram_message(f"⚠️ Não foi possível obter dados de velas do GeckoTerminal.")
             return
-
-        # --- CÁLCULO DOS INDICADORES ---
-        data['volume_sma'] = data['volume'].rolling(window=20).mean()
         
-        # CORREÇÃO DEFINITIVA: Calcula o RVI e verifica o resultado antes de usar
-        rvi_data = data.ta.rvi()
-        if rvi_data is None or not isinstance(rvi_data, pd.DataFrame) or rvi_data.empty:
-            logger.warning("Cálculo do RVI não retornou dados válidos.")
+        # --- LÓGICA CORRIGIDA ---
+        # 1. Adiciona um log para sabermos quantas velas vieram.
+        logger.info(f"Recebidas {len(data)} velas do GeckoTerminal.")
+
+        # 2. VERIFICA A QUANTIDADE DE DADOS ANTES DE CALCULAR INDICADORES.
+        #    O RVI e a SMA de 20 precisam de pelo menos 21-22 períodos.
+        if len(data) < 22:
+            logger.warning(f"Dados insuficientes para calcular indicadores ({len(data)} velas). Aguardando próximo ciclo.")
             return
 
-        # Pega os nomes das colunas dinamicamente para evitar erros
+        # --- CÁLCULO DOS INDICADORES (AGORA SEGURO) ---
+        data['volume_sma'] = data['volume'].rolling(window=20).mean()
+        
+        rvi_data = data.ta.rvi()
+        if rvi_data is None or not isinstance(rvi_data, pd.DataFrame) or rvi_data.empty:
+            logger.warning("Cálculo do RVI não retornou dados válidos, mesmo com dados suficientes.")
+            return
+
         rvi_col = rvi_data.columns[0]
         rvi_signal_col = rvi_data.columns[1]
         
         data = pd.concat([data, rvi_data], axis=1)
-        
-        if len(data) < 22:
-            logger.warning(f"Dados insuficientes do GeckoTerminal ({len(data)} velas).")
-            return
 
         current_candle = data.iloc[-2]
         previous_candle = data.iloc[-3]
