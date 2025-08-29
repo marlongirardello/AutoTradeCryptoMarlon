@@ -214,7 +214,7 @@ async def check_strategy():
         # --- CÁLCULO DOS INDICADORES ---
         data['volume_sma'] = data['Volume'].rolling(window=20).mean()
         
-        # CORREÇÃO ROBUSTA: Calcula o RVI e verifica o resultado antes de usar
+        # CORREÇÃO DEFINITIVA: Calcula o RVI e verifica o resultado antes de usar
         rvi_data = data.ta.rvi()
         if rvi_data is None or not isinstance(rvi_data, pd.DataFrame) or rvi_data.empty:
             logger.warning("Cálculo do RVI não retornou dados válidos.")
