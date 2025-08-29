@@ -247,7 +247,13 @@ async def check_strategy():
         resistance = parameters["resistance_level"]
         stop_loss_percent = parameters["stop_loss_percent"]
 
-        logger.info(f"Análise ({pair_details['base_symbol']}): Preço {current_close:.8f} | RSI {current_rsi:.2f} | Suporte {support:.8f} | Resistência {resistance:.8f}")
+        logger.info(
+            f"Análise ({pair_details['base_symbol']}): "
+            f"Preço {current_close:.8f} | "
+            f"Vol {current_volume:.2f} | Média Vol {current_volume_sma:.2f} | "
+            f"RSI {current_rsi:.2f} | "
+            f"Suporte {support:.8f} | Resistência {resistance:.8f}"
+        )
 
         if in_position:
             # O take profit é a resistência
@@ -263,16 +269,22 @@ async def check_strategy():
                 await execute_sell_order(reason=f"Stop Loss atingido em {stop_loss_price:.8f}")
 
         else: # Não está em posição, procurar por entrada
-            # Condições de Compra
-            # 1. Preço está próximo ao suporte (ex: dentro de 1.5% acima do suporte)
-            price_near_support = support <= current_close <= (support * 1.015)
+            # --- ALTERAÇÃO AQUI: Lógica da "Zona de Compra" ---
+            # Define os limites da zona de compra
+            buy_zone_upper_bound = support * 1.015  # 1.5% acima do suporte
+            buy_zone_lower_bound = support * 0.995  # 0.5% abaixo do suporte (mais agressivo)
+
+            # 1. Preço está dentro da zona de compra
+            price_in_buy_zone = buy_zone_lower_bound <= current_close <= buy_zone_upper_bound
+            
             # 2. RSI está em território de sobrevenda
             rsi_oversold = current_rsi < 35 # Usar 35 para ser um pouco menos restritivo que 30
-            # 3. (Opcional, mas bom) Confirmação de volume
+            
+            # 3. Confirmação de volume
             volume_confirmation = current_volume > current_volume_sma # Pelo menos acima da média
 
-            if price_near_support and rsi_oversold and volume_confirmation:
-                logger.info(f"Sinal de COMPRA (Range Trading): Preço perto do suporte ({current_close:.8f}), RSI em sobrevenda ({current_rsi:.2f}) e volume confirmado.")
+            if price_in_buy_zone and rsi_oversold and volume_confirmation:
+                logger.info(f"Sinal de COMPRA (Range Trading): Preço na zona de compra ({current_close:.8f}), RSI em sobrevenda ({current_rsi:.2f}) e volume confirmado.")
                 await execute_buy_order(amount, current_close)
 
     except Exception as e:
@@ -291,8 +303,8 @@ async def start(update, context):
         'Fonte de Dados: **GeckoTerminal**.\n\n'
         'Use o comando `/set` para configurar:\n'
         '`/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <SUPORTE> <RESISTENCIA> <STOP_LOSS_%>`\n\n'
-        '**Exemplo (PENGU/SOL - Range Atualizado):**\n'
-        '`/set 67dmC6iG5sAh4xQdEe4A2t4gYg3sM24g1vQdY8fJzK4g SOL 5m 0.1 0.0295 0.0315 2`\n\n'
+        '**Exemplo (PENGU/SOL - Range de Curto Prazo):**\n'
+        '`/set 67dmC6iG5sAh4xQdEe4A2t4gYg3sM24g1vQdY8fJzK4g SOL 1m 0.1 0.0292 0.0298 1.5`\n\n'
         '**O que os parâmetros significam:**\n'
         '- **CONTRATO:** Endereço do token base (ex: PENGU).\n'
         '- **COTAÇÃO:** Moeda de cotação (ex: SOL).\n'
@@ -300,7 +312,7 @@ async def start(update, context):
         '- **VALOR:** Quantidade a comprar (em SOL).\n'
         '- **SUPORTE:** Preço do nível de suporte.\n'
         '- **RESISTENCIA:** Preço do nível de resistência (será o take-profit).\n'
-        '- **STOP_LOSS_%:** Percentual abaixo do suporte para o stop loss (ex: `2` para 2%).\n\n'
+        '- **STOP_LOSS_%:** Percentual abaixo do suporte para o stop loss (ex: `1.5` para 1.5%).\n\n'
         '**Comandos:**\n'
         '• `/run` - Inicia o bot.\n'
         '• `/stop` - Para o bot.',
@@ -387,7 +399,7 @@ async def set_params(update, context):
         await update.effective_message.reply_text(
             "⚠️ *Erro: Formato incorreto.*\n"
             "Use: `/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <SUPORTE> <RESISTENCIA> <STOP_LOSS_%>`\n"
-            "Exemplo: `/set ... SOL 5m 0.1 0.0295 0.0315 2`",
+            "Exemplo: `/set ... SOL 1m 0.1 0.0292 0.0298 1.5`",
             parse_mode='Markdown'
         )
     except httpx.HTTPStatusError as e:
