@@ -183,6 +183,11 @@ async def fetch_geckoterminal_ohlcv(pair_address, timeframe):
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
                 for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
                     df[col] = pd.to_numeric(df[col])
+                
+                # --- CORREÇÃO APLICADA AQUI ---
+                # Converte os nomes das colunas para minúsculas para compatibilidade com pandas_ta
+                df.columns = [col.lower() for col in df.columns]
+
                 return df.sort_values(by='timestamp').reset_index(drop=True)
             else:
                 logger.warning(f"GeckoTerminal não retornou dados de velas. Resposta: {api_data}")
@@ -212,7 +217,7 @@ async def check_strategy():
             return
 
         # --- CÁLCULO DOS INDICADORES ---
-        data['volume_sma'] = data['Volume'].rolling(window=20).mean()
+        data['volume_sma'] = data['volume'].rolling(window=20).mean()
         
         # CORREÇÃO DEFINITIVA: Calcula o RVI e verifica o resultado antes de usar
         rvi_data = data.ta.rvi()
@@ -233,8 +238,8 @@ async def check_strategy():
         current_candle = data.iloc[-2]
         previous_candle = data.iloc[-3]
         
-        current_close = current_candle['Close']
-        current_volume = current_candle['Volume']
+        current_close = current_candle['close']
+        current_volume = current_candle['volume']
         current_volume_sma = current_candle['volume_sma']
         
         current_rvi = current_candle[rvi_col]
