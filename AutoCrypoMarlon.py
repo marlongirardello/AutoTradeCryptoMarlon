@@ -9,7 +9,7 @@ from base64 import b64decode
 import pandas as pd
 import pandas_ta as ta
 import httpx # Biblioteca para requisições assíncronas
-import numpy as np # Importado para lidar com valores infinitos
+import numpy as np # Importado para lidar com valores inválidos
 
 # --- Libs da Solana ---
 from solders.pubkey import Pubkey
@@ -218,40 +218,29 @@ async def check_strategy():
         
         # --- PASSO 1: LIMPEZA DE DADOS INVÁLIDOS ---
         data.replace([np.inf, -np.inf], np.nan, inplace=True)
-        data.dropna(inplace=True) # Remove linhas com NaN antes de reamostrar
-        if len(data) < 2: # Precisa de pelo menos 2 pontos para reamostrar
+        data.dropna(inplace=True)
+        if len(data) < 2:
             logger.warning(f"Dados insuficientes ({len(data)} velas) após limpeza inicial.")
             return
 
         # --- PASSO 2: REAMOSTRAGEM PARA GARANTIR SEQUÊNCIA DE TEMPO ---
         data.set_index('timestamp', inplace=True)
         
-        # Mapeia o timeframe do bot para a frequência do pandas ('1m' -> '1T')
-        timeframe_freq_map = {"1m": "1T", "5m": "5T", "15m": "15T", "1h": "1H", "4h": "4H", "1d": "1D"}
+        timeframe_freq_map = {"1m": "1min", "5m": "5min", "15m": "15min", "1h": "1H", "4h": "4H", "1d": "1D"}
         freq = timeframe_freq_map.get(timeframe)
         if not freq:
             logger.error(f"Frequência de reamostragem inválida para o timeframe: {timeframe}")
             return
         
-        # Reamostra os dados para a frequência correta, criando uma série contínua
         resampled_data = data.resample(freq).agg({
-            'open': 'first',
-            'high': 'max',
-            'low': 'min',
-            'close': 'last',
-            'volume': 'sum'
+            'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
         })
         
-        # Preenche os buracos criados pela reamostragem
-        # Preços são preenchidos com o último valor conhecido
         price_cols = ['open', 'high', 'low', 'close']
         resampled_data[price_cols] = resampled_data[price_cols].ffill()
-        # Volume nos buracos é 0, pois não houve negociação
-        resampled_data['volume'].fillna(0, inplace=True)
+        resampled_data['volume'] = resampled_data['volume'].fillna(0)
         
-        # Remove quaisquer NaNs restantes (caso o primeiro ponto da série fosse nulo)
         resampled_data.dropna(inplace=True)
-        
         data = resampled_data.reset_index()
         logger.info(f"Dados reamostrados e limpos. Total de velas para análise: {len(data)}")
 
@@ -260,28 +249,26 @@ async def check_strategy():
             logger.warning(f"Dados insuficientes após reamostragem ({len(data)} velas).")
             return
         
-        data['volume_sma'] = data['volume'].rolling(window=20).mean()
-        
+        # --- LÓGICA DE CÁLCULO REORDENADA ---
+        # 1. Calcule os indicadores que retornam DataFrames primeiro, usando o DF limpo.
         rvi_data = data.ta.rvi()
-        if rvi_data is None or not isinstance(rvi_data, pd.DataFrame) or rvi_data.empty:
-            logger.error("ERRO CRÍTICO: Cálculo do RVI falhou mesmo após reamostragem.")
+        if rvi_data is None or rvi_data.empty:
+            logger.error("ERRO CRÍTICO: Cálculo do RVI falhou mesmo com dados perfeitos.")
             logger.info(f"Últimos 5 dados enviados para o indicador:\n{data.tail(5)}")
             return
 
-        rvi_col = rvi_data.columns[0]
-        rvi_signal_col = rvi_data.columns[1]
-        
-        data = pd.concat([data, rvi_data], axis=1)
-        
-        if data['volume_sma'].isnull().all():
-             logger.warning("Coluna 'volume_sma' não pôde ser calculada ou está vazia.")
-             return
+        # 2. Calcule outros indicadores que retornam Series.
+        data['volume_sma'] = data['volume'].rolling(window=20).mean()
 
-        # Remove as linhas iniciais que terão NaN por causa do período dos indicadores
+        # 3. Junte os DataFrames dos indicadores.
+        data = pd.concat([data, rvi_data], axis=1)
+
+        # 4. AGORA, faça a limpeza final de TODOS os NaNs gerados pelos indicadores.
         data.dropna(inplace=True)
         if data.empty:
-            logger.warning("Não há dados suficientes após cálculo dos indicadores.")
+            logger.warning("Não há dados suficientes após o período de aquecimento dos indicadores.")
             return
+        # --- FIM DA LÓGICA REORDENADA ---
 
         current_candle = data.iloc[-2]
         previous_candle = data.iloc[-3]
@@ -290,6 +277,10 @@ async def check_strategy():
         current_volume = current_candle['volume']
         current_volume_sma = current_candle['volume_sma']
         
+        # Nomes das colunas do RVI podem variar, pegue dinamicamente
+        rvi_col = [col for col in data.columns if 'RVI' in col][0]
+        rvi_signal_col = [col for col in data.columns if 'RVIS' in col][0]
+
         current_rvi = current_candle[rvi_col]
         current_rvi_signal = current_candle[rvi_signal_col]
         previous_rvi = previous_candle[rvi_col]
@@ -305,11 +296,8 @@ async def check_strategy():
             
             if current_close >= take_profit_price:
                 await execute_sell_order(reason=f"Take Profit atingido em {take_profit_price:.8f}")
-                return
-            
-            if current_close <= stop_loss_price:
+            elif current_close <= stop_loss_price:
                 await execute_sell_order(reason=f"Stop Loss atingido em {stop_loss_price:.8f}")
-                return
 
         else:
             volume_spike = current_volume > (current_volume_sma * 2.5)
