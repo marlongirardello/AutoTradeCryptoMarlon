@@ -66,9 +66,9 @@ parameters = {
     "base_token_symbol": None,
     "quote_token_symbol": None,
     "timeframe": None,
-    "period": None,
     "amount": None,
-    "trailing_stop_percent": None,
+    "take_profit_percent": None,
+    "stop_loss_percent": None,
     "trade_pair_details": {}
 }
 application = None
@@ -200,7 +200,7 @@ async def check_strategy():
 
     try:
         pair_details = parameters["trade_pair_details"]
-        timeframe, period = parameters["timeframe"], int(parameters["period"])
+        timeframe = parameters["timeframe"]
         amount, take_profit_percent, stop_loss_percent = parameters["amount"], parameters["take_profit_percent"], parameters["stop_loss_percent"]
         
         logger.info(f"Buscando dados de candles para {pair_details['base_symbol']}/{pair_details['quote_symbol']} no GeckoTerminal...")
@@ -214,7 +214,6 @@ async def check_strategy():
         # --- CÁLCULO DOS INDICADORES ---
         data['volume_sma'] = data['Volume'].rolling(window=20).mean()
         
-        # CORREÇÃO: Calcula o RVI separadamente para obter os nomes das colunas de forma robusta
         rvi_data = data.ta.rvi()
         if rvi_data is None or rvi_data.empty:
             logger.warning("Cálculo do RVI não retornou dados.")
