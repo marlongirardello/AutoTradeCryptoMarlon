@@ -30,7 +30,7 @@ PRIVATE_KEY_B58 = os.getenv("PRIVATE_KEY_BASE58")
 RPC_URL = os.getenv("RPC_URL")
 
 # --- Validação de Configurações ---
-if not all([TELEGRAM_TOKEN, CHAT_ID, PRIVATE_KEY_B58, RPC_URL]):
+if not all():
     print("Erro: Verifique se todas as variáveis de ambiente estão definidas:")
     print("TELEGRAM_TOKEN, CHAT_ID, PRIVATE_KEY_BASE58, RPC_URL")
     exit()
@@ -41,9 +41,7 @@ for handler in logging.root.handlers[:]:
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler()
-    ]
+    handlers=
 )
 logger = logging.getLogger(__name__)
 
@@ -68,8 +66,9 @@ parameters = {
     "quote_token_symbol": None,
     "timeframe": None,
     "amount": None,
-    "take_profit_percent": None,
-    "stop_loss_percent": None,
+    "support_level": None,      # NOVO: Nível de suporte
+    "resistance_level": None,   # NOVO: Nível de resistência
+    "stop_loss_percent": None,  # % abaixo do suporte para o stop
     "trade_pair_details": {}
 }
 application = None
@@ -199,15 +198,16 @@ async def fetch_geckoterminal_ohlcv(pair_address, timeframe):
 
 async def check_strategy():
     global in_position, entry_price
-    if not bot_running or not all(p is not None for p in parameters.values() if p != parameters['trade_pair_details']): return
+    # Verifica se todos os parâmetros necessários foram definidos
+    required_params = ["base_token_symbol", "quote_token_symbol", "timeframe", "amount", "support_level", "resistance_level", "stop_loss_percent"]
+    if not bot_running or not all(parameters.get(p) is not None for p in required_params): return
 
     try:
         pair_details = parameters["trade_pair_details"]
         timeframe = parameters["timeframe"]
-        amount, take_profit_percent, stop_loss_percent = parameters["amount"], parameters["take_profit_percent"], parameters["stop_loss_percent"]
+        amount = parameters["amount"]
         
         logger.info(f"Buscando dados de candles para {pair_details['base_symbol']}/{pair_details['quote_symbol']} no GeckoTerminal...")
-
         data = await fetch_geckoterminal_ohlcv(pair_details['pair_address'], timeframe)
 
         if data is None or data.empty:
@@ -216,94 +216,61 @@ async def check_strategy():
         
         logger.info(f"Recebidas {len(data)} velas do GeckoTerminal. Iniciando pré-processamento...")
         
+        # Limpeza de dados
         data.replace([np.inf, -np.inf], np.nan, inplace=True)
         data.dropna(inplace=True)
         if len(data) < 2:
             logger.warning(f"Dados insuficientes ({len(data)} velas) após limpeza inicial.")
             return
 
-        data.set_index('timestamp', inplace=True)
-        
-        timeframe_freq_map = {"1m": "1min", "5m": "5min", "15m": "15min", "1h": "1H", "4h": "4H", "1d": "1D"}
-        freq = timeframe_freq_map.get(timeframe)
-        if not freq:
-            logger.error(f"Frequência de reamostragem inválida para o timeframe: {timeframe}")
-            return
-        
-        resampled_data = data.resample(freq).agg({
-            'open': 'first', 'high': 'max', 'low': 'min', 'close': 'last', 'volume': 'sum'
-        })
-        
-        price_cols = ['open', 'high', 'low', 'close']
-        resampled_data[price_cols] = resampled_data[price_cols].ffill()
-        resampled_data['volume'] = resampled_data['volume'].fillna(0)
-        
-        resampled_data.dropna(inplace=True)
-        data = resampled_data.reset_index()
-        logger.info(f"Dados reamostrados e limpos. Total de velas para análise: {len(data)}")
-
-        if len(data) < 22:
-            logger.warning(f"Dados insuficientes após reamostragem ({len(data)} velas).")
-            return
-        
-        rvi_data = data.ta.rvi()
-
-        if rvi_data is None or rvi_data.empty:
-            logger.error("ERRO: Cálculo do RVI retornou um valor nulo ou vazio.")
-            return
-
-        # --- LÓGICA À PROVA DE FALHAS ---
-        if isinstance(rvi_data, pd.DataFrame):
-            logger.info("Cálculo do RVI retornou um DataFrame (RVI + Sinal).")
-            rvi_col_name = rvi_data.columns[0]
-            rvi_signal_col_name = rvi_data.columns[1]
-            data = pd.concat([data, rvi_data], axis=1)
-        else: # O resultado é uma Series
-            logger.warning("RVI retornou uma Série. Calculando a linha de Sinal manualmente (SMA de 4 períodos).")
-            rvi_col_name = rvi_data.name if rvi_data.name else 'RVI_14_4'
-            rvi_signal_col_name = f"{rvi_col_name}_Signal"
-            
-            data[rvi_col_name] = rvi_data
-            data[rvi_signal_col_name] = ta.sma(rvi_data, length=4)
-
+        # --- CÁLCULO DOS INDICADORES PARA RANGE TRADING ---
+        data.ta.rsi(length=14, append=True) # Adiciona a coluna 'RSI_14'
         data['volume_sma'] = data['volume'].rolling(window=20).mean()
         data.dropna(inplace=True)
 
-        if data.empty:
+        if data.empty or len(data) < 3:
             logger.warning("Não há dados suficientes após o período de aquecimento dos indicadores.")
             return
 
-        current_candle = data.iloc[-2]
-        previous_candle = data.iloc[-3]
+        current_candle = data.iloc[-2] # Usamos a penúltima vela (a última pode não estar fechada)
         
+        # --- EXTRAÇÃO DE VALORES ATUAIS ---
         current_close = current_candle['close']
         current_volume = current_candle['volume']
         current_volume_sma = current_candle['volume_sma']
+        current_rsi = current_candle
         
-        current_rvi = current_candle[rvi_col_name]
-        current_rvi_signal = current_candle[rvi_signal_col_name]
-        previous_rvi = previous_candle[rvi_col_name]
-        previous_rvi_signal = previous_candle[rvi_signal_col_name]
-        
-        logger.info(f"Análise ({pair_details['base_symbol']}): Preço {current_close:.8f} | Volume {current_volume:.2f} | Média Vol {current_volume_sma:.2f} | RVI {current_rvi:.2f} | Sinal {current_rvi_signal:.2f}")
+        # --- LÓGICA DE RANGE TRADING ---
+        support = parameters["support_level"]
+        resistance = parameters["resistance_level"]
+        stop_loss_percent = parameters["stop_loss_percent"]
+
+        logger.info(f"Análise ({pair_details['base_symbol']}): Preço {current_close:.8f} | RSI {current_rsi:.2f} | Suporte {support:.8f} | Resistência {resistance:.8f}")
 
         if in_position:
-            take_profit_price = entry_price * (1 + take_profit_percent / 100)
-            stop_loss_price = entry_price * (1 - stop_loss_percent / 100)
-            
+            # O take profit é a resistência
+            take_profit_price = resistance
+            # O stop loss é calculado com base no nível de suporte, não no preço de entrada
+            stop_loss_price = support * (1 - stop_loss_percent / 100)
+
             logger.info(f"Posição aberta. Entrada: {entry_price:.8f}, Take Profit: {take_profit_price:.8f}, Stop Loss: {stop_loss_price:.8f}")
-            
+
             if current_close >= take_profit_price:
-                await execute_sell_order(reason=f"Take Profit atingido em {take_profit_price:.8f}")
+                await execute_sell_order(reason=f"Take Profit (Resistência) atingido em {take_profit_price:.8f}")
             elif current_close <= stop_loss_price:
                 await execute_sell_order(reason=f"Stop Loss atingido em {stop_loss_price:.8f}")
 
-        else:
-            volume_spike = current_volume > (current_volume_sma * 2.5)
-            rvi_crossover = previous_rvi < previous_rvi_signal and current_rvi > current_rvi_signal
-            
-            if volume_spike and rvi_crossover:
-                logger.info("Sinal de COMPRA (Pico de Volume + Cruzamento RVI) detectado.")
+        else: # Não está em posição, procurar por entrada
+            # Condições de Compra
+            # 1. Preço está próximo ao suporte (ex: dentro de 1.5% acima do suporte)
+            price_near_support = support <= current_close <= (support * 1.015)
+            # 2. RSI está em território de sobrevenda
+            rsi_oversold = current_rsi < 35 # Usar 35 para ser um pouco menos restritivo que 30
+            # 3. (Opcional, mas bom) Confirmação de volume
+            volume_confirmation = current_volume > current_volume_sma # Pelo menos acima da média
+
+            if price_near_support and rsi_oversold and volume_confirmation:
+                logger.info(f"Sinal de COMPRA (Range Trading): Preço perto do suporte ({current_close:.8f}), RSI em sobrevenda ({current_rsi:.2f}) e volume confirmado.")
                 await execute_buy_order(amount, current_close)
 
     except Exception as e:
@@ -318,12 +285,20 @@ async def send_telegram_message(message):
 async def start(update, context):
     await update.effective_message.reply_text(
         'Olá! Sou seu bot de autotrade para a rede Solana.\n'
-        'Estratégia: **Scalping de Momentum Ponderado por Volume**.\n'
-        'Fonte de Dados: **GeckoTerminal**.\n'
+        'Estratégia: **Range Trading com Confirmação de RSI**.\n'
+        'Fonte de Dados: **GeckoTerminal**.\n\n'
         'Use o comando `/set` para configurar:\n'
-        '`/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <TAKE_PROFIT_%> <STOP_LOSS_%>`\n\n'
-        '**Exemplo (WIF/SOL):**\n'
-        '`/set EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzL7M6fV2zY2g6 SOL 1m 0.1 2 1`\n\n'
+        '`/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <SUPORTE> <RESISTENCIA> <STOP_LOSS_%>`\n\n'
+        '**Exemplo (PENGU/SOL):**\n'
+        '`/set 67dmC6iG5sAh4xQdEe4A2t4gYg3sM24g1vQdY8fJzK4g SOL 5m 0.1 0.030 0.035 2`\n\n'
+        '**O que os parâmetros significam:**\n'
+        '- **CONTRATO:** Endereço do token base (ex: PENGU).\n'
+        '- **COTAÇÃO:** Moeda de cotação (ex: SOL).\n'
+        '- **TIMEFRAME:** `1m`, `5m`, `15m`, `1h`, `4h`, `1d`.\n'
+        '- **VALOR:** Quantidade a comprar (em SOL).\n'
+        '- **SUPORTE:** Preço do nível de suporte.\n'
+        '- **RESISTENCIA:** Preço do nível de resistência (será o take-profit).\n'
+        '- **STOP_LOSS_%:** Percentual abaixo do suporte para o stop loss (ex: `2` para 2%).\n\n'
         '**Comandos:**\n'
         '• `/run` - Inicia o bot.\n'
         '• `/stop` - Para o bot.',
@@ -336,11 +311,14 @@ async def set_params(update, context):
         await update.effective_message.reply_text("Pare o bot com /stop antes de alterar os parâmetros.")
         return
     try:
-        base_token_contract = context.args[0]
-        quote_symbol_input = context.args[1].upper()
-        
-        timeframe = context.args[2].lower()
-        amount, take_profit_percent, stop_loss_percent = float(context.args[3]), float(context.args[4]), float(context.args[5])
+        # Novos parâmetros para Range Trading
+        base_token_contract = context.args
+        quote_symbol_input = context.args.[1]upper()
+        timeframe = context.args.[2]lower()
+        amount = float(context.args[3])
+        support_level = float(context.args[4])
+        resistance_level = float(context.args[5])
+        stop_loss_percent = float(context.args[6])
 
         interval_map = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
         if timeframe not in interval_map:
@@ -371,23 +349,24 @@ async def set_params(update, context):
 
         trade_pair = max(valid_pairs, key=lambda p: p.get('liquidity', {}).get('usd', 0))
 
-        base_token_symbol = trade_pair['baseToken']['symbol'].lstrip('$')
-        quote_token_symbol = trade_pair['quoteToken']['symbol']
+        base_token_symbol = trade_pair['symbol'].lstrip('$')
+        quote_token_symbol = trade_pair['symbol']
 
         parameters = {
             "base_token_symbol": base_token_symbol, 
             "quote_token_symbol": quote_token_symbol,
             "timeframe": timeframe, 
             "amount": amount,
-            "take_profit_percent": take_profit_percent,
+            "support_level": support_level,
+            "resistance_level": resistance_level,
             "stop_loss_percent": stop_loss_percent,
             "trade_pair_details": {
                 "base_symbol": base_token_symbol,
                 "quote_symbol": quote_token_symbol,
-                "base_address": trade_pair['baseToken']['address'],
-                "quote_address": trade_pair['quoteToken']['address'],
+                "base_address": trade_pair['address'],
+                "quote_address": trade_pair['address'],
                 "pair_address": trade_pair['pairAddress'],
-                "quote_decimals": 9 if quote_token_symbol in ['SOL', 'WSOL'] else 6 
+                "quote_decimals": 9 if quote_token_symbol in else 6 
             }
         }
         await update.effective_message.reply_text(
@@ -395,17 +374,18 @@ async def set_params(update, context):
             f"📊 *Fonte de Dados:* `GeckoTerminal`\n"
             f"🪙 *Par de Negociação:* `{base_token_symbol}/{quote_token_symbol}`\n"
             f"⏰ *Timeframe:* `{timeframe}`\n"
-            f"📈 *Estratégia:* Scalping de Volume + RVI\n"
+            f"📈 *Estratégia:* Range Trading com RSI\n"
             f"💰 *Valor por Ordem:* `{amount}` {quote_symbol_input}\n"
-            f"🎯 *Take Profit:* `{take_profit_percent}%`\n"
-            f"📉 *Stop Loss:* `{stop_loss_percent}%`",
+            f"🔵 *Suporte:* `{support_level:.8f}`\n"
+            f"🔴 *Resistência (Take Profit):* `{resistance_level:.8f}`\n"
+            f"📉 *Stop Loss:* `{stop_loss_percent}%` abaixo do suporte",
             parse_mode='Markdown'
         )
     except (IndexError, ValueError):
         await update.effective_message.reply_text(
             "⚠️ *Erro: Formato incorreto.*\n"
-            "Use: `/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <TAKE_PROFIT_%> <STOP_LOSS_%>`\n"
-            "Exemplo: `/set ... SOL 1m 0.1 2 1`",
+            "Use: `/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <SUPORTE> <RESISTENCIA> <STOP_LOSS_%>`\n"
+            "Exemplo: `/set... SOL 5m 0.1 0.030 0.035 2`",
             parse_mode='Markdown'
         )
     except httpx.HTTPStatusError as e:
@@ -416,7 +396,8 @@ async def set_params(update, context):
 
 async def run_bot(update, context):
     global bot_running, periodic_task
-    if not all(p is not None for p in parameters.values() if p != parameters['trade_pair_details']):
+    required_params = ["base_token_symbol", "quote_token_symbol", "timeframe", "amount", "support_level", "resistance_level", "stop_loss_percent"]
+    if not all(parameters.get(p) is not None for p in required_params):
         await update.effective_message.reply_text("Defina os parâmetros com /set primeiro.")
         return
     if bot_running:
@@ -425,7 +406,7 @@ async def run_bot(update, context):
     
     bot_running = True
     logger.info("Bot de trade iniciado.")
-    await update.effective_message.reply_text("🚀 Bot iniciado! Verificando a estratégia de Scalping de Volume via GeckoTerminal...")
+    await update.effective_message.reply_text("🚀 Bot iniciado! Verificando a estratégia de Range Trading via GeckoTerminal...")
     
     if periodic_task is None or periodic_task.done():
         periodic_task = asyncio.create_task(periodic_checker())
@@ -465,8 +446,8 @@ def main():
     global application
     application = (
         Application.builder()
-        .token(TELEGRAM_TOKEN)
-        .build()
+       .token(TELEGRAM_TOKEN)
+       .build()
     )
     
     application.add_handler(CommandHandler("start", start))
