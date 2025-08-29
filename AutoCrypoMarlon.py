@@ -66,9 +66,9 @@ parameters = {
     "base_token_symbol": None,
     "quote_token_symbol": None,
     "timeframe": None,
+    "period": None,
     "amount": None,
-    "take_profit_percent": None,
-    "stop_loss_percent": None,
+    "trailing_stop_percent": None,
     "trade_pair_details": {}
 }
 application = None
@@ -200,7 +200,7 @@ async def check_strategy():
 
     try:
         pair_details = parameters["trade_pair_details"]
-        timeframe = parameters["timeframe"]
+        timeframe, period = parameters["timeframe"], int(parameters["period"])
         amount, take_profit_percent, stop_loss_percent = parameters["amount"], parameters["take_profit_percent"], parameters["stop_loss_percent"]
         
         logger.info(f"Buscando dados de candles para {pair_details['base_symbol']}/{pair_details['quote_symbol']} no GeckoTerminal...")
@@ -213,7 +213,16 @@ async def check_strategy():
 
         # --- CÁLCULO DOS INDICADORES ---
         data['volume_sma'] = data['Volume'].rolling(window=20).mean()
-        rvi = data.ta.rvi(append=True)
+        
+        # CORREÇÃO: Calcula o RVI separadamente para obter os nomes das colunas de forma robusta
+        rvi_data = data.ta.rvi()
+        if rvi_data is None or rvi_data.empty:
+            logger.warning("Cálculo do RVI não retornou dados.")
+            return
+        
+        rvi_col = rvi_data.columns[0]
+        rvi_signal_col = rvi_data.columns[1]
+        data = pd.concat([data, rvi_data], axis=1)
         
         if len(data) < 22:
             logger.warning(f"Dados insuficientes do GeckoTerminal ({len(data)} velas).")
@@ -226,10 +235,10 @@ async def check_strategy():
         current_volume = current_candle['Volume']
         current_volume_sma = current_candle['volume_sma']
         
-        current_rvi = current_candle['RVI_14']
-        current_rvi_signal = current_candle['RVIs_14']
-        previous_rvi = previous_candle['RVI_14']
-        previous_rvi_signal = previous_candle['RVIs_14']
+        current_rvi = current_candle[rvi_col]
+        current_rvi_signal = current_candle[rvi_signal_col]
+        previous_rvi = previous_candle[rvi_col]
+        previous_rvi_signal = previous_candle[rvi_signal_col]
         
         logger.info(f"Análise ({pair_details['base_symbol']}): Preço {current_close:.8f} | Volume {current_volume:.2f} | Média Vol {current_volume_sma:.2f} | RVI {current_rvi:.2f}")
 
