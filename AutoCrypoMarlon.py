@@ -30,7 +30,7 @@ PRIVATE_KEY_B58 = os.getenv("PRIVATE_KEY_BASE58")
 RPC_URL = os.getenv("RPC_URL")
 
 # --- Validação de Configurações ---
-if not all():
+if not all([TELEGRAM_TOKEN, CHAT_ID, PRIVATE_KEY_B58, RPC_URL]):
     print("Erro: Verifique se todas as variáveis de ambiente estão definidas:")
     print("TELEGRAM_TOKEN, CHAT_ID, PRIVATE_KEY_BASE58, RPC_URL")
     exit()
@@ -41,7 +41,9 @@ for handler in logging.root.handlers[:]:
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=
+    handlers=[
+        logging.StreamHandler()
+    ]
 )
 logger = logging.getLogger(__name__)
 
@@ -66,8 +68,8 @@ parameters = {
     "quote_token_symbol": None,
     "timeframe": None,
     "amount": None,
-    "support_level": None,      # NOVO: Nível de suporte
-    "resistance_level": None,   # NOVO: Nível de resistência
+    "support_level": None,      # Nível de suporte
+    "resistance_level": None,   # Nível de resistência
     "stop_loss_percent": None,  # % abaixo do suporte para o stop
     "trade_pair_details": {}
 }
@@ -238,7 +240,7 @@ async def check_strategy():
         current_close = current_candle['close']
         current_volume = current_candle['volume']
         current_volume_sma = current_candle['volume_sma']
-        current_rsi = current_candle
+        current_rsi = current_candle['RSI_14']
         
         # --- LÓGICA DE RANGE TRADING ---
         support = parameters["support_level"]
@@ -289,8 +291,8 @@ async def start(update, context):
         'Fonte de Dados: **GeckoTerminal**.\n\n'
         'Use o comando `/set` para configurar:\n'
         '`/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <SUPORTE> <RESISTENCIA> <STOP_LOSS_%>`\n\n'
-        '**Exemplo (PENGU/SOL):**\n'
-        '`/set 67dmC6iG5sAh4xQdEe4A2t4gYg3sM24g1vQdY8fJzK4g SOL 5m 0.1 0.030 0.035 2`\n\n'
+        '**Exemplo (PENGU/SOL - Range Atualizado):**\n'
+        '`/set 67dmC6iG5sAh4xQdEe4A2t4gYg3sM24g1vQdY8fJzK4g SOL 5m 0.1 0.0295 0.0315 2`\n\n'
         '**O que os parâmetros significam:**\n'
         '- **CONTRATO:** Endereço do token base (ex: PENGU).\n'
         '- **COTAÇÃO:** Moeda de cotação (ex: SOL).\n'
@@ -312,9 +314,9 @@ async def set_params(update, context):
         return
     try:
         # Novos parâmetros para Range Trading
-        base_token_contract = context.args
-        quote_symbol_input = context.args.[1]upper()
-        timeframe = context.args.[2]lower()
+        base_token_contract = context.args[0]
+        quote_symbol_input = context.args[1].upper()
+        timeframe = context.args[2].lower()
         amount = float(context.args[3])
         support_level = float(context.args[4])
         resistance_level = float(context.args[5])
@@ -349,8 +351,8 @@ async def set_params(update, context):
 
         trade_pair = max(valid_pairs, key=lambda p: p.get('liquidity', {}).get('usd', 0))
 
-        base_token_symbol = trade_pair['symbol'].lstrip('$')
-        quote_token_symbol = trade_pair['symbol']
+        base_token_symbol = trade_pair['baseToken']['symbol'].lstrip('$')
+        quote_token_symbol = trade_pair['quoteToken']['symbol']
 
         parameters = {
             "base_token_symbol": base_token_symbol, 
@@ -363,10 +365,10 @@ async def set_params(update, context):
             "trade_pair_details": {
                 "base_symbol": base_token_symbol,
                 "quote_symbol": quote_token_symbol,
-                "base_address": trade_pair['address'],
-                "quote_address": trade_pair['address'],
+                "base_address": trade_pair['baseToken']['address'],
+                "quote_address": trade_pair['quoteToken']['address'],
                 "pair_address": trade_pair['pairAddress'],
-                "quote_decimals": 9 if quote_token_symbol in else 6 
+                "quote_decimals": 9 if quote_token_symbol in ['SOL', 'WSOL'] else 6 
             }
         }
         await update.effective_message.reply_text(
@@ -385,7 +387,7 @@ async def set_params(update, context):
         await update.effective_message.reply_text(
             "⚠️ *Erro: Formato incorreto.*\n"
             "Use: `/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <SUPORTE> <RESISTENCIA> <STOP_LOSS_%>`\n"
-            "Exemplo: `/set... SOL 5m 0.1 0.030 0.035 2`",
+            "Exemplo: `/set ... SOL 5m 0.1 0.0295 0.0315 2`",
             parse_mode='Markdown'
         )
     except httpx.HTTPStatusError as e:
