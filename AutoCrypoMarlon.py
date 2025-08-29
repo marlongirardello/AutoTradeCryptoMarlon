@@ -246,25 +246,30 @@ async def check_strategy():
             logger.warning(f"Dados insuficientes após reamostragem ({len(data)} velas).")
             return
         
-        # --- LÓGICA DE CÁLCULO REORDENADA ---
         rvi_data = data.ta.rvi()
+
         if rvi_data is None or rvi_data.empty:
-            logger.error("ERRO CRÍTICO: Cálculo do RVI falhou mesmo com dados perfeitos.")
-            logger.info(f"Últimos 5 dados enviados para o indicador:\n{data.tail(5)}")
+            logger.error("ERRO: Cálculo do RVI retornou um valor nulo ou vazio.")
+            return
+
+        # --- CORREÇÃO FINAL: VERIFICA SE O RVI RETORNOU UMA OU DUAS COLUNAS ---
+        if isinstance(rvi_data, pd.DataFrame):
+            # Caso esperado: DataFrame com RVI e linha de Sinal
+            logger.info("Cálculo do RVI retornou um DataFrame (RVI + Sinal).")
+            rvi_col_name = rvi_data.columns[0]
+            rvi_signal_col_name = rvi_data.columns[1]
+            data = pd.concat([data, rvi_data], axis=1)
+        else:
+            # Caso inesperado: Series apenas com a linha RVI. Estratégia de crossover é impossível.
+            logger.error("ERRO CRÍTICO: O cálculo do RVI retornou apenas a linha RVI, sem a linha de Sinal. A estratégia de cruzamento não pode ser executada. Verifique a versão da biblioteca pandas-ta ou os dados do token.")
             return
 
         data['volume_sma'] = data['volume'].rolling(window=20).mean()
-        data = pd.concat([data, rvi_data], axis=1)
         data.dropna(inplace=True)
 
         if data.empty:
             logger.warning("Não há dados suficientes após o período de aquecimento dos indicadores.")
             return
-        
-        # Pega os nomes das colunas pela posição (0 para RVI, 1 para Sinal), que é mais seguro.
-        rvi_col_name = rvi_data.columns[0]
-        rvi_signal_col_name = rvi_data.columns[1]
-        logger.info(f"Colunas do indicador RVI identificadas como: '{rvi_col_name}' e '{rvi_signal_col_name}'")
 
         current_candle = data.iloc[-2]
         previous_candle = data.iloc[-3]
