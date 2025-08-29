@@ -269,7 +269,7 @@ async def check_strategy():
                 await execute_sell_order(reason=f"Stop Loss atingido em {stop_loss_price:.8f}")
 
         else: # Não está em posição, procurar por entrada
-            # --- ALTERAÇÃO AQUI: Lógica da "Zona de Compra" ---
+            # --- Lógica da "Zona de Compra" ---
             # Define os limites da zona de compra
             buy_zone_upper_bound = support * 1.015  # 1.5% acima do suporte
             buy_zone_lower_bound = support * 0.995  # 0.5% abaixo do suporte (mais agressivo)
@@ -305,17 +305,12 @@ async def start(update, context):
         '`/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <SUPORTE> <RESISTENCIA> <STOP_LOSS_%>`\n\n'
         '**Exemplo (PENGU/SOL - Range de Curto Prazo):**\n'
         '`/set 67dmC6iG5sAh4xQdEe4A2t4gYg3sM24g1vQdY8fJzK4g SOL 1m 0.1 0.0292 0.0298 1.5`\n\n'
-        '**O que os parâmetros significam:**\n'
-        '- **CONTRATO:** Endereço do token base (ex: PENGU).\n'
-        '- **COTAÇÃO:** Moeda de cotação (ex: SOL).\n'
-        '- **TIMEFRAME:** `1m`, `5m`, `15m`, `1h`, `4h`, `1d`.\n'
-        '- **VALOR:** Quantidade a comprar (em SOL).\n'
-        '- **SUPORTE:** Preço do nível de suporte.\n'
-        '- **RESISTENCIA:** Preço do nível de resistência (será o take-profit).\n'
-        '- **STOP_LOSS_%:** Percentual abaixo do suporte para o stop loss (ex: `1.5` para 1.5%).\n\n'
-        '**Comandos:**\n'
+        '**Comandos Automáticos:**\n'
         '• `/run` - Inicia o bot.\n'
-        '• `/stop` - Para o bot.',
+        '• `/stop` - Para o bot.\n\n'
+        '**Comandos Manuais:**\n'
+        '• `/buy <VALOR>` - Compra a quantia especificada (ex: `/buy 0.1`).\n'
+        '• `/sell` - Vende a posição atual.',
         parse_mode='Markdown'
     )
 
@@ -456,6 +451,51 @@ async def periodic_checker():
             logger.error(f"Erro no loop do verificador periódico: {e}")
             await asyncio.sleep(60)
 
+# --- NOVOS COMANDOS MANUAIS ---
+async def buy_manual(update, context):
+    if not bot_running:
+        await update.effective_message.reply_text("⚠️ O bot precisa estar rodando para comprar manualmente. Use `/run` primeiro.")
+        return
+    if in_position:
+        await update.effective_message.reply_text("⚠️ Já existe uma posição aberta. Venda-a primeiro com `/sell`.")
+        return
+    try:
+        amount = float(context.args[0])
+        await update.effective_message.reply_text(f"Iniciando compra manual de {amount} {parameters['quote_token_symbol']}...")
+        
+        # Busca o preço atual para registrar a entrada
+        pair_details = parameters["trade_pair_details"]
+        timeframe = parameters["timeframe"]
+        data = await fetch_geckoterminal_ohlcv(pair_details['pair_address'], timeframe)
+        if data is None or data.empty:
+            await update.effective_message.reply_text("⚠️ Não foi possível obter o preço atual para a compra.")
+            return
+        
+        current_price = data.iloc[-1]['close']
+        await execute_buy_order(amount, current_price)
+
+    except (IndexError, ValueError):
+        await update.effective_message.reply_text("⚠️ Formato incorreto. Use `/buy <VALOR>` (ex: `/buy 0.1`).")
+    except Exception as e:
+        logger.error(f"Erro na compra manual: {e}")
+        await update.effective_message.reply_text(f"⚠️ Ocorreu um erro na compra manual: {e}")
+
+async def sell_manual(update, context):
+    if not bot_running:
+        await update.effective_message.reply_text("⚠️ O bot precisa estar rodando para vender manualmente. Use `/run` primeiro.")
+        return
+    if not in_position:
+        await update.effective_message.reply_text("⚠️ Nenhuma posição aberta para vender.")
+        return
+    
+    await update.effective_message.reply_text("Iniciando venda manual da posição...")
+    await execute_sell_order(reason="Comando /sell manual")
+
+async def error_handler(update, context):
+    """Loga o erro para fins de depuração."""
+    logger.error(f"Exceção ao manusear uma atualização: {context.error}", exc_info=context.error)
+
+
 def main():
     global application
     application = (
@@ -468,6 +508,12 @@ def main():
     application.add_handler(CommandHandler("set", set_params))
     application.add_handler(CommandHandler("run", run_bot))
     application.add_handler(CommandHandler("stop", stop_bot))
+    # --- Adiciona os novos handlers manuais ---
+    application.add_handler(CommandHandler("buy", buy_manual))
+    application.add_handler(CommandHandler("sell", sell_manual))
+
+    # Registra o manipulador de erros
+    application.add_error_handler(error_handler)
     
     logger.info("Bot do Telegram iniciado e aguardando comandos...")
     application.run_polling()
