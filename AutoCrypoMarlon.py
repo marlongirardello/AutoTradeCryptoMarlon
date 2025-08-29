@@ -278,7 +278,8 @@ async def check_strategy():
             price_in_buy_zone = buy_zone_lower_bound <= current_close <= buy_zone_upper_bound
             
             # 2. RSI está em território de sobrevenda
-            rsi_oversold = current_rsi < 35 # Usar 35 para ser um pouco menos restritivo que 30
+            # --- ALTERAÇÃO AQUI: Gatilho do RSI ajustado para ser mais sensível ---
+            rsi_oversold = current_rsi < 38 # Usar 38 para capturar reversões mais cedo
             
             # 3. Confirmação de volume
             volume_confirmation = current_volume > current_volume_sma # Pelo menos acima da média
