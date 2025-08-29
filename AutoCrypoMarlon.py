@@ -68,9 +68,8 @@ parameters = {
     "quote_token_symbol": None,
     "timeframe": None,
     "amount": None,
-    "support_level": None,      # Nível de suporte
-    "resistance_level": None,   # Nível de resistência
-    "stop_loss_percent": None,  # % abaixo do suporte para o stop
+    "lookback_period": None,    # NOVO: Período de análise para S/R dinâmico
+    "stop_loss_percent": None,
     "trade_pair_details": {}
 }
 application = None
@@ -158,7 +157,7 @@ async def execute_sell_order(reason="Venda Manual"):
     except Exception as e:
         logger.error(f"Erro ao buscar saldo para venda: {e}"); await send_telegram_message(f"⚠️ Falha ao buscar saldo do token para venda: {e}")
 
-async def fetch_geckoterminal_ohlcv(pair_address, timeframe):
+async def fetch_geckoterminal_ohlcv(pair_address, timeframe, limit=150): # Aumenta o limite para ter dados suficientes para o lookback
     timeframe_map = {"1m": "minute", "5m": "minute", "15m": "minute", "1h": "hour", "4h": "hour", "1d": "day"}
     aggregate_map = {"1m": 1, "5m": 5, "15m": 15, "1h": 1, "4h": 4, "1d": 1}
     
@@ -170,7 +169,7 @@ async def fetch_geckoterminal_ohlcv(pair_address, timeframe):
         return None
 
     current_timestamp = int(time.time())
-    url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools/{pair_address}/ohlcv/{gt_timeframe}?aggregate={gt_aggregate}&limit=100&before_timestamp={current_timestamp}"
+    url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools/{pair_address}/ohlcv/{gt_timeframe}?aggregate={gt_aggregate}&limit={limit}&before_timestamp={current_timestamp}"
     
     try:
         async with httpx.AsyncClient() as client:
@@ -200,92 +199,71 @@ async def fetch_geckoterminal_ohlcv(pair_address, timeframe):
 
 async def check_strategy():
     global in_position, entry_price
-    # Verifica se todos os parâmetros necessários foram definidos
-    required_params = ["base_token_symbol", "quote_token_symbol", "timeframe", "amount", "support_level", "resistance_level", "stop_loss_percent"]
+    required_params = ["base_token_symbol", "quote_token_symbol", "timeframe", "amount", "lookback_period", "stop_loss_percent"]
     if not bot_running or not all(parameters.get(p) is not None for p in required_params): return
 
     try:
         pair_details = parameters["trade_pair_details"]
         timeframe = parameters["timeframe"]
         amount = parameters["amount"]
+        lookback_period = parameters["lookback_period"]
         
         logger.info(f"Buscando dados de candles para {pair_details['base_symbol']}/{pair_details['quote_symbol']} no GeckoTerminal...")
-        data = await fetch_geckoterminal_ohlcv(pair_details['pair_address'], timeframe)
+        # Busca mais velas para garantir que temos dados suficientes para o lookback
+        data = await fetch_geckoterminal_ohlcv(pair_details['pair_address'], timeframe, limit=lookback_period + 50)
 
-        if data is None or data.empty:
-            await send_telegram_message(f"⚠️ Não foi possível obter dados de velas do GeckoTerminal.")
+        if data is None or data.empty or len(data) < lookback_period:
+            await send_telegram_message(f"⚠️ Não foi possível obter dados de velas suficientes do GeckoTerminal (necessário: {lookback_period}, obtido: {len(data) if data is not None else 0}).")
             return
         
-        logger.info(f"Recebidas {len(data)} velas do GeckoTerminal. Iniciando pré-processamento...")
+        # --- CÁLCULO DINÂMICO DE SUPORTE E RESISTÊNCIA ---
+        analysis_df = data.tail(lookback_period).copy()
+        dynamic_resistance = analysis_df['high'].max()
+        dynamic_support = analysis_df['low'].min()
         
-        # Limpeza de dados
-        data.replace([np.inf, -np.inf], np.nan, inplace=True)
-        data.dropna(inplace=True)
-        if len(data) < 2:
-            logger.warning(f"Dados insuficientes ({len(data)} velas) após limpeza inicial.")
-            return
-
-        # --- CÁLCULO DOS INDICADORES PARA RANGE TRADING ---
-        data.ta.rsi(length=14, append=True) # Adiciona a coluna 'RSI_14'
+        # --- CÁLCULO DOS INDICADORES ---
+        data.ta.rsi(length=14, append=True)
         data['volume_sma'] = data['volume'].rolling(window=20).mean()
         data.dropna(inplace=True)
 
-        if data.empty or len(data) < 3:
-            logger.warning("Não há dados suficientes após o período de aquecimento dos indicadores.")
+        if data.empty:
+            logger.warning("Não há dados suficientes após o cálculo dos indicadores.")
             return
 
-        current_candle = data.iloc[-2] # Usamos a penúltima vela (a última pode não estar fechada)
+        current_candle = data.iloc[-2]
         
-        # --- EXTRAÇÃO DE VALORES ATUAIS ---
         current_close = current_candle['close']
         current_volume = current_candle['volume']
         current_volume_sma = current_candle['volume_sma']
         current_rsi = current_candle['RSI_14']
         
-        # --- LÓGICA DE RANGE TRADING ---
-        support = parameters["support_level"]
-        resistance = parameters["resistance_level"]
-        stop_loss_percent = parameters["stop_loss_percent"]
-
         logger.info(
             f"Análise ({pair_details['base_symbol']}): "
             f"Preço {current_close:.8f} | "
             f"Vol {current_volume:.2f} | Média Vol {current_volume_sma:.2f} | "
             f"RSI {current_rsi:.2f} | "
-            f"Suporte {support:.8f} | Resistência {resistance:.8f}"
+            f"Suporte Dinâmico {dynamic_support:.8f} | Resistência Dinâmica {dynamic_resistance:.8f}"
         )
 
         if in_position:
-            # O take profit é a resistência
-            take_profit_price = resistance
-            # O stop loss é calculado com base no nível de suporte, não no preço de entrada
-            stop_loss_price = support * (1 - stop_loss_percent / 100)
-
-            logger.info(f"Posição aberta. Entrada: {entry_price:.8f}, Take Profit: {take_profit_price:.8f}, Stop Loss: {stop_loss_price:.8f}")
+            take_profit_price = dynamic_resistance
+            stop_loss_price = dynamic_support * (1 - parameters["stop_loss_percent"] / 100)
 
             if current_close >= take_profit_price:
-                await execute_sell_order(reason=f"Take Profit (Resistência) atingido em {take_profit_price:.8f}")
+                await execute_sell_order(reason=f"Take Profit (Resistência Dinâmica) atingido em {take_profit_price:.8f}")
             elif current_close <= stop_loss_price:
                 await execute_sell_order(reason=f"Stop Loss atingido em {stop_loss_price:.8f}")
 
-        else: # Não está em posição, procurar por entrada
-            # --- Lógica da "Zona de Compra" ---
-            # Define os limites da zona de compra
-            buy_zone_upper_bound = support * 1.015  # 1.5% acima do suporte
-            buy_zone_lower_bound = support * 0.995  # 0.5% abaixo do suporte (mais agressivo)
+        else:
+            buy_zone_upper_bound = dynamic_support * 1.015
+            buy_zone_lower_bound = dynamic_support * 0.995
 
-            # 1. Preço está dentro da zona de compra
             price_in_buy_zone = buy_zone_lower_bound <= current_close <= buy_zone_upper_bound
-            
-            # 2. RSI está em território de sobrevenda
-            # --- ALTERAÇÃO AQUI: Gatilho do RSI ajustado para ser mais sensível ---
-            rsi_oversold = current_rsi < 38 # Usar 38 para capturar reversões mais cedo
-            
-            # 3. Confirmação de volume
-            volume_confirmation = current_volume > current_volume_sma # Pelo menos acima da média
+            rsi_oversold = current_rsi < 45
+            volume_confirmation = current_volume > current_volume_sma
 
             if price_in_buy_zone and rsi_oversold and volume_confirmation:
-                logger.info(f"Sinal de COMPRA (Range Trading): Preço na zona de compra ({current_close:.8f}), RSI em sobrevenda ({current_rsi:.2f}) e volume confirmado.")
+                logger.info(f"Sinal de COMPRA: Preço na zona de compra dinâmica ({current_close:.8f}), RSI ({current_rsi:.2f}) e volume confirmados.")
                 await execute_buy_order(amount, current_close)
 
     except Exception as e:
@@ -299,18 +277,19 @@ async def send_telegram_message(message):
 
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot de autotrade para a rede Solana.\n'
-        'Estratégia: **Range Trading com Confirmação de RSI**.\n'
-        'Fonte de Dados: **GeckoTerminal**.\n\n'
-        'Use o comando `/set` para configurar:\n'
-        '`/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <SUPORTE> <RESISTENCIA> <STOP_LOSS_%>`\n\n'
-        '**Exemplo (PENGU/SOL - Range de Curto Prazo):**\n'
-        '`/set 67dmC6iG5sAh4xQdEe4A2t4gYg3sM24g1vQdY8fJzK4g SOL 1m 0.1 0.0292 0.0298 1.5`\n\n'
-        '**Comandos Automáticos:**\n'
+        'Olá! Sou seu bot de trading **autônomo** para a rede Solana.\n'
+        'Estratégia: **Range Trading com Suporte e Resistência Dinâmicos**.\n\n'
+        'Use o comando `/set` para configurar os parâmetros de risco:\n'
+        '`/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <LOOKBACK> <STOP_LOSS_%>`\n\n'
+        '**Exemplo (PENGU/SOL):**\n'
+        '`/set 67dmC6iG5sAh4xQdEe4A2t4gYg3sM24g1vQdY8fJzK4g SOL 1m 0.1 120 1.5`\n\n'
+        '**O que os parâmetros significam:**\n'
+        '- **LOOKBACK:** Nº de velas que o bot analisará para definir o range (ex: `120` para as últimas 2 horas no timeframe de 1m).\n'
+        '- **STOP_LOSS_%:** Percentual abaixo do suporte dinâmico para o stop loss.\n\n'
+        '**Comandos:**\n'
         '• `/run` - Inicia o bot.\n'
-        '• `/stop` - Para o bot.\n\n'
-        '**Comandos Manuais:**\n'
-        '• `/buy <VALOR>` - Compra a quantia especificada (ex: `/buy 0.1`).\n'
+        '• `/stop` - Para o bot.\n'
+        '• `/buy <VALOR>` - Compra manual.\n'
         '• `/sell` - Vende a posição atual.',
         parse_mode='Markdown'
     )
@@ -321,14 +300,12 @@ async def set_params(update, context):
         await update.effective_message.reply_text("Pare o bot com /stop antes de alterar os parâmetros.")
         return
     try:
-        # Novos parâmetros para Range Trading
         base_token_contract = context.args[0]
         quote_symbol_input = context.args[1].upper()
         timeframe = context.args[2].lower()
         amount = float(context.args[3])
-        support_level = float(context.args[4])
-        resistance_level = float(context.args[5])
-        stop_loss_percent = float(context.args[6])
+        lookback_period = int(context.args[4])
+        stop_loss_percent = float(context.args[5])
 
         interval_map = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
         if timeframe not in interval_map:
@@ -367,8 +344,7 @@ async def set_params(update, context):
             "quote_token_symbol": quote_token_symbol,
             "timeframe": timeframe, 
             "amount": amount,
-            "support_level": support_level,
-            "resistance_level": resistance_level,
+            "lookback_period": lookback_period,
             "stop_loss_percent": stop_loss_percent,
             "trade_pair_details": {
                 "base_symbol": base_token_symbol,
@@ -380,22 +356,19 @@ async def set_params(update, context):
             }
         }
         await update.effective_message.reply_text(
-            f"✅ *Parâmetros definidos com sucesso!*\n\n"
-            f"📊 *Fonte de Dados:* `GeckoTerminal`\n"
-            f"🪙 *Par de Negociação:* `{base_token_symbol}/{quote_token_symbol}`\n"
+            f"✅ *Parâmetros autônomos definidos!*\n\n"
+            f"🪙 *Par:* `{base_token_symbol}/{quote_token_symbol}`\n"
             f"⏰ *Timeframe:* `{timeframe}`\n"
-            f"📈 *Estratégia:* Range Trading com RSI\n"
             f"💰 *Valor por Ordem:* `{amount}` {quote_symbol_input}\n"
-            f"🔵 *Suporte:* `{support_level:.8f}`\n"
-            f"🔴 *Resistência (Take Profit):* `{resistance_level:.8f}`\n"
-            f"📉 *Stop Loss:* `{stop_loss_percent}%` abaixo do suporte",
+            f"📉 *Stop Loss:* `{stop_loss_percent}%` abaixo do suporte dinâmico\n"
+            f"🔍 *Período de Análise (Lookback):* Últimas `{lookback_period}` velas",
             parse_mode='Markdown'
         )
     except (IndexError, ValueError):
         await update.effective_message.reply_text(
             "⚠️ *Erro: Formato incorreto.*\n"
-            "Use: `/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <SUPORTE> <RESISTENCIA> <STOP_LOSS_%>`\n"
-            "Exemplo: `/set ... SOL 1m 0.1 0.0292 0.0298 1.5`",
+            "Use: `/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <LOOKBACK> <STOP_LOSS_%>`\n"
+            "Exemplo: `/set ... SOL 1m 0.1 120 1.5`",
             parse_mode='Markdown'
         )
     except httpx.HTTPStatusError as e:
@@ -406,7 +379,7 @@ async def set_params(update, context):
 
 async def run_bot(update, context):
     global bot_running, periodic_task
-    required_params = ["base_token_symbol", "quote_token_symbol", "timeframe", "amount", "support_level", "resistance_level", "stop_loss_percent"]
+    required_params = ["base_token_symbol", "quote_token_symbol", "timeframe", "amount", "lookback_period", "stop_loss_percent"]
     if not all(parameters.get(p) is not None for p in required_params):
         await update.effective_message.reply_text("Defina os parâmetros com /set primeiro.")
         return
@@ -416,7 +389,7 @@ async def run_bot(update, context):
     
     bot_running = True
     logger.info("Bot de trade iniciado.")
-    await update.effective_message.reply_text("🚀 Bot iniciado! Verificando a estratégia de Range Trading via GeckoTerminal...")
+    await update.effective_message.reply_text("🚀 Bot autônomo iniciado! Analisando o mercado dinamicamente...")
     
     if periodic_task is None or periodic_task.done():
         periodic_task = asyncio.create_task(periodic_checker())
@@ -452,7 +425,6 @@ async def periodic_checker():
             logger.error(f"Erro no loop do verificador periódico: {e}")
             await asyncio.sleep(60)
 
-# --- NOVOS COMANDOS MANUAIS ---
 async def buy_manual(update, context):
     if not bot_running:
         await update.effective_message.reply_text("⚠️ O bot precisa estar rodando para comprar manualmente. Use `/run` primeiro.")
@@ -464,7 +436,6 @@ async def buy_manual(update, context):
         amount = float(context.args[0])
         await update.effective_message.reply_text(f"Iniciando compra manual de {amount} {parameters['quote_token_symbol']}...")
         
-        # Busca o preço atual para registrar a entrada
         pair_details = parameters["trade_pair_details"]
         timeframe = parameters["timeframe"]
         data = await fetch_geckoterminal_ohlcv(pair_details['pair_address'], timeframe)
@@ -509,11 +480,9 @@ def main():
     application.add_handler(CommandHandler("set", set_params))
     application.add_handler(CommandHandler("run", run_bot))
     application.add_handler(CommandHandler("stop", stop_bot))
-    # --- Adiciona os novos handlers manuais ---
     application.add_handler(CommandHandler("buy", buy_manual))
     application.add_handler(CommandHandler("sell", sell_manual))
 
-    # Registra o manipulador de erros
     application.add_error_handler(error_handler)
     
     logger.info("Bot do Telegram iniciado e aguardando comandos...")
