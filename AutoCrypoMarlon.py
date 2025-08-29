@@ -157,7 +157,6 @@ async def execute_sell_order(reason="Venda Manual"):
     except Exception as e:
         logger.error(f"Erro ao buscar saldo para venda: {e}"); await send_telegram_message(f"⚠️ Falha ao buscar saldo do token para venda: {e}")
 
-# --- FUNÇÃO PARA BUSCAR DADOS DO GECKOTERMINAL (COM CORREÇÃO DE CACHE) ---
 async def fetch_geckoterminal_ohlcv(pair_address, timeframe):
     timeframe_map = {"1m": "minute", "5m": "minute", "15m": "minute", "1h": "hour", "4h": "hour", "1d": "day"}
     aggregate_map = {"1m": 1, "5m": 5, "15m": 15, "1h": 1, "4h": 4, "1d": 1}
@@ -198,7 +197,6 @@ async def fetch_geckoterminal_ohlcv(pair_address, timeframe):
         logger.error(f"Erro inesperado ao processar dados do GeckoTerminal: {e}")
         return None
 
-# --- FUNÇÃO DE ESTRATÉGIA COM LÓGICA CORRIGIDA E ROBUSTA ---
 async def check_strategy():
     global in_position, entry_price
     if not bot_running or not all(p is not None for p in parameters.values() if p != parameters['trade_pair_details']): return
@@ -216,40 +214,57 @@ async def check_strategy():
             await send_telegram_message(f"⚠️ Não foi possível obter dados de velas do GeckoTerminal.")
             return
         
-        logger.info(f"Recebidas {len(data)} velas do GeckoTerminal.")
-
-        if len(data) < 22:
-            logger.warning(f"Dados insuficientes para calcular indicadores ({len(data)} velas). Aguardando próximo ciclo.")
-            return
-
-        # --- PASSO DE LIMPEZA E VALIDAÇÃO DOS DADOS ---
-        # Substitui valores infinitos (caso existam) por NaN para que possam ser tratados
-        data.replace([np.inf, -np.inf], np.nan, inplace=True)
-
-        # Log para depurar: verificar se há valores nulos antes do tratamento
-        null_counts_before = data.isnull().sum()
-        if null_counts_before.sum() > 0:
-            logger.info(f"Valores nulos encontrados antes do tratamento:\n{null_counts_before[null_counts_before > 0]}")
-
-        # Preenche quaisquer valores 'NaN' usando o último valor válido (forward fill)
-        data.fillna(method='ffill', inplace=True)
+        logger.info(f"Recebidas {len(data)} velas do GeckoTerminal. Iniciando pré-processamento...")
         
-        # Remove qualquer linha que AINDA possa ter NaN (caso as primeiras linhas sejam nulas)
-        data.dropna(inplace=True)
-
-        # Re-verifica se ainda há dados suficientes após a limpeza
-        if len(data) < 22:
-            logger.warning(f"Dados insuficientes após limpeza ({len(data)} velas).")
+        # --- PASSO 1: LIMPEZA DE DADOS INVÁLIDOS ---
+        data.replace([np.inf, -np.inf], np.nan, inplace=True)
+        data.dropna(inplace=True) # Remove linhas com NaN antes de reamostrar
+        if len(data) < 2: # Precisa de pelo menos 2 pontos para reamostrar
+            logger.warning(f"Dados insuficientes ({len(data)} velas) após limpeza inicial.")
             return
-        # --- FIM DO PASSO DE LIMPEZA ---
 
-        # --- CÁLCULO DOS INDICADORES ---
+        # --- PASSO 2: REAMOSTRAGEM PARA GARANTIR SEQUÊNCIA DE TEMPO ---
+        data.set_index('timestamp', inplace=True)
+        
+        # Mapeia o timeframe do bot para a frequência do pandas ('1m' -> '1T')
+        timeframe_freq_map = {"1m": "1T", "5m": "5T", "15m": "15T", "1h": "1H", "4h": "4H", "1d": "1D"}
+        freq = timeframe_freq_map.get(timeframe)
+        if not freq:
+            logger.error(f"Frequência de reamostragem inválida para o timeframe: {timeframe}")
+            return
+        
+        # Reamostra os dados para a frequência correta, criando uma série contínua
+        resampled_data = data.resample(freq).agg({
+            'open': 'first',
+            'high': 'max',
+            'low': 'min',
+            'close': 'last',
+            'volume': 'sum'
+        })
+        
+        # Preenche os buracos criados pela reamostragem
+        # Preços são preenchidos com o último valor conhecido
+        price_cols = ['open', 'high', 'low', 'close']
+        resampled_data[price_cols] = resampled_data[price_cols].ffill()
+        # Volume nos buracos é 0, pois não houve negociação
+        resampled_data['volume'].fillna(0, inplace=True)
+        
+        # Remove quaisquer NaNs restantes (caso o primeiro ponto da série fosse nulo)
+        resampled_data.dropna(inplace=True)
+        
+        data = resampled_data.reset_index()
+        logger.info(f"Dados reamostrados e limpos. Total de velas para análise: {len(data)}")
+
+        # --- PASSO 3: VERIFICAÇÃO FINAL E CÁLCULO DE INDICADORES ---
+        if len(data) < 22:
+            logger.warning(f"Dados insuficientes após reamostragem ({len(data)} velas).")
+            return
+        
         data['volume_sma'] = data['volume'].rolling(window=20).mean()
         
         rvi_data = data.ta.rvi()
         if rvi_data is None or not isinstance(rvi_data, pd.DataFrame) or rvi_data.empty:
-            logger.error("ERRO CRÍTICO: Cálculo do RVI falhou mesmo após limpeza dos dados.")
-            # Log para depuração final: mostra os últimos 5 dados que causaram o erro
+            logger.error("ERRO CRÍTICO: Cálculo do RVI falhou mesmo após reamostragem.")
             logger.info(f"Últimos 5 dados enviados para o indicador:\n{data.tail(5)}")
             return
 
@@ -258,10 +273,15 @@ async def check_strategy():
         
         data = pd.concat([data, rvi_data], axis=1)
         
-        # Devido a limpeza de dados, é mais seguro verificar se a coluna existe antes de usar.
-        if 'volume_sma' not in data.columns or data['volume_sma'].isnull().all():
+        if data['volume_sma'].isnull().all():
              logger.warning("Coluna 'volume_sma' não pôde ser calculada ou está vazia.")
              return
+
+        # Remove as linhas iniciais que terão NaN por causa do período dos indicadores
+        data.dropna(inplace=True)
+        if data.empty:
+            logger.warning("Não há dados suficientes após cálculo dos indicadores.")
+            return
 
         current_candle = data.iloc[-2]
         previous_candle = data.iloc[-3]
@@ -278,7 +298,6 @@ async def check_strategy():
         logger.info(f"Análise ({pair_details['base_symbol']}): Preço {current_close:.8f} | Volume {current_volume:.2f} | Média Vol {current_volume_sma:.2f} | RVI {current_rvi:.2f}")
 
         if in_position:
-            # --- LÓGICA DE VENDA ---
             take_profit_price = entry_price * (1 + take_profit_percent / 100)
             stop_loss_price = entry_price * (1 - stop_loss_percent / 100)
             
@@ -292,8 +311,7 @@ async def check_strategy():
                 await execute_sell_order(reason=f"Stop Loss atingido em {stop_loss_price:.8f}")
                 return
 
-        else: # Só procura por compras se não estiver posicionado
-            # --- LÓGICA DE COMPRA ---
+        else:
             volume_spike = current_volume > (current_volume_sma * 2.5)
             rvi_crossover = previous_rvi < previous_rvi_signal and current_rvi > current_rvi_signal
             
@@ -302,8 +320,9 @@ async def check_strategy():
                 await execute_buy_order(amount, current_close)
 
     except Exception as e:
-        logger.error(f"Ocorreu um erro em check_strategy: {e}")
+        logger.error(f"Ocorreu um erro em check_strategy: {e}", exc_info=True)
         await send_telegram_message(f"⚠️ Erro inesperado ao executar a estratégia: {e}")
+
 
 async def send_telegram_message(message):
     if application:
