@@ -214,14 +214,15 @@ async def check_strategy():
         # --- CÁLCULO DOS INDICADORES ---
         data['volume_sma'] = data['Volume'].rolling(window=20).mean()
         
-        rvi_data = data.ta.rvi()
-        if rvi_data is None or rvi_data.empty:
-            logger.warning("Cálculo do RVI não retornou dados.")
-            return
+        # CORREÇÃO: Calcula o RVI diretamente no DataFrame e adiciona uma verificação
+        data.ta.rvi(append=True)
         
-        rvi_col = rvi_data.columns[0]
-        rvi_signal_col = rvi_data.columns[1]
-        data = pd.concat([data, rvi_data], axis=1)
+        rvi_col = 'RVI_14'
+        rvi_signal_col = 'RVIs_14'
+
+        if rvi_col not in data.columns or rvi_signal_col not in data.columns:
+            logger.error(f"As colunas do RVI ({rvi_col}, {rvi_signal_col}) não foram encontradas após o cálculo.")
+            return
         
         if len(data) < 22:
             logger.warning(f"Dados insuficientes do GeckoTerminal ({len(data)} velas).")
