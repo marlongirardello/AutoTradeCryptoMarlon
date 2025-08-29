@@ -9,6 +9,7 @@ from base64 import b64decode
 import pandas as pd
 import pandas_ta as ta
 import httpx # Biblioteca para requisições assíncronas
+import numpy as np # Importado para lidar com valores infinitos
 
 # --- Libs da Solana ---
 from solders.pubkey import Pubkey
@@ -197,7 +198,7 @@ async def fetch_geckoterminal_ohlcv(pair_address, timeframe):
         logger.error(f"Erro inesperado ao processar dados do GeckoTerminal: {e}")
         return None
 
-# --- FUNÇÃO DE ESTRATÉGIA COM LÓGICA CORRIGIDA ---
+# --- FUNÇÃO DE ESTRATÉGIA COM LÓGICA CORRIGIDA E ROBUSTA ---
 async def check_strategy():
     global in_position, entry_price
     if not bot_running or not all(p is not None for p in parameters.values() if p != parameters['trade_pair_details']): return
@@ -215,28 +216,52 @@ async def check_strategy():
             await send_telegram_message(f"⚠️ Não foi possível obter dados de velas do GeckoTerminal.")
             return
         
-        # --- LÓGICA CORRIGIDA ---
-        # 1. Adiciona um log para sabermos quantas velas vieram.
         logger.info(f"Recebidas {len(data)} velas do GeckoTerminal.")
 
-        # 2. VERIFICA A QUANTIDADE DE DADOS ANTES DE CALCULAR INDICADORES.
-        #    O RVI e a SMA de 20 precisam de pelo menos 21-22 períodos.
         if len(data) < 22:
             logger.warning(f"Dados insuficientes para calcular indicadores ({len(data)} velas). Aguardando próximo ciclo.")
             return
 
-        # --- CÁLCULO DOS INDICADORES (AGORA SEGURO) ---
+        # --- PASSO DE LIMPEZA E VALIDAÇÃO DOS DADOS ---
+        # Substitui valores infinitos (caso existam) por NaN para que possam ser tratados
+        data.replace([np.inf, -np.inf], np.nan, inplace=True)
+
+        # Log para depurar: verificar se há valores nulos antes do tratamento
+        null_counts_before = data.isnull().sum()
+        if null_counts_before.sum() > 0:
+            logger.info(f"Valores nulos encontrados antes do tratamento:\n{null_counts_before[null_counts_before > 0]}")
+
+        # Preenche quaisquer valores 'NaN' usando o último valor válido (forward fill)
+        data.fillna(method='ffill', inplace=True)
+        
+        # Remove qualquer linha que AINDA possa ter NaN (caso as primeiras linhas sejam nulas)
+        data.dropna(inplace=True)
+
+        # Re-verifica se ainda há dados suficientes após a limpeza
+        if len(data) < 22:
+            logger.warning(f"Dados insuficientes após limpeza ({len(data)} velas).")
+            return
+        # --- FIM DO PASSO DE LIMPEZA ---
+
+        # --- CÁLCULO DOS INDICADORES ---
         data['volume_sma'] = data['volume'].rolling(window=20).mean()
         
         rvi_data = data.ta.rvi()
         if rvi_data is None or not isinstance(rvi_data, pd.DataFrame) or rvi_data.empty:
-            logger.warning("Cálculo do RVI não retornou dados válidos, mesmo com dados suficientes.")
+            logger.error("ERRO CRÍTICO: Cálculo do RVI falhou mesmo após limpeza dos dados.")
+            # Log para depuração final: mostra os últimos 5 dados que causaram o erro
+            logger.info(f"Últimos 5 dados enviados para o indicador:\n{data.tail(5)}")
             return
 
         rvi_col = rvi_data.columns[0]
         rvi_signal_col = rvi_data.columns[1]
         
         data = pd.concat([data, rvi_data], axis=1)
+        
+        # Devido a limpeza de dados, é mais seguro verificar se a coluna existe antes de usar.
+        if 'volume_sma' not in data.columns or data['volume_sma'].isnull().all():
+             logger.warning("Coluna 'volume_sma' não pôde ser calculada ou está vazia.")
+             return
 
         current_candle = data.iloc[-2]
         previous_candle = data.iloc[-3]
@@ -253,7 +278,7 @@ async def check_strategy():
         logger.info(f"Análise ({pair_details['base_symbol']}): Preço {current_close:.8f} | Volume {current_volume:.2f} | Média Vol {current_volume_sma:.2f} | RVI {current_rvi:.2f}")
 
         if in_position:
-            # --- LÓGICA DE VENDA (TAKE PROFIT E STOP LOSS) ---
+            # --- LÓGICA DE VENDA ---
             take_profit_price = entry_price * (1 + take_profit_percent / 100)
             stop_loss_price = entry_price * (1 - stop_loss_percent / 100)
             
@@ -268,8 +293,8 @@ async def check_strategy():
                 return
 
         else: # Só procura por compras se não estiver posicionado
-            # --- LÓGICA DE COMPRA (VOLUME + RVI) ---
-            volume_spike = current_volume > (current_volume_sma * 2.5) # Volume 2.5x maior que a média
+            # --- LÓGICA DE COMPRA ---
+            volume_spike = current_volume > (current_volume_sma * 2.5)
             rvi_crossover = previous_rvi < previous_rvi_signal and current_rvi > current_rvi_signal
             
             if volume_spike and rvi_crossover:
