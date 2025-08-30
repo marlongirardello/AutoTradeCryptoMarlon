@@ -68,7 +68,7 @@ parameters = {
     "quote_token_symbol": None,
     "timeframe": None,
     "amount": None,
-    "lookback_period": None,    # NOVO: Período de análise para S/R dinâmico
+    "lookback_period": None,
     "stop_loss_percent": None,
     "trade_pair_details": {}
 }
@@ -157,7 +157,7 @@ async def execute_sell_order(reason="Venda Manual"):
     except Exception as e:
         logger.error(f"Erro ao buscar saldo para venda: {e}"); await send_telegram_message(f"⚠️ Falha ao buscar saldo do token para venda: {e}")
 
-async def fetch_geckoterminal_ohlcv(pair_address, timeframe, limit=150): # Aumenta o limite para ter dados suficientes para o lookback
+async def fetch_geckoterminal_ohlcv(pair_address, timeframe, limit=150):
     timeframe_map = {"1m": "minute", "5m": "minute", "15m": "minute", "1h": "hour", "4h": "hour", "1d": "day"}
     aggregate_map = {"1m": 1, "5m": 5, "15m": 15, "1h": 1, "4h": 4, "1d": 1}
     
@@ -209,19 +209,16 @@ async def check_strategy():
         lookback_period = parameters["lookback_period"]
         
         logger.info(f"Buscando dados de candles para {pair_details['base_symbol']}/{pair_details['quote_symbol']} no GeckoTerminal...")
-        # Busca mais velas para garantir que temos dados suficientes para o lookback
         data = await fetch_geckoterminal_ohlcv(pair_details['pair_address'], timeframe, limit=lookback_period + 50)
 
         if data is None or data.empty or len(data) < lookback_period:
             await send_telegram_message(f"⚠️ Não foi possível obter dados de velas suficientes do GeckoTerminal (necessário: {lookback_period}, obtido: {len(data) if data is not None else 0}).")
             return
         
-        # --- CÁLCULO DINÂMICO DE SUPORTE E RESISTÊNCIA ---
         analysis_df = data.tail(lookback_period).copy()
         dynamic_resistance = analysis_df['high'].max()
         dynamic_support = analysis_df['low'].min()
         
-        # --- CÁLCULO DOS INDICADORES ---
         data.ta.rsi(length=14, append=True)
         data['volume_sma'] = data['volume'].rolling(window=20).mean()
         data.dropna(inplace=True)
@@ -262,8 +259,16 @@ async def check_strategy():
             rsi_oversold = current_rsi < 45
             volume_confirmation = current_volume > current_volume_sma
 
-            if price_in_buy_zone and rsi_oversold and volume_confirmation:
-                logger.info(f"Sinal de COMPRA: Preço na zona de compra dinâmica ({current_close:.8f}), RSI ({current_rsi:.2f}) e volume confirmados.")
+            logger.info(
+                f"DEBUG: Avaliação de Compra -> "
+                f"Preço na Zona: {price_in_buy_zone} | "
+                f"RSI OK: {rsi_oversold} | "
+                f"Volume OK: {volume_confirmation}"
+            )
+
+            # --- NOVA LÓGICA ÁGIL ---
+            if price_in_buy_zone and (rsi_oversold or volume_confirmation):
+                logger.info(f"Sinal de COMPRA (Lógica Ágil): Preço na zona ({current_close:.8f}) com RSI ({current_rsi:.2f}) OU Volume confirmados.")
                 await execute_buy_order(amount, current_close)
 
     except Exception as e:
@@ -278,13 +283,13 @@ async def send_telegram_message(message):
 async def start(update, context):
     await update.effective_message.reply_text(
         'Olá! Sou seu bot de trading **autônomo** para a rede Solana.\n'
-        'Estratégia: **Range Trading com Suporte e Resistência Dinâmicos**.\n\n'
+        'Estratégia: **Range Trading com Suporte e Resistência Dinâmicos** (Lógica Ágil).\n\n'
         'Use o comando `/set` para configurar os parâmetros de risco:\n'
         '`/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <LOOKBACK> <STOP_LOSS_%>`\n\n'
         '**Exemplo (PENGU/SOL):**\n'
-        '`/set 67dmC6iG5sAh4xQdEe4A2t4gYg3sM24g1vQdY8fJzK4g SOL 1m 0.1 120 1.5`\n\n'
+        '`/set 67dmC6iG5sAh4xQdEe4A2t4gYg3sM24g1vQdY8fJzK4g SOL 1m 0.1 30 1.5`\n\n'
         '**O que os parâmetros significam:**\n'
-        '- **LOOKBACK:** Nº de velas que o bot analisará para definir o range (ex: `120` para as últimas 2 horas no timeframe de 1m).\n'
+        '- **LOOKBACK:** Nº de velas que o bot analisará para definir o range (ex: `30` para os últimos 30 min no timeframe de 1m).\n'
         '- **STOP_LOSS_%:** Percentual abaixo do suporte dinâmico para o stop loss.\n\n'
         '**Comandos:**\n'
         '• `/run` - Inicia o bot.\n'
@@ -368,7 +373,7 @@ async def set_params(update, context):
         await update.effective_message.reply_text(
             "⚠️ *Erro: Formato incorreto.*\n"
             "Use: `/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <LOOKBACK> <STOP_LOSS_%>`\n"
-            "Exemplo: `/set ... SOL 1m 0.1 120 1.5`",
+            "Exemplo: `/set ... SOL 1m 0.1 30 1.5`",
             parse_mode='Markdown'
         )
     except httpx.HTTPStatusError as e:
@@ -490,3 +495,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
