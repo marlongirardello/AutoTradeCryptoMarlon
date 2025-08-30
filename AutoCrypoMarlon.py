@@ -72,9 +72,7 @@ application = None
 # --- NOVA FUNÇÃO: Obter Taxa de Prioridade Dinâmica ---
 async def get_dynamic_priority_fee(addresses):
     try:
-        # A API requer uma lista de Pubkeys, não strings
-        pubkey_addresses = [Pubkey.from_string(addr) for addr in addresses]
-        fees_response = await async_solana_client.get_recent_prioritization_fees(pubkey_addresses)
+        fees_response = await async_solana_client.get_recent_prioritization_fees(addresses)
         fees_data = fees_response.value
         if not fees_data:
             logger.warning("Não foi possível obter taxas de prioridade recentes, usando padrão (50000).")
@@ -98,7 +96,7 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
     amount_wei = int(amount * (10**input_decimals))
 
     # Obter a taxa de prioridade dinâmica antes de cada swap
-    involved_addresses = [input_mint_str, output_mint_str]
+    involved_addresses = [Pubkey.from_string(input_mint_str), Pubkey.from_string(output_mint_str)]
     priority_fee = await get_dynamic_priority_fee(involved_addresses)
     
     async with httpx.AsyncClient() as client:
@@ -290,15 +288,15 @@ async def check_strategy():
         logger.error(f"Ocorreu um erro em check_strategy: {e}", exc_info=True)
         await send_telegram_message(f"⚠️ Erro inesperado ao executar a estratégia: {e}")
 
-# --- Comandos do Telegram ---
+# --- Comandos do Telegram (Atualizados para o novo /set) ---
 async def start(update, context):
     await update.effective_message.reply_text(
         'Olá! Sou seu bot de **Range Trading Autônomo v2.0 (Taxas Dinâmicas)** para a rede Solana.\n\n'
         '**Estratégia:** Opero em Zonas Adaptativas e agora ajusto as **taxas de prioridade automaticamente** para combater o slippage e garantir a melhor execução.\n\n'
         'Use `/set` para configurar:\n'
         '`/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <LOOKBACK> <STOP_LOSS_%>`\n\n'
-        '**Exemplo (WIF/SOL):**\n'
-        '`/set EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm SOL 1m 0.1 30 1.5`\n\n'
+        '**Exemplo (BONK/SOL):**\n'
+        '`/set DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263 SOL 1m 0.1 30 1.5`\n\n'
         '**Comandos:**\n'
         '• `/run` - Inicia o bot.\n'
         '• `/stop` - Para o bot.\n'
@@ -444,6 +442,10 @@ async def periodic_checker():
 async def error_handler(update, context):
     logger.error(f"Exceção ao manusear uma atualização: {context.error}", exc_info=context.error)
 
+async def send_telegram_message(message):
+    if application:
+        await application.bot.send_message(chat_id=CHAT_ID, text=message, parse_mode='Markdown')
+
 def main():
     global application
     application = Application.builder().token(TELEGRAM_TOKEN).build()
@@ -461,3 +463,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
