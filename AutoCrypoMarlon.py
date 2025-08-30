@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import telegram
 from telegram.ext import Application, CommandHandler
 import logging
@@ -19,8 +20,9 @@ from solders.message import to_bytes_versioned
 from solana.rpc.api import Client
 from solana.rpc.types import TxOpts
 from spl.token.instructions import get_associated_token_address
+from solana.rpc.async_api import AsyncClient
 
-# --- Carrega as variáveis de ambiente (funciona localmente e no Replit/Railway) ---
+# --- Carrega as variáveis de ambiente ---
 load_dotenv()
 
 # --- Configurações Iniciais ---
@@ -31,19 +33,14 @@ RPC_URL = os.getenv("RPC_URL")
 
 # --- Validação de Configurações ---
 if not all([TELEGRAM_TOKEN, CHAT_ID, PRIVATE_KEY_B58, RPC_URL]):
-    print("Erro: Verifique se todas as variáveis de ambiente estão definidas:")
-    print("TELEGRAM_TOKEN, CHAT_ID, PRIVATE_KEY_BASE58, RPC_URL")
+    print("Erro: Verifique se todas as variáveis de ambiente estão definidas.")
     exit()
 
 # --- Configuração do Logging ---
-for handler in logging.root.handlers[:]:
-    logging.root.removeHandler(handler)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler()
-    ]
+    handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
 
@@ -51,33 +48,58 @@ logger = logging.getLogger(__name__)
 try:
     payer = Keypair.from_base58_string(PRIVATE_KEY_B58)
     solana_client = Client(RPC_URL)
+    async_solana_client = AsyncClient(RPC_URL)
     logger.info(f"Carteira carregada com sucesso. Endereço público: {payer.pubkey()}")
 except Exception as e:
-    logger.error(f"Erro ao carregar a carteira Solana. Verifique sua chave privada e o RPC URL. Erro: {e}")
+    logger.error(f"Erro ao carregar a carteira Solana: {e}")
     exit()
 
 # --- Variáveis Globais ---
 bot_running = False
 in_position = False
 entry_price = 0.0
-check_interval_seconds = 60 # Padrão para 1 minuto
+check_interval_seconds = 60
 periodic_task = None
-WRAPPED_SOL_MINT_ADDRESS = "So11111111111111111111111111111111111111112"
 parameters = {
-    "base_token_symbol": None,
-    "quote_token_symbol": None,
+    "lookback_period": None,
     "timeframe": None,
     "amount": None,
-    "lookback_period": None,
     "stop_loss_percent": None,
     "trade_pair_details": {}
 }
 application = None
 
-# --- Funções de Execução de Ordem (Reais e Assíncronas) ---
+# --- NOVA FUNÇÃO: Obter Taxa de Prioridade Dinâmica ---
+async def get_dynamic_priority_fee(addresses):
+    try:
+        # A API requer uma lista de Pubkeys, não strings
+        pubkey_addresses = [Pubkey.from_string(addr) for addr in addresses]
+        fees_response = await async_solana_client.get_recent_prioritization_fees(pubkey_addresses)
+        fees_data = fees_response.value
+        if not fees_data:
+            logger.warning("Não foi possível obter taxas de prioridade recentes, usando padrão (50000).")
+            return 50000
+
+        # Calcula a mediana das taxas para uma oferta competitiva
+        fees = [fee.prioritization_fee for fee in fees_data]
+        median_fee = int(np.median(fees))
+        
+        # Define um valor mínimo e máximo para segurança
+        dynamic_fee = max(50000, min(median_fee, 1000000)) 
+        logger.info(f"Taxa de prioridade dinâmica calculada: {dynamic_fee} micro-lamports")
+        return dynamic_fee
+    except Exception as e:
+        logger.error(f"Erro ao calcular taxa de prioridade dinâmica: {e}. Usando padrão (50000).")
+        return 50000
+
+# --- Funções de Execução de Ordem (Atualizadas para usar Taxa Dinâmica) ---
 async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, slippage_bps=100):
     logger.info(f"Iniciando swap de {amount} do token {input_mint_str} para {output_mint_str}")
     amount_wei = int(amount * (10**input_decimals))
+
+    # Obter a taxa de prioridade dinâmica antes de cada swap
+    involved_addresses = [input_mint_str, output_mint_str]
+    priority_fee = await get_dynamic_priority_fee(involved_addresses)
     
     async with httpx.AsyncClient() as client:
         try:
@@ -90,6 +112,7 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
                 "userPublicKey": str(payer.pubkey()),
                 "quoteResponse": quote_response,
                 "wrapAndUnwrapSol": True,
+                "computeUnitPriceMicroLamports": priority_fee
             }
             swap_url = "https://quote-api.jup.ag/v6/swap"
             swap_res = await client.post(swap_url, json=swap_payload)
@@ -118,10 +141,14 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
         except Exception as e:
             logger.error(f"Falha na transação: {e}"); await send_telegram_message(f"⚠️ Falha na transação on-chain: {e}"); return None
 
-async def execute_buy_order(amount, price):
+async def execute_buy_order(amount, price, manual=False):
     global in_position, entry_price
+    if in_position:
+        if manual: await send_telegram_message("⚠️ Já existe uma posição aberta. Venda-a primeiro com /sell.")
+        return
+
     details = parameters["trade_pair_details"]
-    logger.info(f"EXECUTANDO ORDEM DE COMPRA REAL de {amount} {details['quote_symbol']} para {details['base_symbol']} ao preço de {price}")
+    logger.info(f"EXECUTANDO ORDEM DE COMPRA {'MANUAL' if manual else 'AUTOMÁTICA'} de {amount} {details['quote_symbol']} para {details['base_symbol']} ao preço de {price}")
     
     entry_price = price
 
@@ -135,6 +162,10 @@ async def execute_buy_order(amount, price):
 
 async def execute_sell_order(reason="Venda Manual"):
     global in_position, entry_price
+    if not in_position:
+        if "Manual" in reason: await send_telegram_message("⚠️ Nenhuma posição aberta para vender.")
+        return
+        
     details = parameters["trade_pair_details"]
     logger.info(f"EXECUTANDO ORDEM DE VENDA REAL do token {details['base_symbol']}. Motivo: {reason}")
     try:
@@ -157,7 +188,8 @@ async def execute_sell_order(reason="Venda Manual"):
     except Exception as e:
         logger.error(f"Erro ao buscar saldo para venda: {e}"); await send_telegram_message(f"⚠️ Falha ao buscar saldo do token para venda: {e}")
 
-async def fetch_geckoterminal_ohlcv(pair_address, timeframe, limit=150):
+# --- Funções de Análise e Estratégia ---
+async def fetch_geckoterminal_ohlcv(pair_address, timeframe):
     timeframe_map = {"1m": "minute", "5m": "minute", "15m": "minute", "1h": "hour", "4h": "hour", "1d": "day"}
     aggregate_map = {"1m": 1, "5m": 5, "15m": 15, "1h": 1, "4h": 4, "1d": 1}
     
@@ -169,23 +201,20 @@ async def fetch_geckoterminal_ohlcv(pair_address, timeframe, limit=150):
         return None
 
     current_timestamp = int(time.time())
-    url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools/{pair_address}/ohlcv/{gt_timeframe}?aggregate={gt_aggregate}&limit={limit}&before_timestamp={current_timestamp}"
+    url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools/{pair_address}/ohlcv/{gt_timeframe}?aggregate={gt_aggregate}&limit=200&before_timestamp={current_timestamp}"
     
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.get(url)
+            response = await client.get(url, timeout=10.0)
             response.raise_for_status()
             api_data = response.json()
 
             if api_data.get('data') and api_data['data'].get('attributes', {}).get('ohlcv_list'):
                 ohlcv_list = api_data['data']['attributes']['ohlcv_list']
-                df = pd.DataFrame(ohlcv_list, columns=['timestamp', 'Open', 'High', 'Low', 'Close', 'Volume'])
+                df = pd.DataFrame(ohlcv_list, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
-                for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+                for col in ['open', 'high', 'low', 'close', 'volume']:
                     df[col] = pd.to_numeric(df[col])
-                
-                df.columns = [col.lower() for col in df.columns]
-
                 return df.sort_values(by='timestamp').reset_index(drop=True)
             else:
                 logger.warning(f"GeckoTerminal não retornou dados de velas. Resposta: {api_data}")
@@ -199,98 +228,77 @@ async def fetch_geckoterminal_ohlcv(pair_address, timeframe, limit=150):
 
 async def check_strategy():
     global in_position, entry_price
-    required_params = ["base_token_symbol", "quote_token_symbol", "timeframe", "amount", "lookback_period", "stop_loss_percent"]
-    if not bot_running or not all(parameters.get(p) is not None for p in required_params): return
+    if not bot_running or not all(p is not None for p in parameters.values() if p != parameters['trade_pair_details']): return
 
     try:
         pair_details = parameters["trade_pair_details"]
-        timeframe = parameters["timeframe"]
-        amount = parameters["amount"]
-        lookback_period = parameters["lookback_period"]
+        data = await fetch_geckoterminal_ohlcv(pair_details['pair_address'], parameters['timeframe'])
         
-        logger.info(f"Buscando dados de candles para {pair_details['base_symbol']}/{pair_details['quote_symbol']} no GeckoTerminal...")
-        data = await fetch_geckoterminal_ohlcv(pair_details['pair_address'], timeframe, limit=lookback_period + 50)
-
-        if data is None or data.empty or len(data) < lookback_period:
-            await send_telegram_message(f"⚠️ Não foi possível obter dados de velas suficientes do GeckoTerminal (necessário: {lookback_period}, obtido: {len(data) if data is not None else 0}).")
+        if data is None or data.empty or len(data) < parameters["lookback_period"]:
+            await send_telegram_message(f"⚠️ Não foi possível obter dados de velas suficientes do GeckoTerminal.")
             return
+
+        lookback_data = data.tail(parameters["lookback_period"]).copy()
         
-        analysis_df = data.tail(lookback_period).copy()
-        dynamic_resistance = analysis_df['high'].max()
-        dynamic_support = analysis_df['low'].min()
+        dynamic_support = lookback_data['low'].min()
+        dynamic_resistance = lookback_data['high'].max()
+        dynamic_range = dynamic_resistance - dynamic_support
+
+        if dynamic_range == 0:
+            logger.warning("Range dinâmico é zero, aguardando movimento.")
+            return
+
+        buy_zone_upper_limit = dynamic_support + (dynamic_range * 0.25)
+        sell_zone_lower_limit = dynamic_resistance - (dynamic_range * 0.25)
+
+        current_candle = data.iloc[-1]
+        current_price = current_candle['close']
         
-        data.ta.rsi(length=14, append=True)
+        data['rsi'] = ta.rsi(data['close'], length=14)
         data['volume_sma'] = data['volume'].rolling(window=20).mean()
-        data.dropna(inplace=True)
-
-        if data.empty:
-            logger.warning("Não há dados suficientes após o cálculo dos indicadores.")
-            return
-
-        current_candle = data.iloc[-2]
         
-        current_close = current_candle['close']
+        current_rsi = data['rsi'].iloc[-1]
         current_volume = current_candle['volume']
-        current_volume_sma = current_candle['volume_sma']
-        current_rsi = current_candle['RSI_14']
+        volume_sma = data['volume_sma'].iloc[-1]
         
         logger.info(
-            f"Análise ({pair_details['base_symbol']}): "
-            f"Preço {current_close:.8f} | "
-            f"Vol {current_volume:.2f} | Média Vol {current_volume_sma:.2f} | "
-            f"RSI {current_rsi:.2f} | "
-            f"Suporte Dinâmico {dynamic_support:.8f} | Resistência Dinâmica {dynamic_resistance:.8f}"
+            f"Análise ({pair_details['base_symbol']}): Preço {current_price:.6f} | "
+            f"RSI {current_rsi:.2f} | Vol {current_volume:.2f} | Média Vol {volume_sma:.2f} | "
+            f"Suporte Dinâmico {dynamic_support:.6f} | Resistência Dinâmica {dynamic_resistance:.6f}"
         )
 
         if in_position:
-            take_profit_price = dynamic_resistance
-            stop_loss_price = dynamic_support * (1 - parameters["stop_loss_percent"] / 100)
-
-            if current_close >= take_profit_price:
-                await execute_sell_order(reason=f"Take Profit (Resistência Dinâmica) atingido em {take_profit_price:.8f}")
-            elif current_close <= stop_loss_price:
-                await execute_sell_order(reason=f"Stop Loss atingido em {stop_loss_price:.8f}")
+            stop_loss_price = entry_price * (1 - parameters["stop_loss_percent"] / 100)
+            
+            if current_price >= sell_zone_lower_limit:
+                 await execute_sell_order(reason=f"Take Profit (Zona de Venda) atingido em {current_price:.6f}")
+            elif current_price <= stop_loss_price:
+                await execute_sell_order(reason=f"Stop Loss atingido em {stop_loss_price:.6f}")
 
         else:
-            buy_zone_upper_bound = dynamic_support * 1.015
-            buy_zone_lower_bound = dynamic_support * 0.995
+            price_in_buy_zone = current_price <= buy_zone_upper_limit
+            rsi_ok = current_rsi < 45
+            volume_ok = current_volume > volume_sma
 
-            price_in_buy_zone = buy_zone_lower_bound <= current_close <= buy_zone_upper_bound
-            rsi_oversold = current_rsi < 45
-            volume_confirmation = current_volume > current_volume_sma
+            logger.info(f"DEBUG: Avaliação de Compra -> Preço na Zona: {price_in_buy_zone} | RSI OK: {rsi_ok} | Volume OK: {volume_ok}")
 
-            logger.info(
-                f"DEBUG: Avaliação de Compra -> "
-                f"Preço na Zona: {price_in_buy_zone} | "
-                f"RSI OK: {rsi_oversold} | "
-                f"Volume OK: {volume_confirmation}"
-            )
-
-            # --- NOVA LÓGICA ÁGIL ---
-            if price_in_buy_zone and (rsi_oversold or volume_confirmation):
-                logger.info(f"Sinal de COMPRA (Lógica Ágil): Preço na zona ({current_close:.8f}) com RSI ({current_rsi:.2f}) OU Volume confirmados.")
-                await execute_buy_order(amount, current_close)
+            if price_in_buy_zone and (rsi_ok or volume_ok):
+                logger.info(f"Sinal de COMPRA (Lógica Ágil): Preço na zona ({current_price:.6f}) com RSI ({current_rsi:.2f}) OU Volume confirmados.")
+                await execute_buy_order(parameters["amount"], current_price)
 
     except Exception as e:
         logger.error(f"Ocorreu um erro em check_strategy: {e}", exc_info=True)
         await send_telegram_message(f"⚠️ Erro inesperado ao executar a estratégia: {e}")
 
-
-async def send_telegram_message(message):
-    if application:
-        await application.bot.send_message(chat_id=CHAT_ID, text=message, parse_mode='Markdown')
-
+# --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot de trading **autônomo** para a rede Solana.\n'
-        'Estratégia: **Range Trading com Suporte e Resistência Dinâmicos** (Lógica Ágil).\n\n'
-        'Use o comando `/set` para configurar os parâmetros de risco:\n'
+        'Olá! Sou seu bot de **Range Trading Autônomo v2.0 (Taxas Dinâmicas)** para a rede Solana.\n\n'
+        '**Estratégia:** Opero em Zonas Adaptativas e agora ajusto as **taxas de prioridade automaticamente** para combater o slippage e garantir a melhor execução.\n\n'
+        'Use `/set` para configurar:\n'
         '`/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <LOOKBACK> <STOP_LOSS_%>`\n\n'
-        '**Exemplo (PENGU/SOL):**\n'
-        '`/set 67dmC6iG5sAh4xQdEe4A2t4gYg3sM24g1vQdY8fJzK4g SOL 1m 0.1 30 1.5`\n\n'
-        '**O que os parâmetros significam:**\n'
-        '- **LOOKBACK:** Nº de velas que o bot analisará para definir o range (ex: `30` para os últimos 30 min no timeframe de 1m).\n'
-        '- **STOP_LOSS_%:** Percentual abaixo do suporte dinâmico para o stop loss.\n\n'
+        '**Exemplo (WIF/SOL):**\n'
+        '`/set EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm SOL 1m 0.1 30 1.5`\n\n'
         '**Comandos:**\n'
         '• `/run` - Inicia o bot.\n'
         '• `/stop` - Para o bot.\n'
@@ -308,46 +316,35 @@ async def set_params(update, context):
         base_token_contract = context.args[0]
         quote_symbol_input = context.args[1].upper()
         timeframe = context.args[2].lower()
-        amount = float(context.args[3])
-        lookback_period = int(context.args[4])
-        stop_loss_percent = float(context.args[5])
-
-        interval_map = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400, "1d": 86400}
-        if timeframe not in interval_map:
-            await update.effective_message.reply_text(f"⚠️ Timeframe '{timeframe}' não suportado.")
-            return
+        amount, lookback_period, stop_loss_percent = float(context.args[3]), int(context.args[4]), float(context.args[5])
         
-        check_interval_seconds = interval_map[timeframe]
+        interval_map = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600}
+        check_interval_seconds = interval_map.get(timeframe, 60)
 
         token_search_url = f"https://api.dexscreener.com/latest/dex/tokens/{base_token_contract}"
         async with httpx.AsyncClient() as client:
             response = await client.get(token_search_url)
             response.raise_for_status()
             token_res = response.json()
-
+        
         if not token_res.get('pairs'):
-            await update.effective_message.reply_text(f"⚠️ Nenhum par encontrado no Dexscreener para o contrato fornecido.")
+            await update.effective_message.reply_text(f"⚠️ Nenhum par encontrado para o contrato.")
             return
         
         accepted_symbols = [quote_symbol_input]
-        if quote_symbol_input == 'SOL':
-            accepted_symbols.append('WSOL')
+        if quote_symbol_input == 'SOL': accepted_symbols.append('WSOL')
 
         valid_pairs = [p for p in token_res['pairs'] if p.get('quoteToken', {}).get('symbol') in accepted_symbols]
-        
         if not valid_pairs:
-            await update.effective_message.reply_text(f"⚠️ Nenhum par com `{quote_symbol_input}` encontrado para este contrato.")
+            await update.effective_message.reply_text(f"⚠️ Nenhum par com `{quote_symbol_input}` encontrado.")
             return
 
         trade_pair = max(valid_pairs, key=lambda p: p.get('liquidity', {}).get('usd', 0))
-
         base_token_symbol = trade_pair['baseToken']['symbol'].lstrip('$')
         quote_token_symbol = trade_pair['quoteToken']['symbol']
 
         parameters = {
-            "base_token_symbol": base_token_symbol, 
-            "quote_token_symbol": quote_token_symbol,
-            "timeframe": timeframe, 
+            "timeframe": timeframe,
             "amount": amount,
             "lookback_period": lookback_period,
             "stop_loss_percent": stop_loss_percent,
@@ -361,31 +358,28 @@ async def set_params(update, context):
             }
         }
         await update.effective_message.reply_text(
-            f"✅ *Parâmetros autônomos definidos!*\n\n"
-            f"🪙 *Par:* `{base_token_symbol}/{quote_token_symbol}`\n"
+            f"✅ *Parâmetros definidos!*\n\n"
+            f"📊 *Par:* `{base_token_symbol}/{quote_token_symbol}`\n"
             f"⏰ *Timeframe:* `{timeframe}`\n"
+            f"📈 *Estratégia:* Zonas Adaptativas (Lookback: {lookback_period} velas)\n"
             f"💰 *Valor por Ordem:* `{amount}` {quote_symbol_input}\n"
-            f"📉 *Stop Loss:* `{stop_loss_percent}%` abaixo do suporte dinâmico\n"
-            f"🔍 *Período de Análise (Lookback):* Últimas `{lookback_period}` velas",
+            f"🚀 *Taxa de Prioridade:* **Dinâmica (Automática)**\n"
+            f"📉 *Stop Loss:* `{stop_loss_percent}%`",
             parse_mode='Markdown'
         )
     except (IndexError, ValueError):
         await update.effective_message.reply_text(
-            "⚠️ *Erro: Formato incorreto.*\n"
-            "Use: `/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <LOOKBACK> <STOP_LOSS_%>`\n"
-            "Exemplo: `/set ... SOL 1m 0.1 30 1.5`",
+            "⚠️ *Formato incorreto.*\n"
+            "Use: `/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <LOOKBACK> <STOP_LOSS_%>`",
             parse_mode='Markdown'
         )
-    except httpx.HTTPStatusError as e:
-        await update.effective_message.reply_text(f"⚠️ Erro ao comunicar com a API do Dexscreener: {e}")
     except Exception as e:
-        logger.error(f"Erro inesperado em set_params: {e}")
-        await update.effective_message.reply_text(f"⚠️ Ocorreu um erro ao configurar os parâmetros: {e}")
+        logger.error(f"Erro em set_params: {e}")
+        await update.effective_message.reply_text(f"⚠️ Erro ao configurar: {e}")
 
 async def run_bot(update, context):
     global bot_running, periodic_task
-    required_params = ["base_token_symbol", "quote_token_symbol", "timeframe", "amount", "lookback_period", "stop_loss_percent"]
-    if not all(parameters.get(p) is not None for p in required_params):
+    if "lookback_period" not in parameters or parameters["lookback_period"] is None:
         await update.effective_message.reply_text("Defina os parâmetros com /set primeiro.")
         return
     if bot_running:
@@ -394,15 +388,14 @@ async def run_bot(update, context):
     
     bot_running = True
     logger.info("Bot de trade iniciado.")
-    await update.effective_message.reply_text("🚀 Bot autônomo iniciado! Analisando o mercado dinamicamente...")
+    await update.effective_message.reply_text("🚀 Bot iniciado! Operando com Zonas Adaptativas e Taxas Dinâmicas.")
     
     if periodic_task is None or periodic_task.done():
         periodic_task = asyncio.create_task(periodic_checker())
-    
     await check_strategy()
 
 async def stop_bot(update, context):
-    global bot_running, in_position, entry_price, periodic_task
+    global bot_running, periodic_task, in_position, entry_price
     if not bot_running:
         await update.effective_message.reply_text("O bot já está parado.")
         return
@@ -414,8 +407,26 @@ async def stop_bot(update, context):
 
     in_position, entry_price = False, 0.0
     logger.info("Bot de trade parado.")
-    await update.effective_message.reply_text("🛑 Bot parado. Posição e tarefas resetadas.")
+    await update.effective_message.reply_text("🛑 Bot parado.")
+    
+async def buy_manual(update, context):
+    try:
+        amount = float(context.args[0])
+        details = parameters.get("trade_pair_details")
+        if not details:
+            await update.effective_message.reply_text("⚠️ Configure o par com /set primeiro.")
+            return
+        await execute_buy_order(amount, 0, manual=True)
+    except (IndexError, ValueError):
+        await update.effective_message.reply_text("⚠️ *Formato incorreto.* Use: `/buy <VALOR>` (ex: `/buy 0.1`)")
+    except Exception as e:
+        logger.error(f"Erro no comando /buy: {e}")
+        await update.effective_message.reply_text(f"⚠️ Erro ao executar compra manual: {e}")
 
+async def sell_manual(update, context):
+    await execute_sell_order(reason="Comando /sell manual")
+
+# --- Loop Principal e Inicialização ---
 async def periodic_checker():
     logger.info(f"Verificador periódico iniciado com intervalo de {check_interval_seconds} segundos.")
     while True:
@@ -430,56 +441,12 @@ async def periodic_checker():
             logger.error(f"Erro no loop do verificador periódico: {e}")
             await asyncio.sleep(60)
 
-async def buy_manual(update, context):
-    if not bot_running:
-        await update.effective_message.reply_text("⚠️ O bot precisa estar rodando para comprar manualmente. Use `/run` primeiro.")
-        return
-    if in_position:
-        await update.effective_message.reply_text("⚠️ Já existe uma posição aberta. Venda-a primeiro com `/sell`.")
-        return
-    try:
-        amount = float(context.args[0])
-        await update.effective_message.reply_text(f"Iniciando compra manual de {amount} {parameters['quote_token_symbol']}...")
-        
-        pair_details = parameters["trade_pair_details"]
-        timeframe = parameters["timeframe"]
-        data = await fetch_geckoterminal_ohlcv(pair_details['pair_address'], timeframe)
-        if data is None or data.empty:
-            await update.effective_message.reply_text("⚠️ Não foi possível obter o preço atual para a compra.")
-            return
-        
-        current_price = data.iloc[-1]['close']
-        await execute_buy_order(amount, current_price)
-
-    except (IndexError, ValueError):
-        await update.effective_message.reply_text("⚠️ Formato incorreto. Use `/buy <VALOR>` (ex: `/buy 0.1`).")
-    except Exception as e:
-        logger.error(f"Erro na compra manual: {e}")
-        await update.effective_message.reply_text(f"⚠️ Ocorreu um erro na compra manual: {e}")
-
-async def sell_manual(update, context):
-    if not bot_running:
-        await update.effective_message.reply_text("⚠️ O bot precisa estar rodando para vender manualmente. Use `/run` primeiro.")
-        return
-    if not in_position:
-        await update.effective_message.reply_text("⚠️ Nenhuma posição aberta para vender.")
-        return
-    
-    await update.effective_message.reply_text("Iniciando venda manual da posição...")
-    await execute_sell_order(reason="Comando /sell manual")
-
 async def error_handler(update, context):
-    """Loga o erro para fins de depuração."""
     logger.error(f"Exceção ao manusear uma atualização: {context.error}", exc_info=context.error)
-
 
 def main():
     global application
-    application = (
-        Application.builder()
-       .token(TELEGRAM_TOKEN)
-       .build()
-    )
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
     
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("set", set_params))
@@ -487,7 +454,6 @@ def main():
     application.add_handler(CommandHandler("stop", stop_bot))
     application.add_handler(CommandHandler("buy", buy_manual))
     application.add_handler(CommandHandler("sell", sell_manual))
-
     application.add_error_handler(error_handler)
     
     logger.info("Bot do Telegram iniciado e aguardando comandos...")
@@ -495,4 +461,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
