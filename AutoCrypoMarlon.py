@@ -209,13 +209,18 @@ async def fetch_geckoterminal_ohlcv(pair_address, timeframe):
         return None
 
     current_timestamp = int(time.time())
-    # --- ADICIONADO "CACHE BUSTER" PARA GARANTIR DADOS FRESCOS ---
-    cache_buster = int(time.time() * 1000)
-    url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools/{pair_address}/ohlcv/{gt_timeframe}?aggregate={gt_aggregate}&limit=200&before_timestamp={current_timestamp}&_cb={cache_buster}"
+    url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools/{pair_address}/ohlcv/{gt_timeframe}?aggregate={gt_aggregate}&limit=200&before_timestamp={current_timestamp}"
     
+    # --- CABEÇALHOS ANTI-CACHE PARA GARANTIR DADOS FRESCOS ---
+    headers = {
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0'
+    }
+
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.get(url, timeout=10.0)
+            response = await client.get(url, headers=headers, timeout=10.0)
             response.raise_for_status()
             api_data = response.json()
 
@@ -303,7 +308,7 @@ async def check_strategy():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot de **Range Trading Autônomo v2.4 (Final)** para a rede Solana.\n\n'
+        'Olá! Sou seu bot de **Range Trading Autônomo v2.5 (Final)** para a rede Solana.\n\n'
         '**Estratégia:** Esta versão final inclui Zonas Adaptativas, Taxas de Prioridade Dinâmicas e proteções contra dados desatualizados para máxima performance.\n\n'
         'Use `/set` para configurar:\n'
         '`/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <LOOKBACK> <STOP_LOSS_%>`\n\n'
