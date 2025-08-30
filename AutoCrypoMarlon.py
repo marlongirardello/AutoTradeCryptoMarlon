@@ -20,7 +20,6 @@ from solders.message import to_bytes_versioned
 from solana.rpc.api import Client
 from solana.rpc.types import TxOpts
 from spl.token.instructions import get_associated_token_address
-from solana.rpc.async_api import AsyncClient
 
 # --- Carrega as variáveis de ambiente ---
 load_dotenv()
@@ -48,7 +47,6 @@ logger = logging.getLogger(__name__)
 try:
     payer = Keypair.from_base58_string(PRIVATE_KEY_B58)
     solana_client = Client(RPC_URL)
-    async_solana_client = AsyncClient(RPC_URL)
     logger.info(f"Carteira carregada com sucesso. Endereço público: {payer.pubkey()}")
 except Exception as e:
     logger.error(f"Erro ao carregar a carteira Solana: {e}")
@@ -69,33 +67,45 @@ parameters = {
 }
 application = None
 
-# --- NOVA FUNÇÃO: Obter Taxa de Prioridade Dinâmica ---
+# --- FUNÇÃO CORRIGIDA: Obter Taxa de Prioridade Dinâmica via Chamada RPC Direta ---
 async def get_dynamic_priority_fee(addresses):
     try:
-        fees_response = await async_solana_client.get_recent_prioritization_fees(addresses)
-        fees_data = fees_response.value
-        if not fees_data:
-            logger.warning("Não foi possível obter taxas de prioridade recentes, usando padrão (50000).")
-            return 50000
+        async with httpx.AsyncClient() as client:
+            payload = {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getRecentPrioritizationFees",
+                "params": [[str(addr) for addr in addresses]]
+            }
+            response = await client.post(RPC_URL, json=payload, timeout=10.0)
+            response.raise_for_status()
+            
+            result = response.json().get('result')
+            
+            if not result:
+                logger.warning("Não foi possível obter taxas de prioridade (RPC), usando padrão (50000).")
+                return 50000
+            
+            fees = [fee['prioritizationFee'] for fee in result if fee['prioritizationFee'] > 0]
+            if not fees:
+                logger.warning("Nenhuma taxa de prioridade positiva encontrada, usando padrão (50000).")
+                return 50000
 
-        # Calcula a mediana das taxas para uma oferta competitiva
-        fees = [fee.prioritization_fee for fee in fees_data]
-        median_fee = int(np.median(fees))
-        
-        # Define um valor mínimo e máximo para segurança
-        dynamic_fee = max(50000, min(median_fee, 1000000)) 
-        logger.info(f"Taxa de prioridade dinâmica calculada: {dynamic_fee} micro-lamports")
-        return dynamic_fee
+            median_fee = int(np.median(fees))
+            competitive_fee = int(median_fee * 1.1) # Adiciona 10% para ser mais competitivo
+            dynamic_fee = max(50000, min(competitive_fee, 1000000)) 
+            logger.info(f"Taxa de prioridade dinâmica calculada: {dynamic_fee} micro-lamports")
+            return dynamic_fee
+            
     except Exception as e:
         logger.error(f"Erro ao calcular taxa de prioridade dinâmica: {e}. Usando padrão (50000).")
         return 50000
 
-# --- Funções de Execução de Ordem (Atualizadas para usar Taxa Dinâmica) ---
+# --- Funções de Execução de Ordem ---
 async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, slippage_bps=100):
     logger.info(f"Iniciando swap de {amount} do token {input_mint_str} para {output_mint_str}")
     amount_wei = int(amount * (10**input_decimals))
 
-    # Obter a taxa de prioridade dinâmica antes de cada swap
     involved_addresses = [Pubkey.from_string(input_mint_str), Pubkey.from_string(output_mint_str)]
     priority_fee = await get_dynamic_priority_fee(involved_addresses)
     
@@ -146,7 +156,7 @@ async def execute_buy_order(amount, price, manual=False):
         return
 
     details = parameters["trade_pair_details"]
-    logger.info(f"EXECUTANDO ORDEM DE COMPRA {'MANUAL' if manual else 'AUTOMÁTICA'} de {amount} {details['quote_symbol']} para {details['base_symbol']} ao preço de {price}")
+    logger.info(f"EXECUTANDO ORDEM DE COMPRA {'MANUAL' if manual else 'AUTOMÁTICA'} de {amount} {details['quote_symbol']} para {details['base_symbol']} ao preço de {price:.8f}")
     
     entry_price = price
 
@@ -260,18 +270,18 @@ async def check_strategy():
         volume_sma = data['volume_sma'].iloc[-1]
         
         logger.info(
-            f"Análise ({pair_details['base_symbol']}): Preço {current_price:.6f} | "
+            f"Análise ({pair_details['base_symbol']}): Preço {current_price:.8f} | "
             f"RSI {current_rsi:.2f} | Vol {current_volume:.2f} | Média Vol {volume_sma:.2f} | "
-            f"Suporte Dinâmico {dynamic_support:.6f} | Resistência Dinâmica {dynamic_resistance:.6f}"
+            f"Suporte Dinâmico {dynamic_support:.8f} | Resistência Dinâmica {dynamic_resistance:.8f}"
         )
 
         if in_position:
             stop_loss_price = entry_price * (1 - parameters["stop_loss_percent"] / 100)
             
             if current_price >= sell_zone_lower_limit:
-                 await execute_sell_order(reason=f"Take Profit (Zona de Venda) atingido em {current_price:.6f}")
+                 await execute_sell_order(reason=f"Take Profit (Zona de Venda) atingido em {current_price:.8f}")
             elif current_price <= stop_loss_price:
-                await execute_sell_order(reason=f"Stop Loss atingido em {stop_loss_price:.6f}")
+                await execute_sell_order(reason=f"Stop Loss atingido em {stop_loss_price:.8f}")
 
         else:
             price_in_buy_zone = current_price <= buy_zone_upper_limit
@@ -281,18 +291,18 @@ async def check_strategy():
             logger.info(f"DEBUG: Avaliação de Compra -> Preço na Zona: {price_in_buy_zone} | RSI OK: {rsi_ok} | Volume OK: {volume_ok}")
 
             if price_in_buy_zone and (rsi_ok or volume_ok):
-                logger.info(f"Sinal de COMPRA (Lógica Ágil): Preço na zona ({current_price:.6f}) com RSI ({current_rsi:.2f}) OU Volume confirmados.")
+                logger.info(f"Sinal de COMPRA (Lógica Ágil): Preço na zona ({current_price:.8f}) com RSI ({current_rsi:.2f}) OU Volume confirmados.")
                 await execute_buy_order(parameters["amount"], current_price)
 
     except Exception as e:
         logger.error(f"Ocorreu um erro em check_strategy: {e}", exc_info=True)
         await send_telegram_message(f"⚠️ Erro inesperado ao executar a estratégia: {e}")
 
-# --- Comandos do Telegram (Atualizados para o novo /set) ---
+# --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot de **Range Trading Autônomo v2.0 (Taxas Dinâmicas)** para a rede Solana.\n\n'
-        '**Estratégia:** Opero em Zonas Adaptativas e agora ajusto as **taxas de prioridade automaticamente** para combater o slippage e garantir a melhor execução.\n\n'
+        'Olá! Sou seu bot de **Range Trading Autônomo v2.2 (Taxas Dinâmicas Corrigidas)** para a rede Solana.\n\n'
+        '**Estratégia:** Opero em Zonas Adaptativas e ajusto as taxas de prioridade automaticamente para combater o slippage.\n\n'
         'Use `/set` para configurar:\n'
         '`/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <LOOKBACK> <STOP_LOSS_%>`\n\n'
         '**Exemplo (BONK/SOL):**\n'
