@@ -92,7 +92,7 @@ async def get_dynamic_priority_fee(addresses):
                 return 50000
 
             median_fee = int(np.median(fees))
-            competitive_fee = int(median_fee * 1.1)
+            competitive_fee = int(median_fee * 1.1) 
             dynamic_fee = max(50000, min(competitive_fee, 1000000)) 
             logger.info(f"Taxa de prioridade dinâmica calculada: {dynamic_fee} micro-lamports")
             return dynamic_fee
@@ -196,7 +196,7 @@ async def execute_sell_order(reason="Venda Manual"):
     except Exception as e:
         logger.error(f"Erro ao buscar saldo para venda: {e}"); await send_telegram_message(f"⚠️ Falha ao buscar saldo do token para venda: {e}")
 
-# --- NOVA FUNÇÃO DE DADOS: MIGRADA PARA PHOTON ---
+# --- NOVA FUNÇÃO DE DADOS: MIGRADA PARA PHOTON (COM URL CORRIGIDO) ---
 async def fetch_ohlcv_data(token_address, timeframe):
     timeframe_map = {"1m": "1", "5m": "5", "15m": "15", "1h": "60"}
     resolution = timeframe_map.get(timeframe)
@@ -204,16 +204,9 @@ async def fetch_ohlcv_data(token_address, timeframe):
         logger.error(f"Timeframe '{timeframe}' não suportado pelo Photon.")
         return None
 
-    end_time = int(time.time())
-    start_time = end_time - (200 * 60 * int(resolution)) # Busca aprox. 200 velas
-
-    url = f"https://api.photon-sol.tinyastro.io/dashboard/historical/candles"
-    params = {
-        "token_address": token_address,
-        "resolution": resolution,
-        "start_time": start_time,
-        "end_time": end_time
-    }
+    # O endpoint correto da API Photon
+    url = f"https://api.photon-sol.io/v1/historical/candles/{token_address}"
+    params = {"resolution": resolution, "amount": 200} # Pede as últimas 200 velas
     
     headers = {'Cache-Control': 'no-cache, no-store, must-revalidate'}
 
@@ -223,9 +216,8 @@ async def fetch_ohlcv_data(token_address, timeframe):
             response.raise_for_status()
             api_data = response.json()
 
-            if api_data.get('success') and api_data.get('data', {}).get('candles'):
-                items = api_data['data']['candles']
-                df = pd.DataFrame(items)
+            if isinstance(api_data, list) and len(api_data) > 0:
+                df = pd.DataFrame(api_data)
                 df.rename(columns={
                     'startTime': 'timestamp', 'open': 'open', 'high': 'high', 
                     'low': 'low', 'close': 'close', 'volume': 'volume'
@@ -236,7 +228,7 @@ async def fetch_ohlcv_data(token_address, timeframe):
                     df[col] = pd.to_numeric(df[col])
                 return df.sort_values(by='timestamp').reset_index(drop=True)
             else:
-                logger.warning(f"Photon não retornou dados de velas. Resposta: {api_data}")
+                logger.warning(f"Photon não retornou dados de velas ou a resposta está vazia. Resposta: {api_data}")
                 return None
     except httpx.HTTPStatusError as e:
         logger.error(f"Erro de HTTP ao buscar dados no Photon: {e.response.text}")
@@ -245,14 +237,13 @@ async def fetch_ohlcv_data(token_address, timeframe):
         logger.error(f"Erro inesperado ao processar dados do Photon: {e}")
         return None
 
-# --- ESTRATÉGIA ATUALIZADA PARA USAR A NOVA FONTE DE DADOS ---
+# --- ESTRATÉGIA (SEM ALTERAÇÕES, JÁ USA A NOVA FONTE DE DADOS) ---
 async def check_strategy():
     global in_position, entry_price
     if not bot_running or not all(p is not None for p in parameters.values() if p != parameters['trade_pair_details']): return
 
     try:
         pair_details = parameters["trade_pair_details"]
-        # A API da Photon usa o endereço do token base, não do par
         data = await fetch_ohlcv_data(pair_details['base_address'], parameters['timeframe'])
         
         if data is None or data.empty or len(data) < parameters["lookback_period"]:
@@ -314,8 +305,8 @@ async def check_strategy():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot de **Range Trading Autônomo v4.2 (API Photon)**.\n\n'
-        '**Estratégia:** Esta versão final usa a API do **Photon** para máxima velocidade e fiabilidade dos dados, opera em Zonas Adaptativas e combate o slippage com Taxas de Prioridade Dinâmicas.\n\n'
+        'Olá! Sou seu bot de **Range Trading Autônomo v4.3 (API Photon Corrigida)**.\n\n'
+        '**Estratégia:** Esta versão final usa a API do **Photon** para máxima velocidade, opera em Zonas Adaptativas e combate o slippage com Taxas de Prioridade Dinâmicas.\n\n'
         'Use `/set` para configurar:\n'
         '`/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <LOOKBACK> <STOP_LOSS_%>`\n\n'
         '**Exemplo (BONK/SOL):**\n'
@@ -342,7 +333,6 @@ async def set_params(update, context):
         interval_map = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600}
         check_interval_seconds = interval_map.get(timeframe, 60)
 
-        # Usamos Dexscreener para encontrar o par, pois é a fonte mais completa para isso
         token_search_url = f"https://api.dexscreener.com/latest/dex/tokens/{base_token_contract}"
         async with httpx.AsyncClient() as client:
             response = await client.get(token_search_url)
@@ -375,7 +365,7 @@ async def set_params(update, context):
                 "quote_symbol": quote_token_symbol,
                 "base_address": trade_pair['baseToken']['address'],
                 "quote_address": trade_pair['quoteToken']['address'],
-                "pair_address": trade_pair['pairAddress'], # Ainda precisamos do pair address para outras APIs se necessário
+                "pair_address": trade_pair['pairAddress'],
                 "quote_decimals": 9 if quote_token_symbol in ['SOL', 'WSOL'] else 5
             }
         }
