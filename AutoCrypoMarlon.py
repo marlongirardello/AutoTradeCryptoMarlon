@@ -67,7 +67,7 @@ parameters = {
 }
 application = None
 
-# --- FUNÇÃO CORRIGIDA: Obter Taxa de Prioridade Dinâmica via Chamada RPC Direta ---
+# --- FUNÇÃO OTIMIZADA: Obter Taxa de Prioridade Dinâmica via Chamada RPC Direta ---
 async def get_dynamic_priority_fee(addresses):
     try:
         async with httpx.AsyncClient() as client:
@@ -92,7 +92,7 @@ async def get_dynamic_priority_fee(addresses):
                 return 50000
 
             median_fee = int(np.median(fees))
-            competitive_fee = int(median_fee * 1.1) # Adiciona 10% para ser mais competitivo
+            competitive_fee = int(median_fee * 1.1)
             dynamic_fee = max(50000, min(competitive_fee, 1000000)) 
             logger.info(f"Taxa de prioridade dinâmica calculada: {dynamic_fee} micro-lamports")
             return dynamic_fee
@@ -102,7 +102,7 @@ async def get_dynamic_priority_fee(addresses):
         return 50000
 
 # --- Funções de Execução de Ordem ---
-async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, slippage_bps=100):
+async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, slippage_bps=250):
     logger.info(f"Iniciando swap de {amount} do token {input_mint_str} para {output_mint_str}")
     amount_wei = int(amount * (10**input_decimals))
 
@@ -196,61 +196,67 @@ async def execute_sell_order(reason="Venda Manual"):
     except Exception as e:
         logger.error(f"Erro ao buscar saldo para venda: {e}"); await send_telegram_message(f"⚠️ Falha ao buscar saldo do token para venda: {e}")
 
-# --- Funções de Análise e Estratégia ---
-async def fetch_geckoterminal_ohlcv(pair_address, timeframe):
-    timeframe_map = {"1m": "minute", "5m": "minute", "15m": "minute", "1h": "hour", "4h": "hour", "1d": "day"}
-    aggregate_map = {"1m": 1, "5m": 5, "15m": 15, "1h": 1, "4h": 4, "1d": 1}
-    
-    gt_timeframe = timeframe_map.get(timeframe)
-    gt_aggregate = aggregate_map.get(timeframe)
-    
-    if not gt_timeframe:
-        logger.error(f"Timeframe '{timeframe}' não suportado pelo GeckoTerminal.")
+# --- NOVA FUNÇÃO DE DADOS: MIGRADA PARA PHOTON ---
+async def fetch_ohlcv_data(token_address, timeframe):
+    timeframe_map = {"1m": "1", "5m": "5", "15m": "15", "1h": "60"}
+    resolution = timeframe_map.get(timeframe)
+    if not resolution:
+        logger.error(f"Timeframe '{timeframe}' não suportado pelo Photon.")
         return None
 
-    current_timestamp = int(time.time())
-    url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools/{pair_address}/ohlcv/{gt_timeframe}?aggregate={gt_aggregate}&limit=200&before_timestamp={current_timestamp}"
-    
-    # --- CABEÇALHOS ANTI-CACHE PARA GARANTIR DADOS FRESCOS ---
-    headers = {
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Pragma': 'no-cache',
-        'Expires': '0'
+    end_time = int(time.time())
+    start_time = end_time - (200 * 60 * int(resolution)) # Busca aprox. 200 velas
+
+    url = f"https://api.photon-sol.tinyastro.io/dashboard/historical/candles"
+    params = {
+        "token_address": token_address,
+        "resolution": resolution,
+        "start_time": start_time,
+        "end_time": end_time
     }
+    
+    headers = {'Cache-Control': 'no-cache, no-store, must-revalidate'}
 
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.get(url, headers=headers, timeout=10.0)
+            response = await client.get(url, params=params, headers=headers, timeout=10.0)
             response.raise_for_status()
             api_data = response.json()
 
-            if api_data.get('data') and api_data['data'].get('attributes', {}).get('ohlcv_list'):
-                ohlcv_list = api_data['data']['attributes']['ohlcv_list']
-                df = pd.DataFrame(ohlcv_list, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            if api_data.get('success') and api_data.get('data', {}).get('candles'):
+                items = api_data['data']['candles']
+                df = pd.DataFrame(items)
+                df.rename(columns={
+                    'startTime': 'timestamp', 'open': 'open', 'high': 'high', 
+                    'low': 'low', 'close': 'close', 'volume': 'volume'
+                }, inplace=True)
+                
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
                 for col in ['open', 'high', 'low', 'close', 'volume']:
                     df[col] = pd.to_numeric(df[col])
                 return df.sort_values(by='timestamp').reset_index(drop=True)
             else:
-                logger.warning(f"GeckoTerminal não retornou dados de velas. Resposta: {api_data}")
+                logger.warning(f"Photon não retornou dados de velas. Resposta: {api_data}")
                 return None
     except httpx.HTTPStatusError as e:
-        logger.error(f"Erro de HTTP ao buscar dados no GeckoTerminal: {e.response.text}")
+        logger.error(f"Erro de HTTP ao buscar dados no Photon: {e.response.text}")
         return None
     except Exception as e:
-        logger.error(f"Erro inesperado ao processar dados do GeckoTerminal: {e}")
+        logger.error(f"Erro inesperado ao processar dados do Photon: {e}")
         return None
 
+# --- ESTRATÉGIA ATUALIZADA PARA USAR A NOVA FONTE DE DADOS ---
 async def check_strategy():
     global in_position, entry_price
     if not bot_running or not all(p is not None for p in parameters.values() if p != parameters['trade_pair_details']): return
 
     try:
         pair_details = parameters["trade_pair_details"]
-        data = await fetch_geckoterminal_ohlcv(pair_details['pair_address'], parameters['timeframe'])
+        # A API da Photon usa o endereço do token base, não do par
+        data = await fetch_ohlcv_data(pair_details['base_address'], parameters['timeframe'])
         
         if data is None or data.empty or len(data) < parameters["lookback_period"]:
-            await send_telegram_message(f"⚠️ Não foi possível obter dados de velas suficientes do GeckoTerminal.")
+            await send_telegram_message(f"⚠️ Não foi possível obter dados de velas suficientes do Photon.")
             return
 
         lookback_data = data.tail(parameters["lookback_period"]).copy()
@@ -308,8 +314,8 @@ async def check_strategy():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot de **Range Trading Autônomo v2.5 (Final)** para a rede Solana.\n\n'
-        '**Estratégia:** Esta versão final inclui Zonas Adaptativas, Taxas de Prioridade Dinâmicas e proteções contra dados desatualizados para máxima performance.\n\n'
+        'Olá! Sou seu bot de **Range Trading Autônomo v4.2 (API Photon)**.\n\n'
+        '**Estratégia:** Esta versão final usa a API do **Photon** para máxima velocidade e fiabilidade dos dados, opera em Zonas Adaptativas e combate o slippage com Taxas de Prioridade Dinâmicas.\n\n'
         'Use `/set` para configurar:\n'
         '`/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <LOOKBACK> <STOP_LOSS_%>`\n\n'
         '**Exemplo (BONK/SOL):**\n'
@@ -336,6 +342,7 @@ async def set_params(update, context):
         interval_map = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600}
         check_interval_seconds = interval_map.get(timeframe, 60)
 
+        # Usamos Dexscreener para encontrar o par, pois é a fonte mais completa para isso
         token_search_url = f"https://api.dexscreener.com/latest/dex/tokens/{base_token_contract}"
         async with httpx.AsyncClient() as client:
             response = await client.get(token_search_url)
@@ -368,13 +375,14 @@ async def set_params(update, context):
                 "quote_symbol": quote_token_symbol,
                 "base_address": trade_pair['baseToken']['address'],
                 "quote_address": trade_pair['quoteToken']['address'],
-                "pair_address": trade_pair['pairAddress'],
-                "quote_decimals": 9 if quote_token_symbol in ['SOL', 'WSOL'] else 6 
+                "pair_address": trade_pair['pairAddress'], # Ainda precisamos do pair address para outras APIs se necessário
+                "quote_decimals": 9 if quote_token_symbol in ['SOL', 'WSOL'] else 5
             }
         }
         await update.effective_message.reply_text(
             f"✅ *Parâmetros definidos!*\n\n"
             f"📊 *Par:* `{base_token_symbol}/{quote_token_symbol}`\n"
+            f"🌐 *Fonte de Dados:* `Photon`\n"
             f"⏰ *Timeframe:* `{timeframe}`\n"
             f"📈 *Estratégia:* Zonas Adaptativas (Lookback: {lookback_period} velas)\n"
             f"💰 *Valor por Ordem:* `{amount}` {quote_symbol_input}\n"
@@ -403,7 +411,7 @@ async def run_bot(update, context):
     
     bot_running = True
     logger.info("Bot de trade iniciado.")
-    await update.effective_message.reply_text("🚀 Bot iniciado! Operando com Zonas Adaptativas e Taxas Dinâmicas.")
+    await update.effective_message.reply_text("🚀 Bot iniciado! Operando com a API Photon.")
     
     if periodic_task is None or periodic_task.done():
         periodic_task = asyncio.create_task(periodic_checker())
