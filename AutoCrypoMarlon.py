@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 import telegram
-from telegram.ext import Application, CommandHandler
+from telegram.ext import Application, CommandHandler, BaseHandler
 import logging
 import time
 import os
@@ -173,21 +173,25 @@ async def execute_sell_order(reason="Venda Manual"):
     except Exception as e:
         logger.error(f"Erro ao vender: {e}"); await send_telegram_message(f"⚠️ Falha ao vender: {e}")
 
-# --- NOVA FUNÇÃO DE DADOS: MIGRADA PARA MORALIS (DEFINITIVO) ---
+# --- NOVA FUNÇÃO DE DADOS: MIGRADA PARA MORALIS (COM PARSING E TIMEFRAME CORRIGIDOS) ---
 async def fetch_ohlcv_data(pair_address, timeframe):
-    timeframe_map = {"1m": "1h", "5m": "1h", "15m": "1h", "1h": "1h"}
-    resolution = timeframe_map.get(timeframe, "1h")
+    timeframe_map = {"1m": "1min", "5m": "5min", "15m": "15min", "1h": "1h"}
+    resolution = timeframe_map.get(timeframe)
+    if not resolution:
+        logger.error(f"Timeframe '{timeframe}' não suportado pela Moralis.")
+        return None
 
     to_date = datetime.utcnow()
-    from_date = to_date - timedelta(hours=48)
+    from_date = to_date - timedelta(hours=4) # Busca dados das últimas 4 horas para ter histórico suficiente para timeframes de 1m
 
     url = f"https://solana-gateway.moralis.io/token/mainnet/pairs/{pair_address}/ohlcv"
     
     params = {
         "timeframe": resolution,
         "currency": "native",
-        "fromDate": from_date.strftime('%Y-%m-%d'),
-        "toDate": to_date.strftime('%Y-%m-%d')
+        "fromDate": from_date.strftime('%Y-%m-%dT%H:%M:%S'),
+        "toDate": to_date.strftime('%Y-%m-%dT%H:%M:%S'),
+        "limit": "30"
     }
     headers = {"X-API-KEY": MORALIS_API_KEY, 'Cache-Control': 'no-cache'}
 
@@ -240,7 +244,7 @@ async def check_strategy():
 
         buy_zone_upper_limit = dynamic_support + (dynamic_range * 0.25)
         sell_zone_lower_limit = dynamic_resistance - (dynamic_range * 0.25)
-        
+
         async with httpx.AsyncClient() as client:
             real_time_price_response = await client.get(f"https://api.dexscreener.com/latest/dex/pairs/solana/{pair_details['pair_address']}")
             pair_data = real_time_price_response.json().get('pairs', [{}])[0]
@@ -250,7 +254,7 @@ async def check_strategy():
         if current_price_native == 0:
             logger.warning("Não foi possível obter o preço em tempo real do Dexscreener.")
             return
-
+        
         data['rsi'] = ta.rsi(data['close'], length=14)
         data['volume_sma'] = data['volume'].rolling(window=20).mean()
         
@@ -283,8 +287,8 @@ async def check_strategy():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot de **Range Trading Autônomo v6.5 (Final)**.\n\n'
-        '**Estratégia:** Esta versão final usa a API da **Moralis** para máxima fiabilidade, opera em Zonas Adaptativas e combate o slippage com Taxas de Prioridade Dinâmicas. Os logs agora mostram os preços em USD e SOL para fácil comparação.\n\n'
+        'Olá! Sou seu bot de **Range Trading Autônomo v6.4 (Moralis Final)**.\n\n'
+        '**Estratégia:** Esta versão final usa a API da **Moralis** para máxima fiabilidade, opera em Zonas Adaptativas e combate o slippage com Taxas de Prioridade Dinâmicas.\n\n'
         'Use `/set` para configurar:\n'
         '`/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <LOOKBACK> <STOP_LOSS_%>`\n\n'
         '**Exemplo (BONK/SOL):**\n'
@@ -456,3 +460,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
