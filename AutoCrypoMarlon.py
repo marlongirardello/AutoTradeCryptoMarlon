@@ -30,11 +30,10 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 PRIVATE_KEY_B58 = os.getenv("PRIVATE_KEY_BASE58")
 RPC_URL = os.getenv("RPC_URL")
-BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY") # NOVA CHAVE DE API
 
 # --- Validação de Configurações ---
-if not all([TELEGRAM_TOKEN, CHAT_ID, PRIVATE_KEY_B58, RPC_URL, BIRDEYE_API_KEY]):
-    print("Erro: Verifique se todas as variáveis de ambiente estão definidas, incluindo BIRDEYE_API_KEY.")
+if not all([TELEGRAM_TOKEN, CHAT_ID, PRIVATE_KEY_B58, RPC_URL]):
+    print("Erro: Verifique se todas as variáveis de ambiente estão definidas.")
     exit()
 
 # --- Configuração do Logging ---
@@ -173,49 +172,46 @@ async def execute_sell_order(reason="Venda Manual"):
     except Exception as e:
         logger.error(f"Erro ao vender: {e}"); await send_telegram_message(f"⚠️ Falha ao vender: {e}")
 
-# --- NOVA FUNÇÃO DE DADOS: MIGRADA PARA BIRDEYE (DEFINITIVO) ---
-async def fetch_ohlcv_data(pair_address, timeframe):
-    timeframe_map = {"1m": "1m", "5m": "5m", "15m": "15m", "1h": "1H"}
-    resolution = timeframe_map.get(timeframe)
-    if not resolution: return None
+# --- FUNÇÕES DE DADOS (HÍBRIDAS) ---
+async def fetch_geckoterminal_ohlcv(pair_address, timeframe):
+    timeframe_map = {"1m": "minute", "5m": "minute", "15m": "minute", "1h": "hour"}
+    aggregate_map = {"1m": 1, "5m": 5, "15m": 15, "1h": 1}
+    gt_timeframe = timeframe_map.get(timeframe)
+    gt_aggregate = aggregate_map.get(timeframe)
+    if not gt_timeframe: return None
 
-    time_to = int(time.time())
-    time_unit = resolution[-1]
-    time_value = int(resolution[:-1]) if resolution[:-1].isdigit() else 1
-    
-    if time_unit == 'm': time_from = time_to - (200 * 60 * time_value)
-    else: time_from = time_to - (200 * 3600 * time_value)
-
-    url = f"https://public-api.birdeye.so/defi/ohlcv/pair"
-    params = {
-        "address": pair_address,
-        "type": resolution,
-        "time_from": time_from,
-        "time_to": time_to
-    }
-    # --- ADICIONADA A CHAVE DE API NO CABEÇALHO ---
-    headers = {
-        'X-API-KEY': BIRDEYE_API_KEY,
-        'Cache-Control': 'no-cache'
-    }
-
+    url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools/{pair_address}/ohlcv/{gt_timeframe}?aggregate={gt_aggregate}&limit=200"
+    headers = {'Cache-Control': 'no-cache, no-store, must-revalidate'}
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.get(url, params=params, headers=headers, timeout=10.0)
+            response = await client.get(url, headers=headers, timeout=10.0)
             response.raise_for_status()
             api_data = response.json()
-
-            if api_data.get('success') and api_data.get('data', {}).get('items'):
-                items = api_data['data']['items']
-                df = pd.DataFrame(items)
-                df.rename(columns={'unixTime': 'timestamp', 'o': 'open', 'h': 'high', 'l': 'low', 'c': 'close', 'v': 'volume'}, inplace=True)
+            if api_data.get('data') and api_data['data'].get('attributes', {}).get('ohlcv_list'):
+                ohlcv_list = api_data['data']['attributes']['ohlcv_list']
+                df = pd.DataFrame(ohlcv_list, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                 df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
                 for col in ['open', 'high', 'low', 'close', 'volume']:
                     df[col] = pd.to_numeric(df[col])
                 return df.sort_values(by='timestamp').reset_index(drop=True)
             return None
     except Exception as e:
-        logger.error(f"Erro ao processar dados do Birdeye: {e}")
+        logger.error(f"Erro ao processar dados do GeckoTerminal: {e}")
+        return None
+
+async def fetch_dexscreener_real_time_price(pair_address):
+    url = f"https://api.dexscreener.com/latest/dex/pairs/solana/{pair_address}"
+    headers = {'Cache-Control': 'no-cache, no-store, must-revalidate'}
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, headers=headers, timeout=5.0)
+            response.raise_for_status()
+            api_data = response.json()
+            if api_data.get('pair'):
+                return float(api_data['pair']['priceNative'])
+            return None
+    except Exception as e:
+        logger.error(f"Erro ao buscar preço no Dexscreener: {e}")
         return None
 
 # --- ESTRATÉGIA ---
@@ -225,13 +221,10 @@ async def check_strategy():
 
     try:
         pair_details = parameters["trade_pair_details"]
-        data = await fetch_ohlcv_data(pair_details['pair_address'], parameters['timeframe'])
+        data = await fetch_geckoterminal_ohlcv(pair_details['pair_address'], parameters['timeframe'])
         
-        if data is None or data.empty:
-            await send_telegram_message(f"⚠️ **Falha na Fonte de Dados (Birdeye):**\nNão foi possível obter o histórico de velas. Verifique se a chave da API está correta ou se o par tem liquidez.")
-            return
-        if len(data) < parameters["lookback_period"]:
-            await send_telegram_message(f"⚠️ **Dados Insuficientes (Birdeye):**\nRecebidas apenas {len(data)} velas. É necessário no mínimo {parameters['lookback_period']} para uma análise segura.")
+        if data is None or data.empty or len(data) < parameters["lookback_period"]:
+            await send_telegram_message(f"⚠️ **Dados Históricos Insuficientes (GeckoTerminal):**\nNão foi possível obter velas suficientes. O par pode ter baixa liquidez ou a API pode estar com problemas.")
             return
 
         lookback_data = data.tail(parameters["lookback_period"]).copy()
@@ -244,7 +237,10 @@ async def check_strategy():
         buy_zone_upper_limit = dynamic_support + (dynamic_range * 0.25)
         sell_zone_lower_limit = dynamic_resistance - (dynamic_range * 0.25)
 
-        current_price = data.iloc[-1]['close']
+        current_price = await fetch_dexscreener_real_time_price(pair_details['pair_address'])
+        if current_price is None:
+            await send_telegram_message("⚠️ **Falha no Preço em Tempo Real (Dexscreener):**\nNão foi possível obter o preço atual.")
+            return
         
         data['rsi'] = ta.rsi(data['close'], length=14)
         data['volume_sma'] = data['volume'].rolling(window=20).mean()
@@ -278,8 +274,8 @@ async def check_strategy():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot de **Range Trading Autônomo v7.1 (API Birdeye)**.\n\n'
-        '**Estratégia:** Esta versão final usa a API do **Birdeye** para máxima fiabilidade. Por favor, adicione sua chave de API ao ficheiro `.env`.\n\n'
+        'Olá! Sou seu bot de **Range Trading Autônomo v7.5 (Híbrido Final)**.\n\n'
+        '**Estratégia:** Esta versão final usa **GeckoTerminal** para o histórico e **Dexscreener** para o preço em tempo real, garantindo máxima velocidade e fiabilidade.\n\n'
         'Use `/set` para configurar:\n'
         '`/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <LOOKBACK> <STOP_LOSS_%>`\n\n'
         '**Exemplo (BONK/SOL):**\n'
@@ -345,7 +341,7 @@ async def set_params(update, context):
         await update.effective_message.reply_text(
             f"✅ *Parâmetros definidos!*\n\n"
             f"📊 *Par:* `{base_token_symbol}/{quote_token_symbol}`\n"
-            f"🌐 *Fonte de Dados:* `Birdeye`\n"
+            f"🌐 *Fonte de Dados:* `Híbrida (GeckoTerminal + Dexscreener)`\n"
             f"⏰ *Timeframe:* `{timeframe}`\n"
             f"📈 *Estratégia:* Zonas Adaptativas (Lookback: {lookback_period} velas)\n"
             f"💰 *Valor por Ordem:* `{amount}` {quote_symbol_input}\n"
@@ -374,7 +370,7 @@ async def run_bot(update, context):
     
     bot_running = True
     logger.info("Bot de trade iniciado.")
-    await update.effective_message.reply_text("🚀 Bot iniciado! Operando com a API Birdeye.")
+    await update.effective_message.reply_text("🚀 Bot iniciado! Operando com sistema de dados híbrido.")
     
     if periodic_task is None or periodic_task.done():
         periodic_task = asyncio.create_task(periodic_checker())
