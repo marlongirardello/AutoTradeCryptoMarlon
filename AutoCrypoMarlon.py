@@ -193,9 +193,7 @@ async def fetch_ohlcv_data(pair_address, timeframe):
 
     try:
         async with httpx.AsyncClient() as client:
-            logger.info(f"Chamando Moralis API: URL={url}, Params={params}")
             response = await client.get(url, params=params, headers=headers, timeout=10.0)
-            logger.info(f"Resposta da Moralis (Status {response.status_code}): {response.text[:500]}")
             response.raise_for_status()
             api_data = response.json()
 
@@ -242,9 +240,11 @@ async def check_strategy():
 
         buy_zone_upper_limit = dynamic_support + (dynamic_range * 0.25)
         sell_zone_lower_limit = dynamic_resistance - (dynamic_range * 0.25)
-
-        real_time_price_response = await httpx.get(f"https://api.dexscreener.com/latest/dex/pairs/solana/{pair_details['pair_address']}")
-        current_price = float(real_time_price_response.json()['pairs'][0]['priceNative'])
+        
+        # --- CORREÇÃO DO ERRO DE PROGRAMAÇÃO ---
+        async with httpx.AsyncClient() as client:
+            real_time_price_response = await client.get(f"https://api.dexscreener.com/latest/dex/pairs/solana/{pair_details['pair_address']}")
+            current_price = float(real_time_price_response.json()['pairs'][0]['priceNative'])
         
         data['rsi'] = ta.rsi(data['close'], length=14)
         data['volume_sma'] = data['volume'].rolling(window=20).mean()
@@ -444,7 +444,7 @@ def main():
     application.add_handler(CommandHandler("stop", stop_bot))
     application.add_handler(CommandHandler("buy", buy_manual))
     application.add_handler(CommandHandler("sell", sell_manual))
-    application.add_error_handler(error_handler)
+    application.add_handler(error_handler)
     
     logger.info("Bot do Telegram iniciado e aguardando comandos...")
     application.run_polling()
