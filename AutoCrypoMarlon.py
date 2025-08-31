@@ -173,7 +173,7 @@ async def execute_sell_order(reason="Venda Manual"):
     except Exception as e:
         logger.error(f"Erro ao vender: {e}"); await send_telegram_message(f"⚠️ Falha ao vender: {e}")
 
-# --- NOVA FUNÇÃO DE DADOS: MIGRADA PARA MORALIS (DEFINITIVO) ---
+# --- NOVA FUNÇÃO DE DADOS: MIGRADA PARA MORALIS (COM PARSING CORRIGIDO) ---
 async def fetch_ohlcv_data(pair_address, timeframe):
     timeframe_map = {"1m": "1h", "5m": "1h", "15m": "1h", "1h": "1h"}
     resolution = timeframe_map.get(timeframe, "1h")
@@ -189,21 +189,19 @@ async def fetch_ohlcv_data(pair_address, timeframe):
         "fromDate": from_date.strftime('%Y-%m-%d'),
         "toDate": to_date.strftime('%Y-%m-%d')
     }
-    headers = {
-        "X-API-KEY": MORALIS_API_KEY,
-        'Cache-Control': 'no-cache'
-    }
+    headers = {"X-API-KEY": MORALIS_API_KEY, 'Cache-Control': 'no-cache'}
 
     try:
         async with httpx.AsyncClient() as client:
-            logger.info(f"Chamando Moralis API: URL={url}, Params={params}") # LOG DE DEPURAÇÃO
+            logger.info(f"Chamando Moralis API: URL={url}, Params={params}")
             response = await client.get(url, params=params, headers=headers, timeout=10.0)
-            logger.info(f"Resposta da Moralis (Status {response.status_code}): {response.text[:500]}") # LOG DE DEPURAÇÃO
+            logger.info(f"Resposta da Moralis (Status {response.status_code}): {response.text[:500]}")
             response.raise_for_status()
             api_data = response.json()
 
-            if isinstance(api_data, list) and len(api_data) > 0:
-                df = pd.DataFrame(api_data)
+            if api_data.get('result') and isinstance(api_data['result'], list) and len(api_data['result']) > 0:
+                candles = api_data['result']
+                df = pd.DataFrame(candles)
                 df.rename(columns={'timestamp': 'timestamp', 'openNative': 'open', 'highNative': 'high', 'lowNative': 'low', 'closeNative': 'close', 'volumeNative': 'volume'}, inplace=True)
                 df['timestamp'] = pd.to_datetime(df['timestamp'])
                 for col in ['open', 'high', 'low', 'close', 'volume']:
@@ -280,7 +278,7 @@ async def check_strategy():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot de **Range Trading Autônomo v6.2 (API Moralis)**.\n\n'
+        'Olá! Sou seu bot de **Range Trading Autônomo v6.3 (API Moralis)**.\n\n'
         '**Estratégia:** Esta versão final usa a API da **Moralis** para máxima fiabilidade. Por favor, adicione sua chave de API ao ficheiro `.env`.\n\n'
         'Use `/set` para configurar:\n'
         '`/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <LOOKBACK> <STOP_LOSS_%>`\n\n'
