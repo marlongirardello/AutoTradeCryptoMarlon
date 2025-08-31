@@ -30,11 +30,10 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 PRIVATE_KEY_B58 = os.getenv("PRIVATE_KEY_BASE58")
 RPC_URL = os.getenv("RPC_URL")
-MORALIS_API_KEY = os.getenv("MORALIS_API_KEY") # Chave de API da Moralis
 
 # --- Validação de Configurações ---
-if not all([TELEGRAM_TOKEN, CHAT_ID, PRIVATE_KEY_B58, RPC_URL, MORALIS_API_KEY]):
-    print("Erro: Verifique se todas as variáveis de ambiente estão definidas, incluindo MORALIS_API_KEY.")
+if not all([TELEGRAM_TOKEN, CHAT_ID, PRIVATE_KEY_B58, RPC_URL]):
+    print("Erro: Verifique se todas as variáveis de ambiente estão definidas.")
     exit()
 
 # --- Configuração do Logging ---
@@ -173,27 +172,27 @@ async def execute_sell_order(reason="Venda Manual"):
     except Exception as e:
         logger.error(f"Erro ao vender: {e}"); await send_telegram_message(f"⚠️ Falha ao vender: {e}")
 
-# --- NOVA FUNÇÃO DE DADOS: MIGRADA PARA MORALIS (COM PARSING E TIMEFRAME CORRIGIDOS) ---
+# --- NOVA FUNÇÃO DE DADOS: MIGRADA PARA BIRDEYE (DEFINITIVO) ---
 async def fetch_ohlcv_data(pair_address, timeframe):
-    timeframe_map = {"1m": "1min", "5m": "5min", "15m": "15min", "1h": "1h"}
+    timeframe_map = {"1m": "1m", "5m": "5m", "15m": "15m", "1h": "1H"}
     resolution = timeframe_map.get(timeframe)
-    if not resolution:
-        logger.error(f"Timeframe '{timeframe}' não suportado pela Moralis.")
-        return None
+    if not resolution: return None
 
-    to_date = datetime.utcnow()
-    from_date = to_date - timedelta(hours=4) # Busca dados das últimas 4 horas para ter histórico suficiente para timeframes de 1m
-
-    url = f"https://solana-gateway.moralis.io/token/mainnet/pairs/{pair_address}/ohlcv"
+    time_to = int(time.time())
+    time_unit = resolution[-1]
+    time_value = int(resolution[:-1]) if resolution[:-1].isdigit() else 1
     
+    if time_unit == 'm': time_from = time_to - (200 * 60 * time_value)
+    else: time_from = time_to - (200 * 3600 * time_value)
+
+    url = f"https://public-api.birdeye.so/defi/ohlcv/pair"
     params = {
-        "timeframe": resolution,
-        "currency": "native",
-        "fromDate": from_date.strftime('%Y-%m-%dT%H:%M:%S'),
-        "toDate": to_date.strftime('%Y-%m-%dT%H:%M:%S'),
-        "limit": "30"
+        "address": pair_address,
+        "type": resolution,
+        "time_from": time_from,
+        "time_to": time_to
     }
-    headers = {"X-API-KEY": MORALIS_API_KEY, 'Cache-Control': 'no-cache'}
+    headers = {'Cache-Control': 'no-cache, no-store, must-revalidate'}
 
     try:
         async with httpx.AsyncClient() as client:
@@ -201,22 +200,17 @@ async def fetch_ohlcv_data(pair_address, timeframe):
             response.raise_for_status()
             api_data = response.json()
 
-            if api_data.get('result') and isinstance(api_data['result'], list) and len(api_data['result']) > 0:
-                candles = api_data['result']
-                df = pd.DataFrame(candles)
-                df.rename(columns={'timestamp': 'timestamp', 'openNative': 'open', 'highNative': 'high', 'lowNative': 'low', 'closeNative': 'close', 'volumeNative': 'volume'}, inplace=True)
-                df['timestamp'] = pd.to_datetime(df['timestamp'])
+            if api_data.get('success') and api_data.get('data', {}).get('items'):
+                items = api_data['data']['items']
+                df = pd.DataFrame(items)
+                df.rename(columns={'unixTime': 'timestamp', 'o': 'open', 'h': 'high', 'l': 'low', 'c': 'close', 'v': 'volume'}, inplace=True)
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
                 for col in ['open', 'high', 'low', 'close', 'volume']:
                     df[col] = pd.to_numeric(df[col])
                 return df.sort_values(by='timestamp').reset_index(drop=True)
-            else:
-                logger.warning(f"Moralis não retornou dados de velas ou a resposta está vazia.")
-                return None
-    except httpx.HTTPStatusError as e:
-        logger.error(f"Erro de HTTP ao buscar dados na Moralis: {e.response.text}")
-        return None
+            return None
     except Exception as e:
-        logger.error(f"Erro inesperado ao processar dados da Moralis: {e}")
+        logger.error(f"Erro ao processar dados do Birdeye: {e}")
         return None
 
 # --- ESTRATÉGIA ---
@@ -229,10 +223,10 @@ async def check_strategy():
         data = await fetch_ohlcv_data(pair_details['pair_address'], parameters['timeframe'])
         
         if data is None or data.empty:
-            await send_telegram_message(f"⚠️ **Falha na Fonte de Dados (Moralis):**\nNão foi possível obter o histórico de velas. A API pode estar temporariamente indisponível ou este par pode não ter liquidez suficiente.")
+            await send_telegram_message(f"⚠️ **Falha na Fonte de Dados (Birdeye):**\nNão foi possível obter o histórico de velas. A API pode estar temporariamente indisponível ou este par pode não ter liquidez suficiente.")
             return
         if len(data) < parameters["lookback_period"]:
-            await send_telegram_message(f"⚠️ **Dados Insuficientes (Moralis):**\nRecebidas apenas {len(data)} velas. É necessário no mínimo {parameters['lookback_period']} para uma análise segura. O par pode ter baixa liquidez.")
+            await send_telegram_message(f"⚠️ **Dados Insuficientes (Birdeye):**\nRecebidas apenas {len(data)} velas. É necessário no mínimo {parameters['lookback_period']} para uma análise segura. O par pode ter baixa liquidez.")
             return
 
         lookback_data = data.tail(parameters["lookback_period"]).copy()
@@ -245,41 +239,33 @@ async def check_strategy():
         buy_zone_upper_limit = dynamic_support + (dynamic_range * 0.25)
         sell_zone_lower_limit = dynamic_resistance - (dynamic_range * 0.25)
 
-        async with httpx.AsyncClient() as client:
-            real_time_price_response = await client.get(f"https://api.dexscreener.com/latest/dex/pairs/solana/{pair_details['pair_address']}")
-            pair_data = real_time_price_response.json().get('pairs', [{}])[0]
-            current_price_native = float(pair_data.get('priceNative', 0))
-            current_price_usd = float(pair_data.get('priceUsd', 0))
-
-        if current_price_native == 0:
-            logger.warning("Não foi possível obter o preço em tempo real do Dexscreener.")
-            return
+        current_price = data.iloc[-1]['close']
         
         data['rsi'] = ta.rsi(data['close'], length=14)
         data['volume_sma'] = data['volume'].rolling(window=20).mean()
         
         current_rsi = data['rsi'].iloc[-1]
-        current_volume = data['volume'].iloc[-1]
+        current_volume = data.iloc[-1]['volume']
         volume_sma = data['volume_sma'].iloc[-1]
         
         logger.info(
-            f"Análise ({pair_details['base_symbol']}): Preço {current_price_usd:.10f} USD ({current_price_native:.10f} SOL) | "
+            f"Análise ({pair_details['base_symbol']}): Preço {current_price:.10f} | "
             f"RSI {current_rsi:.2f} | Vol {current_volume:.2f} | Média Vol {volume_sma:.2f} | "
-            f"Suporte Dinâmico {dynamic_support:.10f} SOL | Resistência Dinâmica {dynamic_resistance:.10f} SOL"
+            f"Suporte Dinâmico {dynamic_support:.10f} | Resistência Dinâmica {dynamic_resistance:.10f}"
         )
 
         if in_position:
             stop_loss_price = entry_price * (1 - parameters["stop_loss_percent"] / 100)
-            if current_price_native >= sell_zone_lower_limit:
-                 await execute_sell_order(reason=f"Take Profit (Zona de Venda) atingido em {current_price_native:.8f}")
-            elif current_price_native <= stop_loss_price:
+            if current_price >= sell_zone_lower_limit:
+                 await execute_sell_order(reason=f"Take Profit (Zona de Venda) atingido em {current_price:.8f}")
+            elif current_price <= stop_loss_price:
                 await execute_sell_order(reason=f"Stop Loss atingido em {stop_loss_price:.8f}")
         else:
-            price_in_buy_zone = current_price_native <= buy_zone_upper_limit
+            price_in_buy_zone = current_price <= buy_zone_upper_limit
             rsi_ok = current_rsi < 45
             volume_ok = current_volume > volume_sma
             if price_in_buy_zone and (rsi_ok or volume_ok):
-                await execute_buy_order(parameters["amount"], current_price_native)
+                await execute_buy_order(parameters["amount"], current_price)
     except Exception as e:
         logger.error(f"Ocorreu um erro em check_strategy: {e}", exc_info=True)
         await send_telegram_message(f"⚠️ Erro inesperado na estratégia: {e}")
@@ -287,8 +273,8 @@ async def check_strategy():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot de **Range Trading Autônomo v6.4 (Moralis Final)**.\n\n'
-        '**Estratégia:** Esta versão final usa a API da **Moralis** para máxima fiabilidade, opera em Zonas Adaptativas e combate o slippage com Taxas de Prioridade Dinâmicas.\n\n'
+        'Olá! Sou seu bot de **Range Trading Autônomo v7.0 (API Birdeye)**.\n\n'
+        '**Estratégia:** Esta versão final usa a API do **Birdeye** para máxima fiabilidade, opera em Zonas Adaptativas e combate o slippage com Taxas de Prioridade Dinâmicas.\n\n'
         'Use `/set` para configurar:\n'
         '`/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <LOOKBACK> <STOP_LOSS_%>`\n\n'
         '**Exemplo (BONK/SOL):**\n'
@@ -354,7 +340,7 @@ async def set_params(update, context):
         await update.effective_message.reply_text(
             f"✅ *Parâmetros definidos!*\n\n"
             f"📊 *Par:* `{base_token_symbol}/{quote_token_symbol}`\n"
-            f"🌐 *Fonte de Dados:* `Moralis`\n"
+            f"🌐 *Fonte de Dados:* `Birdeye`\n"
             f"⏰ *Timeframe:* `{timeframe}`\n"
             f"📈 *Estratégia:* Zonas Adaptativas (Lookback: {lookback_period} velas)\n"
             f"💰 *Valor por Ordem:* `{amount}` {quote_symbol_input}\n"
@@ -383,7 +369,7 @@ async def run_bot(update, context):
     
     bot_running = True
     logger.info("Bot de trade iniciado.")
-    await update.effective_message.reply_text("🚀 Bot iniciado! Operando com a API Moralis.")
+    await update.effective_message.reply_text("🚀 Bot iniciado! Operando com a API Birdeye.")
     
     if periodic_task is None or periodic_task.done():
         periodic_task = asyncio.create_task(periodic_checker())
