@@ -173,13 +173,13 @@ async def execute_sell_order(reason="Venda Manual"):
     except Exception as e:
         logger.error(f"Erro ao vender: {e}"); await send_telegram_message(f"⚠️ Falha ao vender: {e}")
 
-# --- FUNÇÕES DE DADOS (PRIMÁRIA E SECUNDÁRIA) ---
-async def fetch_moralis_ohlcv(pair_address, timeframe):
+# --- NOVA FUNÇÃO DE DADOS: MIGRADA PARA MORALIS ---
+async def fetch_ohlcv_data(pair_address, timeframe):
     timeframe_map = {"1m": "1h", "5m": "1h", "15m": "1h", "1h": "1h"}
     resolution = timeframe_map.get(timeframe, "1h")
 
     to_date = datetime.utcnow()
-    from_date = to_date - timedelta(hours=48) # Busca dados das últimas 48 horas
+    from_date = to_date - timedelta(hours=48)
 
     url = f"https://solana-gateway.moralis.io/token/mainnet/pairs/{pair_address}/ohlcv"
     
@@ -196,6 +196,7 @@ async def fetch_moralis_ohlcv(pair_address, timeframe):
             response = await client.get(url, params=params, headers=headers, timeout=10.0)
             response.raise_for_status()
             api_data = response.json()
+
             if isinstance(api_data, list) and len(api_data) > 0:
                 df = pd.DataFrame(api_data)
                 df.rename(columns={'timestamp': 'timestamp', 'openNative': 'open', 'highNative': 'high', 'lowNative': 'low', 'closeNative': 'close', 'volumeNative': 'volume'}, inplace=True)
@@ -203,52 +204,31 @@ async def fetch_moralis_ohlcv(pair_address, timeframe):
                 for col in ['open', 'high', 'low', 'close', 'volume']:
                     df[col] = pd.to_numeric(df[col])
                 return df.sort_values(by='timestamp').reset_index(drop=True)
-            return None
+            else:
+                logger.warning(f"Moralis não retornou dados de velas ou a resposta está vazia. Resposta: {api_data}")
+                return None
+    except httpx.HTTPStatusError as e:
+        logger.error(f"Erro de HTTP ao buscar dados na Moralis: {e.response.text}")
+        return None
     except Exception as e:
-        logger.error(f"Erro ao processar dados da Moralis: {e}")
+        logger.error(f"Erro inesperado ao processar dados da Moralis: {e}")
         return None
 
-async def fetch_dexscreener_ohlcv(pair_address, timeframe):
-    timeframe_map = {"1m": "1", "5m": "5", "15m": "15", "1h": "60"}
-    resolution = timeframe_map.get(timeframe, "5")
-    url = f"https://api.dexscreener.com/latest/dex/candles/{pair_address}?res={resolution}"
-    headers = {'Cache-Control': 'no-cache, no-store, must-revalidate'}
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(url, headers=headers, timeout=10.0)
-            response.raise_for_status()
-            api_data = response.json()
-            if api_data.get('pairs') and api_data['pairs'][0].get('candles'):
-                candles = api_data['pairs'][0]['candles']
-                df = pd.DataFrame(candles)
-                df.rename(columns={'timestamp': 'timestamp', 'open': 'open', 'high': 'high', 'low': 'low', 'close': 'close', 'volume': 'volume'}, inplace=True)
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                for col in ['open', 'high', 'low', 'close', 'volume']:
-                    df[col] = pd.to_numeric(df[col])
-                return df.sort_values(by='timestamp').reset_index(drop=True)
-            return None
-    except Exception as e:
-        logger.error(f"Erro ao processar dados do Dexscreener: {e}")
-        return None
-
-# --- ESTRATÉGIA COM LÓGICA DE REDUNDÂNCIA ---
+# --- ESTRATÉGIA ---
 async def check_strategy():
     global in_position, entry_price
     if not bot_running: return
 
     try:
         pair_details = parameters["trade_pair_details"]
+        data = await fetch_ohlcv_data(pair_details['pair_address'], parameters['timeframe'])
         
-        # 1. Tenta a fonte primária (Moralis)
-        data = await fetch_moralis_ohlcv(pair_details['pair_address'], parameters['timeframe'])
-        
-        # 2. Se falhar, tenta a fonte secundária (Dexscreener)
+        # MENSAGEM DE ERRO MAIS CLARA E ESPECÍFICA
         if data is None or data.empty:
-            logger.warning("Falha na API primária (Moralis). A tentar API secundária (Dexscreener)...")
-            data = await fetch_dexscreener_ohlcv(pair_details['pair_address'], parameters['timeframe'])
-
-        if data is None or data.empty or len(data) < 20: # Mínimo de velas para análise
-            await send_telegram_message(f"⚠️ Falha em ambas as APIs. Não foi possível obter dados de velas.")
+            await send_telegram_message(f"⚠️ **Falha na Fonte de Dados (Moralis):**\nNão foi possível obter o histórico de velas. A API pode estar temporariamente indisponível ou este par pode não ter liquidez suficiente.")
+            return
+        if len(data) < parameters["lookback_period"]:
+            await send_telegram_message(f"⚠️ **Dados Insuficientes (Moralis):**\nRecebidas apenas {len(data)} velas. É necessário no mínimo {parameters['lookback_period']} para uma análise segura. O par pode ter baixa liquidez.")
             return
 
         lookback_data = data.tail(parameters["lookback_period"]).copy()
@@ -297,8 +277,8 @@ async def check_strategy():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot de **Range Trading Autônomo v6.1 (API Moralis)**.\n\n'
-        '**Estratégia:** Esta versão final usa **Moralis** como fonte primária e **Dexscreener** como backup, garantindo máxima fiabilidade.\n\n'
+        'Olá! Sou seu bot de **Range Trading Autônomo v6.2 (API Moralis)**.\n\n'
+        '**Estratégia:** Esta versão final usa a API da **Moralis** para máxima fiabilidade, opera em Zonas Adaptativas e combate o slippage com Taxas de Prioridade Dinâmicas.\n\n'
         'Use `/set` para configurar:\n'
         '`/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <LOOKBACK> <STOP_LOSS_%>`\n\n'
         '**Exemplo (BONK/SOL):**\n'
@@ -364,7 +344,7 @@ async def set_params(update, context):
         await update.effective_message.reply_text(
             f"✅ *Parâmetros definidos!*\n\n"
             f"📊 *Par:* `{base_token_symbol}/{quote_token_symbol}`\n"
-            f"🌐 *Fonte de Dados:* `Moralis` (com fallback para `Dexscreener`)\n"
+            f"🌐 *Fonte de Dados:* `Moralis`\n"
             f"⏰ *Timeframe:* `{timeframe}`\n"
             f"📈 *Estratégia:* Zonas Adaptativas (Lookback: {lookback_period} velas)\n"
             f"💰 *Valor por Ordem:* `{amount}` {quote_symbol_input}\n"
