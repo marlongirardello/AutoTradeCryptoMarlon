@@ -30,10 +30,11 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 PRIVATE_KEY_B58 = os.getenv("PRIVATE_KEY_BASE58")
 RPC_URL = os.getenv("RPC_URL")
+BIRDEYE_API_KEY = os.getenv("BIRDEYE_API_KEY") # NOVA CHAVE DE API
 
 # --- Validação de Configurações ---
-if not all([TELEGRAM_TOKEN, CHAT_ID, PRIVATE_KEY_B58, RPC_URL]):
-    print("Erro: Verifique se todas as variáveis de ambiente estão definidas.")
+if not all([TELEGRAM_TOKEN, CHAT_ID, PRIVATE_KEY_B58, RPC_URL, BIRDEYE_API_KEY]):
+    print("Erro: Verifique se todas as variáveis de ambiente estão definidas, incluindo BIRDEYE_API_KEY.")
     exit()
 
 # --- Configuração do Logging ---
@@ -192,7 +193,11 @@ async def fetch_ohlcv_data(pair_address, timeframe):
         "time_from": time_from,
         "time_to": time_to
     }
-    headers = {'Cache-Control': 'no-cache, no-store, must-revalidate'}
+    # --- ADICIONADA A CHAVE DE API NO CABEÇALHO ---
+    headers = {
+        'X-API-KEY': BIRDEYE_API_KEY,
+        'Cache-Control': 'no-cache'
+    }
 
     try:
         async with httpx.AsyncClient() as client:
@@ -223,10 +228,10 @@ async def check_strategy():
         data = await fetch_ohlcv_data(pair_details['pair_address'], parameters['timeframe'])
         
         if data is None or data.empty:
-            await send_telegram_message(f"⚠️ **Falha na Fonte de Dados (Birdeye):**\nNão foi possível obter o histórico de velas. A API pode estar temporariamente indisponível ou este par pode não ter liquidez suficiente.")
+            await send_telegram_message(f"⚠️ **Falha na Fonte de Dados (Birdeye):**\nNão foi possível obter o histórico de velas. Verifique se a chave da API está correta ou se o par tem liquidez.")
             return
         if len(data) < parameters["lookback_period"]:
-            await send_telegram_message(f"⚠️ **Dados Insuficientes (Birdeye):**\nRecebidas apenas {len(data)} velas. É necessário no mínimo {parameters['lookback_period']} para uma análise segura. O par pode ter baixa liquidez.")
+            await send_telegram_message(f"⚠️ **Dados Insuficientes (Birdeye):**\nRecebidas apenas {len(data)} velas. É necessário no mínimo {parameters['lookback_period']} para uma análise segura.")
             return
 
         lookback_data = data.tail(parameters["lookback_period"]).copy()
@@ -273,8 +278,8 @@ async def check_strategy():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot de **Range Trading Autônomo v7.0 (API Birdeye)**.\n\n'
-        '**Estratégia:** Esta versão final usa a API do **Birdeye** para máxima fiabilidade, opera em Zonas Adaptativas e combate o slippage com Taxas de Prioridade Dinâmicas.\n\n'
+        'Olá! Sou seu bot de **Range Trading Autônomo v7.1 (API Birdeye)**.\n\n'
+        '**Estratégia:** Esta versão final usa a API do **Birdeye** para máxima fiabilidade. Por favor, adicione sua chave de API ao ficheiro `.env`.\n\n'
         'Use `/set` para configurar:\n'
         '`/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <LOOKBACK> <STOP_LOSS_%>`\n\n'
         '**Exemplo (BONK/SOL):**\n'
@@ -446,4 +451,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
