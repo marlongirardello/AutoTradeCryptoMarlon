@@ -29,10 +29,11 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 PRIVATE_KEY_B58 = os.getenv("PRIVATE_KEY_BASE58")
 RPC_URL = os.getenv("RPC_URL")
+MORALIS_API_KEY = os.getenv("MORALIS_API_KEY") # NOVA CHAVE DE API
 
 # --- Validação de Configurações ---
-if not all([TELEGRAM_TOKEN, CHAT_ID, PRIVATE_KEY_B58, RPC_URL]):
-    print("Erro: Verifique se todas as variáveis de ambiente estão definidas.")
+if not all([TELEGRAM_TOKEN, CHAT_ID, PRIVATE_KEY_B58, RPC_URL, MORALIS_API_KEY]):
+    print("Erro: Verifique se todas as variáveis de ambiente estão definidas, incluindo MORALIS_API_KEY.")
     exit()
 
 # --- Configuração do Logging ---
@@ -196,41 +197,54 @@ async def execute_sell_order(reason="Venda Manual"):
     except Exception as e:
         logger.error(f"Erro ao buscar saldo para venda: {e}"); await send_telegram_message(f"⚠️ Falha ao buscar saldo do token para venda: {e}")
 
-# --- NOVA FUNÇÃO DE DADOS: MIGRADA PARA DEXSCREENER (DEFINITIVO) ---
+# --- NOVA FUNÇÃO DE DADOS: MIGRADA PARA MORALIS ---
 async def fetch_ohlcv_data(pair_address, timeframe):
-    timeframe_map = {"1m": "1", "5m": "5", "15m": "15", "1h": "60"}
-    resolution = timeframe_map.get(timeframe, "5")
+    timeframe_map = {"1m": "1min", "5m": "5min", "15m": "15min", "1h": "1h"}
+    resolution = timeframe_map.get(timeframe)
+    if not resolution:
+        logger.error(f"Timeframe '{timeframe}' não suportado pela Moralis.")
+        return None
 
-    url = f"https://api.dexscreener.com/latest/dex/candles/{pair_address}?res={resolution}"
+    url = f"https://solana-gateway.moralis-streams.com/market-data/{pair_address}/ohlcv"
     
-    headers = {'Cache-Control': 'no-cache, no-store, must-revalidate'}
+    params = {
+        "network": "mainnet",
+        "timeframe": resolution,
+        "limit": 200 # Busca as últimas 200 velas
+    }
+    
+    headers = {
+        "X-API-KEY": MORALIS_API_KEY,
+        'Cache-Control': 'no-cache, no-store, must-revalidate',
+        'Pragma': 'no-cache',
+        'Expires': '0'
+    }
 
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.get(url, headers=headers, timeout=10.0)
+            response = await client.get(url, params=params, headers=headers, timeout=10.0)
             response.raise_for_status()
             api_data = response.json()
 
-            if api_data.get('pairs') and api_data['pairs'][0].get('candles'):
-                candles = api_data['pairs'][0]['candles']
-                df = pd.DataFrame(candles)
+            if isinstance(api_data, list) and len(api_data) > 0:
+                df = pd.DataFrame(api_data)
                 df.rename(columns={
                     'timestamp': 'timestamp', 'open': 'open', 'high': 'high', 
                     'low': 'low', 'close': 'close', 'volume': 'volume'
                 }, inplace=True)
                 
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms') # Dexscreener usa milissegundos
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms') # Moralis usa milissegundos
                 for col in ['open', 'high', 'low', 'close', 'volume']:
                     df[col] = pd.to_numeric(df[col])
                 return df.sort_values(by='timestamp').reset_index(drop=True)
             else:
-                logger.warning(f"Dexscreener não retornou dados de velas. Resposta: {api_data}")
+                logger.warning(f"Moralis não retornou dados de velas ou a resposta está vazia. Resposta: {api_data}")
                 return None
     except httpx.HTTPStatusError as e:
-        logger.error(f"Erro de HTTP ao buscar dados no Dexscreener: {e.response.text}")
+        logger.error(f"Erro de HTTP ao buscar dados na Moralis: {e.response.text}")
         return None
     except Exception as e:
-        logger.error(f"Erro inesperado ao processar dados do Dexscreener: {e}")
+        logger.error(f"Erro inesperado ao processar dados da Moralis: {e}")
         return None
 
 # --- ESTRATÉGIA ---
@@ -243,7 +257,7 @@ async def check_strategy():
         data = await fetch_ohlcv_data(pair_details['pair_address'], parameters['timeframe'])
         
         if data is None or data.empty or len(data) < parameters["lookback_period"]:
-            await send_telegram_message(f"⚠️ Não foi possível obter dados de velas suficientes do Dexscreener.")
+            await send_telegram_message(f"⚠️ Não foi possível obter dados de velas suficientes da Moralis.")
             return
 
         lookback_data = data.tail(parameters["lookback_period"]).copy()
@@ -301,8 +315,8 @@ async def check_strategy():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot de **Range Trading Autônomo v5.1 (API Dexscreener)**.\n\n'
-        '**Estratégia:** Esta versão final usa a API do **Dexscreener** para máxima fiabilidade, opera em Zonas Adaptativas e combate o slippage com Taxas de Prioridade Dinâmicas.\n\n'
+        'Olá! Sou seu bot de **Range Trading Autônomo v6.0 (API Moralis)**.\n\n'
+        '**Estratégia:** Esta versão final usa a API da **Moralis** para máxima fiabilidade, opera em Zonas Adaptativas e combate o slippage com Taxas de Prioridade Dinâmicas.\n\n'
         'Use `/set` para configurar:\n'
         '`/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <LOOKBACK> <STOP_LOSS_%>`\n\n'
         '**Exemplo (BONK/SOL):**\n'
@@ -329,6 +343,7 @@ async def set_params(update, context):
         interval_map = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600}
         check_interval_seconds = interval_map.get(timeframe, 60)
 
+        # Usamos Dexscreener para encontrar o par, pois é a fonte mais completa para isso
         token_search_url = f"https://api.dexscreener.com/latest/dex/tokens/{base_token_contract}"
         async with httpx.AsyncClient() as client:
             response = await client.get(token_search_url)
@@ -368,7 +383,7 @@ async def set_params(update, context):
         await update.effective_message.reply_text(
             f"✅ *Parâmetros definidos!*\n\n"
             f"📊 *Par:* `{base_token_symbol}/{quote_token_symbol}`\n"
-            f"🌐 *Fonte de Dados:* `Dexscreener`\n"
+            f"🌐 *Fonte de Dados:* `Moralis`\n"
             f"⏰ *Timeframe:* `{timeframe}`\n"
             f"📈 *Estratégia:* Zonas Adaptativas (Lookback: {lookback_period} velas)\n"
             f"💰 *Valor por Ordem:* `{amount}` {quote_symbol_input}\n"
@@ -397,7 +412,7 @@ async def run_bot(update, context):
     
     bot_running = True
     logger.info("Bot de trade iniciado.")
-    await update.effective_message.reply_text("🚀 Bot iniciado! Operando com a API Dexscreener.")
+    await update.effective_message.reply_text("🚀 Bot iniciado! Operando com a API Moralis.")
     
     if periodic_task is None or periodic_task.done():
         periodic_task = asyncio.create_task(periodic_checker())
