@@ -173,7 +173,7 @@ async def execute_sell_order(reason="Venda Manual"):
     except Exception as e:
         logger.error(f"Erro ao vender: {e}"); await send_telegram_message(f"⚠️ Falha ao vender: {e}")
 
-# --- NOVA FUNÇÃO DE DADOS: MIGRADA PARA MORALIS ---
+# --- NOVA FUNÇÃO DE DADOS: MIGRADA PARA MORALIS (DEFINITIVO) ---
 async def fetch_ohlcv_data(pair_address, timeframe):
     timeframe_map = {"1m": "1h", "5m": "1h", "15m": "1h", "1h": "1h"}
     resolution = timeframe_map.get(timeframe, "1h")
@@ -189,11 +189,16 @@ async def fetch_ohlcv_data(pair_address, timeframe):
         "fromDate": from_date.strftime('%Y-%m-%d'),
         "toDate": to_date.strftime('%Y-%m-%d')
     }
-    headers = {"X-API-KEY": MORALIS_API_KEY, 'Cache-Control': 'no-cache'}
+    headers = {
+        "X-API-KEY": MORALIS_API_KEY,
+        'Cache-Control': 'no-cache'
+    }
 
     try:
         async with httpx.AsyncClient() as client:
+            logger.info(f"Chamando Moralis API: URL={url}, Params={params}") # LOG DE DEPURAÇÃO
             response = await client.get(url, params=params, headers=headers, timeout=10.0)
+            logger.info(f"Resposta da Moralis (Status {response.status_code}): {response.text[:500]}") # LOG DE DEPURAÇÃO
             response.raise_for_status()
             api_data = response.json()
 
@@ -205,7 +210,7 @@ async def fetch_ohlcv_data(pair_address, timeframe):
                     df[col] = pd.to_numeric(df[col])
                 return df.sort_values(by='timestamp').reset_index(drop=True)
             else:
-                logger.warning(f"Moralis não retornou dados de velas ou a resposta está vazia. Resposta: {api_data}")
+                logger.warning(f"Moralis não retornou dados de velas ou a resposta está vazia.")
                 return None
     except httpx.HTTPStatusError as e:
         logger.error(f"Erro de HTTP ao buscar dados na Moralis: {e.response.text}")
@@ -223,7 +228,6 @@ async def check_strategy():
         pair_details = parameters["trade_pair_details"]
         data = await fetch_ohlcv_data(pair_details['pair_address'], parameters['timeframe'])
         
-        # MENSAGEM DE ERRO MAIS CLARA E ESPECÍFICA
         if data is None or data.empty:
             await send_telegram_message(f"⚠️ **Falha na Fonte de Dados (Moralis):**\nNão foi possível obter o histórico de velas. A API pode estar temporariamente indisponível ou este par pode não ter liquidez suficiente.")
             return
@@ -241,7 +245,6 @@ async def check_strategy():
         buy_zone_upper_limit = dynamic_support + (dynamic_range * 0.25)
         sell_zone_lower_limit = dynamic_resistance - (dynamic_range * 0.25)
 
-        # Usamos o preço em tempo real da fonte mais rápida para a decisão final
         real_time_price_response = await httpx.get(f"https://api.dexscreener.com/latest/dex/pairs/solana/{pair_details['pair_address']}")
         current_price = float(real_time_price_response.json()['pairs'][0]['priceNative'])
         
@@ -278,7 +281,7 @@ async def check_strategy():
 async def start(update, context):
     await update.effective_message.reply_text(
         'Olá! Sou seu bot de **Range Trading Autônomo v6.2 (API Moralis)**.\n\n'
-        '**Estratégia:** Esta versão final usa a API da **Moralis** para máxima fiabilidade, opera em Zonas Adaptativas e combate o slippage com Taxas de Prioridade Dinâmicas.\n\n'
+        '**Estratégia:** Esta versão final usa a API da **Moralis** para máxima fiabilidade. Por favor, adicione sua chave de API ao ficheiro `.env`.\n\n'
         'Use `/set` para configurar:\n'
         '`/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <LOOKBACK> <STOP_LOSS_%>`\n\n'
         '**Exemplo (BONK/SOL):**\n'
