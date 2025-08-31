@@ -196,58 +196,54 @@ async def execute_sell_order(reason="Venda Manual"):
     except Exception as e:
         logger.error(f"Erro ao buscar saldo para venda: {e}"); await send_telegram_message(f"⚠️ Falha ao buscar saldo do token para venda: {e}")
 
-# --- NOVA FUNÇÃO DE DADOS: MIGRADA PARA PHOTON (COM URL CORRIGIDO) ---
-async def fetch_ohlcv_data(token_address, timeframe):
+# --- NOVA FUNÇÃO DE DADOS: MIGRADA PARA DEXSCREENER (DEFINITIVO) ---
+async def fetch_ohlcv_data(pair_address, timeframe):
     timeframe_map = {"1m": "1", "5m": "5", "15m": "15", "1h": "60"}
-    resolution = timeframe_map.get(timeframe)
-    if not resolution:
-        logger.error(f"Timeframe '{timeframe}' não suportado pelo Photon.")
-        return None
+    resolution = timeframe_map.get(timeframe, "5")
 
-    # O endpoint correto da API Photon
-    url = f"https://api.photon-sol.io/v1/historical/candles/{token_address}"
-    params = {"resolution": resolution, "amount": 200} # Pede as últimas 200 velas
+    url = f"https://api.dexscreener.com/latest/dex/candles/{pair_address}?res={resolution}"
     
     headers = {'Cache-Control': 'no-cache, no-store, must-revalidate'}
 
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.get(url, params=params, headers=headers, timeout=10.0)
+            response = await client.get(url, headers=headers, timeout=10.0)
             response.raise_for_status()
             api_data = response.json()
 
-            if isinstance(api_data, list) and len(api_data) > 0:
-                df = pd.DataFrame(api_data)
+            if api_data.get('pairs') and api_data['pairs'][0].get('candles'):
+                candles = api_data['pairs'][0]['candles']
+                df = pd.DataFrame(candles)
                 df.rename(columns={
-                    'startTime': 'timestamp', 'open': 'open', 'high': 'high', 
+                    'timestamp': 'timestamp', 'open': 'open', 'high': 'high', 
                     'low': 'low', 'close': 'close', 'volume': 'volume'
                 }, inplace=True)
                 
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='s')
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms') # Dexscreener usa milissegundos
                 for col in ['open', 'high', 'low', 'close', 'volume']:
                     df[col] = pd.to_numeric(df[col])
                 return df.sort_values(by='timestamp').reset_index(drop=True)
             else:
-                logger.warning(f"Photon não retornou dados de velas ou a resposta está vazia. Resposta: {api_data}")
+                logger.warning(f"Dexscreener não retornou dados de velas. Resposta: {api_data}")
                 return None
     except httpx.HTTPStatusError as e:
-        logger.error(f"Erro de HTTP ao buscar dados no Photon: {e.response.text}")
+        logger.error(f"Erro de HTTP ao buscar dados no Dexscreener: {e.response.text}")
         return None
     except Exception as e:
-        logger.error(f"Erro inesperado ao processar dados do Photon: {e}")
+        logger.error(f"Erro inesperado ao processar dados do Dexscreener: {e}")
         return None
 
-# --- ESTRATÉGIA (SEM ALTERAÇÕES, JÁ USA A NOVA FONTE DE DADOS) ---
+# --- ESTRATÉGIA ---
 async def check_strategy():
     global in_position, entry_price
     if not bot_running or not all(p is not None for p in parameters.values() if p != parameters['trade_pair_details']): return
 
     try:
         pair_details = parameters["trade_pair_details"]
-        data = await fetch_ohlcv_data(pair_details['base_address'], parameters['timeframe'])
+        data = await fetch_ohlcv_data(pair_details['pair_address'], parameters['timeframe'])
         
         if data is None or data.empty or len(data) < parameters["lookback_period"]:
-            await send_telegram_message(f"⚠️ Não foi possível obter dados de velas suficientes do Photon.")
+            await send_telegram_message(f"⚠️ Não foi possível obter dados de velas suficientes do Dexscreener.")
             return
 
         lookback_data = data.tail(parameters["lookback_period"]).copy()
@@ -305,8 +301,8 @@ async def check_strategy():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot de **Range Trading Autônomo v4.3 (API Photon Corrigida)**.\n\n'
-        '**Estratégia:** Esta versão final usa a API do **Photon** para máxima velocidade, opera em Zonas Adaptativas e combate o slippage com Taxas de Prioridade Dinâmicas.\n\n'
+        'Olá! Sou seu bot de **Range Trading Autônomo v5.1 (API Dexscreener)**.\n\n'
+        '**Estratégia:** Esta versão final usa a API do **Dexscreener** para máxima fiabilidade, opera em Zonas Adaptativas e combate o slippage com Taxas de Prioridade Dinâmicas.\n\n'
         'Use `/set` para configurar:\n'
         '`/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <LOOKBACK> <STOP_LOSS_%>`\n\n'
         '**Exemplo (BONK/SOL):**\n'
@@ -372,7 +368,7 @@ async def set_params(update, context):
         await update.effective_message.reply_text(
             f"✅ *Parâmetros definidos!*\n\n"
             f"📊 *Par:* `{base_token_symbol}/{quote_token_symbol}`\n"
-            f"🌐 *Fonte de Dados:* `Photon`\n"
+            f"🌐 *Fonte de Dados:* `Dexscreener`\n"
             f"⏰ *Timeframe:* `{timeframe}`\n"
             f"📈 *Estratégia:* Zonas Adaptativas (Lookback: {lookback_period} velas)\n"
             f"💰 *Valor por Ordem:* `{amount}` {quote_symbol_input}\n"
@@ -401,7 +397,7 @@ async def run_bot(update, context):
     
     bot_running = True
     logger.info("Bot de trade iniciado.")
-    await update.effective_message.reply_text("🚀 Bot iniciado! Operando com a API Photon.")
+    await update.effective_message.reply_text("🚀 Bot iniciado! Operando com a API Dexscreener.")
     
     if periodic_task is None or periodic_task.done():
         periodic_task = asyncio.create_task(periodic_checker())
