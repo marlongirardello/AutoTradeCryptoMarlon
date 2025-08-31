@@ -208,11 +208,13 @@ async def fetch_dexscreener_real_time_price(pair_address):
             response.raise_for_status()
             api_data = response.json()
             if api_data.get('pair'):
-                return float(api_data['pair']['priceNative'])
-            return None
+                price_native = float(api_data['pair'].get('priceNative', 0))
+                price_usd = float(api_data['pair'].get('priceUsd', 0))
+                return price_native, price_usd
+            return None, None
     except Exception as e:
         logger.error(f"Erro ao buscar preço no Dexscreener: {e}")
-        return None
+        return None, None
 
 # --- ESTRATÉGIA ---
 async def check_strategy():
@@ -237,8 +239,8 @@ async def check_strategy():
         buy_zone_upper_limit = dynamic_support + (dynamic_range * 0.25)
         sell_zone_lower_limit = dynamic_resistance - (dynamic_range * 0.25)
 
-        current_price = await fetch_dexscreener_real_time_price(pair_details['pair_address'])
-        if current_price is None:
+        current_price_native, current_price_usd = await fetch_dexscreener_real_time_price(pair_details['pair_address'])
+        if current_price_native is None:
             await send_telegram_message("⚠️ **Falha no Preço em Tempo Real (Dexscreener):**\nNão foi possível obter o preço atual.")
             return
         
@@ -250,23 +252,23 @@ async def check_strategy():
         volume_sma = data['volume_sma'].iloc[-1]
         
         logger.info(
-            f"Análise ({pair_details['base_symbol']}): Preço {current_price:.10f} | "
+            f"Análise ({pair_details['base_symbol']}): Preço {current_price_usd:.10f} USD ({current_price_native:.10f} SOL) | "
             f"RSI {current_rsi:.2f} | Vol {current_volume:.2f} | Média Vol {volume_sma:.2f} | "
-            f"Suporte Dinâmico {dynamic_support:.10f} | Resistência Dinâmica {dynamic_resistance:.10f}"
+            f"Suporte Dinâmico {dynamic_support:.10f} SOL | Resistência Dinâmica {dynamic_resistance:.10f} SOL"
         )
 
         if in_position:
             stop_loss_price = entry_price * (1 - parameters["stop_loss_percent"] / 100)
-            if current_price >= sell_zone_lower_limit:
-                 await execute_sell_order(reason=f"Take Profit (Zona de Venda) atingido em {current_price:.8f}")
-            elif current_price <= stop_loss_price:
+            if current_price_native >= sell_zone_lower_limit:
+                 await execute_sell_order(reason=f"Take Profit (Zona de Venda) atingido em {current_price_native:.8f}")
+            elif current_price_native <= stop_loss_price:
                 await execute_sell_order(reason=f"Stop Loss atingido em {stop_loss_price:.8f}")
         else:
-            price_in_buy_zone = current_price <= buy_zone_upper_limit
+            price_in_buy_zone = current_price_native <= buy_zone_upper_limit
             rsi_ok = current_rsi < 45
             volume_ok = current_volume > volume_sma
             if price_in_buy_zone and (rsi_ok or volume_ok):
-                await execute_buy_order(parameters["amount"], current_price)
+                await execute_buy_order(parameters["amount"], current_price_native)
     except Exception as e:
         logger.error(f"Ocorreu um erro em check_strategy: {e}", exc_info=True)
         await send_telegram_message(f"⚠️ Erro inesperado na estratégia: {e}")
