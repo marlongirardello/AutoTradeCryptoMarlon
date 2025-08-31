@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 import telegram
-from telegram.ext import Application, CommandHandler, BaseHandler
+from telegram.ext import Application, CommandHandler
 import logging
 import time
 import os
@@ -173,7 +173,7 @@ async def execute_sell_order(reason="Venda Manual"):
     except Exception as e:
         logger.error(f"Erro ao vender: {e}"); await send_telegram_message(f"⚠️ Falha ao vender: {e}")
 
-# --- NOVA FUNÇÃO DE DADOS: MIGRADA PARA MORALIS (COM PARSING CORRIGIDO) ---
+# --- NOVA FUNÇÃO DE DADOS: MIGRADA PARA MORALIS (DEFINITIVO) ---
 async def fetch_ohlcv_data(pair_address, timeframe):
     timeframe_map = {"1m": "1h", "5m": "1h", "15m": "1h", "1h": "1h"}
     resolution = timeframe_map.get(timeframe, "1h")
@@ -240,11 +240,17 @@ async def check_strategy():
 
         buy_zone_upper_limit = dynamic_support + (dynamic_range * 0.25)
         sell_zone_lower_limit = dynamic_resistance - (dynamic_range * 0.25)
-
+        
         async with httpx.AsyncClient() as client:
             real_time_price_response = await client.get(f"https://api.dexscreener.com/latest/dex/pairs/solana/{pair_details['pair_address']}")
-            current_price = float(real_time_price_response.json()['pairs'][0]['priceNative'])
-        
+            pair_data = real_time_price_response.json().get('pairs', [{}])[0]
+            current_price_native = float(pair_data.get('priceNative', 0))
+            current_price_usd = float(pair_data.get('priceUsd', 0))
+
+        if current_price_native == 0:
+            logger.warning("Não foi possível obter o preço em tempo real do Dexscreener.")
+            return
+
         data['rsi'] = ta.rsi(data['close'], length=14)
         data['volume_sma'] = data['volume'].rolling(window=20).mean()
         
@@ -253,23 +259,23 @@ async def check_strategy():
         volume_sma = data['volume_sma'].iloc[-1]
         
         logger.info(
-            f"Análise ({pair_details['base_symbol']}): Preço {current_price:.8f} | "
+            f"Análise ({pair_details['base_symbol']}): Preço {current_price_usd:.10f} USD ({current_price_native:.10f} SOL) | "
             f"RSI {current_rsi:.2f} | Vol {current_volume:.2f} | Média Vol {volume_sma:.2f} | "
-            f"Suporte Dinâmico {dynamic_support:.8f} | Resistência Dinâmica {dynamic_resistance:.8f}"
+            f"Suporte Dinâmico {dynamic_support:.10f} SOL | Resistência Dinâmica {dynamic_resistance:.10f} SOL"
         )
 
         if in_position:
             stop_loss_price = entry_price * (1 - parameters["stop_loss_percent"] / 100)
-            if current_price >= sell_zone_lower_limit:
-                 await execute_sell_order(reason=f"Take Profit (Zona de Venda) atingido em {current_price:.8f}")
-            elif current_price <= stop_loss_price:
+            if current_price_native >= sell_zone_lower_limit:
+                 await execute_sell_order(reason=f"Take Profit (Zona de Venda) atingido em {current_price_native:.8f}")
+            elif current_price_native <= stop_loss_price:
                 await execute_sell_order(reason=f"Stop Loss atingido em {stop_loss_price:.8f}")
         else:
-            price_in_buy_zone = current_price <= buy_zone_upper_limit
+            price_in_buy_zone = current_price_native <= buy_zone_upper_limit
             rsi_ok = current_rsi < 45
             volume_ok = current_volume > volume_sma
             if price_in_buy_zone and (rsi_ok or volume_ok):
-                await execute_buy_order(parameters["amount"], current_price)
+                await execute_buy_order(parameters["amount"], current_price_native)
     except Exception as e:
         logger.error(f"Ocorreu um erro em check_strategy: {e}", exc_info=True)
         await send_telegram_message(f"⚠️ Erro inesperado na estratégia: {e}")
@@ -277,8 +283,8 @@ async def check_strategy():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot de **Range Trading Autônomo v6.4 (Moralis Corrigido)**.\n\n'
-        '**Estratégia:** Esta versão final usa a API da **Moralis** para máxima fiabilidade, opera em Zonas Adaptativas e combate o slippage com Taxas de Prioridade Dinâmicas.\n\n'
+        'Olá! Sou seu bot de **Range Trading Autônomo v6.5 (Final)**.\n\n'
+        '**Estratégia:** Esta versão final usa a API da **Moralis** para máxima fiabilidade, opera em Zonas Adaptativas e combate o slippage com Taxas de Prioridade Dinâmicas. Os logs agora mostram os preços em USD e SOL para fácil comparação.\n\n'
         'Use `/set` para configurar:\n'
         '`/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <LOOKBACK> <STOP_LOSS_%>`\n\n'
         '**Exemplo (BONK/SOL):**\n'
@@ -450,4 +456,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
