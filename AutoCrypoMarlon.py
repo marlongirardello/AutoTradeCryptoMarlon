@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 import telegram
-from telegram.ext import Application, CommandHandler
+from telegram.ext import Application, CommandHandler, BaseHandler
 import logging
 import time
 import os
@@ -240,8 +240,7 @@ async def check_strategy():
 
         buy_zone_upper_limit = dynamic_support + (dynamic_range * 0.25)
         sell_zone_lower_limit = dynamic_resistance - (dynamic_range * 0.25)
-        
-        # --- CORREÇÃO DO ERRO DE PROGRAMAÇÃO ---
+
         async with httpx.AsyncClient() as client:
             real_time_price_response = await client.get(f"https://api.dexscreener.com/latest/dex/pairs/solana/{pair_details['pair_address']}")
             current_price = float(real_time_price_response.json()['pairs'][0]['priceNative'])
@@ -278,8 +277,8 @@ async def check_strategy():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot de **Range Trading Autônomo v6.3 (API Moralis)**.\n\n'
-        '**Estratégia:** Esta versão final usa a API da **Moralis** para máxima fiabilidade. Por favor, adicione sua chave de API ao ficheiro `.env`.\n\n'
+        'Olá! Sou seu bot de **Range Trading Autônomo v6.4 (Moralis Corrigido)**.\n\n'
+        '**Estratégia:** Esta versão final usa a API da **Moralis** para máxima fiabilidade, opera em Zonas Adaptativas e combate o slippage com Taxas de Prioridade Dinâmicas.\n\n'
         'Use `/set` para configurar:\n'
         '`/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <LOOKBACK> <STOP_LOSS_%>`\n\n'
         '**Exemplo (BONK/SOL):**\n'
@@ -444,7 +443,7 @@ def main():
     application.add_handler(CommandHandler("stop", stop_bot))
     application.add_handler(CommandHandler("buy", buy_manual))
     application.add_handler(CommandHandler("sell", sell_manual))
-    application.add_handler(error_handler)
+    application.add_error_handler(error_handler)
     
     logger.info("Bot do Telegram iniciado e aguardando comandos...")
     application.run_polling()
