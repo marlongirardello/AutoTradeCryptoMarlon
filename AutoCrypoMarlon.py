@@ -129,7 +129,6 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
         except Exception as e:
             logger.error(f"Falha na transação: {e}"); await send_telegram_message(f"⚠️ Falha na transação: {e}"); return None
 
-# MODIFICADO: Adicionado 'reason' para log detalhado
 async def execute_buy_order(amount, price, reason, manual=False):
     global in_position, entry_price
     if in_position:
@@ -143,9 +142,7 @@ async def execute_buy_order(amount, price, reason, manual=False):
     tx_sig = await execute_swap(details['quote_address'], details['base_address'], amount, details['quote_decimals'])
     if tx_sig:
         in_position = True
-        # Usa o preço atual como preço de entrada para cálculo de stop loss
         entry_price = price 
-        # MODIFICADO: Mensagem de sucesso agora inclui o motivo
         await send_telegram_message(
             f"✅ **COMPRA REALIZADA**\n\n"
             f"**Par:** {details['base_symbol']}/{details['quote_symbol']}\n"
@@ -157,7 +154,6 @@ async def execute_buy_order(amount, price, reason, manual=False):
         entry_price = 0.0
         await send_telegram_message(f"❌ FALHA NA COMPRA do token {details['base_symbol']}")
 
-# MODIFICADO: 'reason' já era o primeiro parâmetro, apenas ajustado para ser sempre explícito
 async def execute_sell_order(reason):
     global in_position, entry_price
     if not in_position:
@@ -179,7 +175,6 @@ async def execute_sell_order(reason):
         if tx_sig:
             in_position = False
             entry_price = 0.0
-            # MODIFICADO: Mensagem de sucesso agora tem um formato mais claro
             await send_telegram_message(
                 f"🛑 **VENDA REALIZADA**\n\n"
                 f"**Par:** {details['base_symbol']}/{details['quote_symbol']}\n"
@@ -191,7 +186,6 @@ async def execute_sell_order(reason):
             await send_telegram_message(f"❌ FALHA NA VENDA do token {details['base_symbol']}")
     except Exception as e:
         logger.error(f"Erro ao vender: {e}"); await send_telegram_message(f"⚠️ Falha ao vender: {e}")
-        # Em caso de erro ao buscar o saldo, resetamos a posição para evitar loops de erro.
         in_position = False
         entry_price = 0.0
 
@@ -203,7 +197,8 @@ async def fetch_geckoterminal_ohlcv(pair_address, timeframe):
     gt_aggregate = aggregate_map.get(timeframe)
     if not gt_timeframe: return None
 
-    url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools/{pair_address}/ohlcv/{gt_timeframe}?aggregate={gt_aggregate}&limit=200"
+    # IMPORTANTE: A API OHLCV da GeckoTerminal retorna os valores de open, high, low, close em USD.
+    url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools/{pair_address}/ohlcv/{gt_timeframe}?aggregate={gt_aggregate}&limit=200&currency=usd"
     headers = {'Cache-Control': 'no-cache, no-store, must-revalidate'}
     try:
         async with httpx.AsyncClient() as client:
@@ -240,7 +235,6 @@ async def fetch_dexscreener_real_time_price(pair_address):
         return None, None
 
 # --- ESTRATÉGIA ---
-# MODIFICAÇÃO PRINCIPAL: A função foi reescrita para implementar as novas regras de RSI e Volume.
 async def check_strategy():
     global in_position, entry_price
     if not bot_running: return
@@ -254,7 +248,7 @@ async def check_strategy():
             return
 
         current_price_native, current_price_usd = await fetch_dexscreener_real_time_price(pair_details['pair_address'])
-        if current_price_native is None:
+        if current_price_native is None or current_price_usd is None or current_price_native == 0:
             await send_telegram_message("⚠️ **Falha no Preço em Tempo Real (Dexscreener):**\nNão foi possível obter o preço atual.")
             return
         
@@ -263,42 +257,43 @@ async def check_strategy():
         data['volume_sma'] = data['volume'].rolling(window=20).mean()
 
         lookback_data = data.tail(parameters["lookback_period"]).copy()
-        support_native = lookback_data['low'].min()
-        resistance_native = lookback_data['high'].max()
+        
+        # Os valores de low/high da API são em USD.
+        support_usd = lookback_data['low'].min()
+        resistance_usd = lookback_data['high'].max()
+
+        # Calcula o preço da cotação (ex: SOL) em USD
+        quote_price_in_usd = current_price_usd / current_price_native
+        
+        # Converte o S/R de USD para a moeda nativa (SOL) para usar nos CÁLCULOS
+        support_native = support_usd / quote_price_in_usd if quote_price_in_usd > 0 else 0
+        resistance_native = resistance_usd / quote_price_in_usd if quote_price_in_usd > 0 else 0
 
         current_rsi = data['rsi'].iloc[-1]
         current_volume = data['volume'].iloc[-1]
         volume_sma = data['volume_sma'].iloc[-1]
-
-        # Evita divisão por zero se o preço nativo for 0
-        sol_price_usd = (current_price_usd / current_price_native) if current_price_native > 0 else 0
-        support_usd = support_native * sol_price_usd
-        resistance_usd = resistance_native * sol_price_usd
-
-        # --- Log Detalhado da Análise ---
+        
+        # --- Log Detalhado da Análise com MAIOR PRECISÃO ---
         logger.info(
             f"Análise ({pair_details['base_symbol']}): "
-            f"Preço: ${current_price_usd:.6f} USD ({current_price_native:.8f} {pair_details['quote_symbol']}) | "
+            f"Preço: ${current_price_usd:.10f} USD ({current_price_native:.10f} {pair_details['quote_symbol']}) | "
             f"RSI: {current_rsi:.2f} | "
             f"Vol: {current_volume:.2f} (Média: {volume_sma:.2f}) | "
-            f"Suporte: {support_native:.8f} {pair_details['quote_symbol']} (${support_usd:.6f} USD) | "
-            f"Resistência: {resistance_native:.8f} {pair_details['quote_symbol']} (${resistance_usd:.6f} USD)"
+            f"Suporte: {support_native:.10f} {pair_details['quote_symbol']} (${support_usd:.10f} USD) | "
+            f"Resistência: {resistance_native:.10f} {pair_details['quote_symbol']} (${resistance_usd:.10f} USD)"
         )
         
-        # --- Lógica de Decisão ---
+        # --- Lógica de Decisão (USA APENAS VALORES NATIVOS/SOL) ---
         buy_reason = None
         sell_reason = None
 
         if in_position:
             stop_loss_price = entry_price * (1 - parameters["stop_loss_percent"] / 100)
             
-            # 1. Checa Stop Loss primeiro
             if current_price_native <= stop_loss_price:
-                sell_reason = f"Stop Loss atingido em {current_price_native:.8f} {pair_details['quote_symbol']} (Preço de entrada: {entry_price:.8f})"
-            # 2. RSI em zona de venda
+                sell_reason = f"Stop Loss atingido em {current_price_native:.10f} {pair_details['quote_symbol']} (Preço de entrada: {entry_price:.10f})"
             elif current_rsi >= 55:
                 sell_reason = f"RSI ({current_rsi:.2f}) atingiu ou ultrapassou a zona de venda (>= 55)"
-            # 3. RSI na zona neutra com volume alto e rompimento de resistência
             elif 46 <= current_rsi < 55:
                 if current_volume > volume_sma and current_price_native >= resistance_native:
                     sell_reason = (f"Zona Neutra: RSI ({current_rsi:.2f}) + Volume ({current_volume:.2f}) > Média ({volume_sma:.2f}) "
@@ -307,11 +302,9 @@ async def check_strategy():
             if sell_reason:
                 await execute_sell_order(reason=sell_reason)
         
-        else: # Não está em posição, procura por compra
-            # 1. RSI em zona de compra
+        else:
             if current_rsi <= 45:
                 buy_reason = f"RSI ({current_rsi:.2f}) está na zona de compra (<= 45)"
-            # 2. RSI na zona neutra com volume alto e rompimento de suporte
             elif 46 <= current_rsi < 55:
                 if current_volume > volume_sma and current_price_native <= support_native:
                     buy_reason = (f"Zona Neutra: RSI ({current_rsi:.2f}) + Volume ({current_volume:.2f}) > Média ({volume_sma:.2f}) "
@@ -327,7 +320,7 @@ async def check_strategy():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot de **Range Trading Autônomo v8.0 (RSI + Volume)**.\n\n'
+        'Olá! Sou seu bot de **Range Trading Autônomo v8.1 (Lógica Corrigida)**.\n\n'
         '**Estratégia:**\n'
         '• **Compra:** RSI <= 45 OU (RSI 46-54 + Volume > Média + Rompimento de Suporte).\n'
         '• **Venda:** RSI >= 55 OU (RSI 46-54 + Volume > Média + Rompimento de Resistência).\n\n'
@@ -453,7 +446,6 @@ async def buy_manual(update, context):
         if not details:
             await update.effective_message.reply_text("⚠️ Configure o par com /set primeiro.")
             return
-        # Pega o preço atual para definir o entry_price
         current_price, _ = await fetch_dexscreener_real_time_price(details['pair_address'])
         if current_price is None:
              await update.effective_message.reply_text("⚠️ Não foi possível obter o preço atual para a compra manual.")
