@@ -11,6 +11,7 @@ import pandas as pd
 import pandas_ta as ta
 import httpx # Biblioteca para requisições assíncronas
 import numpy as np # Importado para lidar com valores inválidos
+from datetime import datetime, timedelta
 
 # --- Libs da Solana ---
 from solders.pubkey import Pubkey
@@ -80,36 +81,24 @@ async def get_dynamic_priority_fee(addresses):
             }
             response = await client.post(RPC_URL, json=payload, timeout=10.0)
             response.raise_for_status()
-            
             result = response.json().get('result')
-            
-            if not result:
-                logger.warning("Não foi possível obter taxas de prioridade (RPC), usando padrão (50000).")
-                return 50000
-            
+            if not result: return 50000
             fees = [fee['prioritizationFee'] for fee in result if fee['prioritizationFee'] > 0]
-            if not fees:
-                logger.warning("Nenhuma taxa de prioridade positiva encontrada, usando padrão (50000).")
-                return 50000
-
+            if not fees: return 50000
             median_fee = int(np.median(fees))
-            competitive_fee = int(median_fee * 1.1) 
-            dynamic_fee = max(50000, min(competitive_fee, 1000000)) 
+            competitive_fee = int(median_fee * 1.1)
+            dynamic_fee = max(50000, min(competitive_fee, 1000000))
             logger.info(f"Taxa de prioridade dinâmica calculada: {dynamic_fee} micro-lamports")
             return dynamic_fee
-            
     except Exception as e:
         logger.error(f"Erro ao calcular taxa de prioridade dinâmica: {e}. Usando padrão (50000).")
         return 50000
 
 # --- Funções de Execução de Ordem ---
 async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, slippage_bps=250):
-    logger.info(f"Iniciando swap de {amount} do token {input_mint_str} para {output_mint_str}")
     amount_wei = int(amount * (10**input_decimals))
-
     involved_addresses = [Pubkey.from_string(input_mint_str), Pubkey.from_string(output_mint_str)]
     priority_fee = await get_dynamic_priority_fee(involved_addresses)
-    
     async with httpx.AsyncClient() as client:
         try:
             quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={input_mint_str}&outputMint={output_mint_str}&amount={amount_wei}&slippageBps={slippage_bps}"
@@ -117,50 +106,39 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
             quote_res.raise_for_status()
             quote_response = quote_res.json()
 
-            swap_payload = {
-                "userPublicKey": str(payer.pubkey()),
-                "quoteResponse": quote_response,
-                "wrapAndUnwrapSol": True,
-                "computeUnitPriceMicroLamports": priority_fee
-            }
+            swap_payload = {"userPublicKey": str(payer.pubkey()), "quoteResponse": quote_response, "wrapAndUnwrapSol": True, "computeUnitPriceMicroLamports": priority_fee}
             swap_url = "https://quote-api.jup.ag/v6/swap"
             swap_res = await client.post(swap_url, json=swap_payload)
             swap_res.raise_for_status()
             swap_response = swap_res.json()
             swap_tx_b64 = swap_response.get('swapTransaction')
             if not swap_tx_b64:
-                logger.error(f"Erro na resposta da API de swap da Jupiter: {swap_response}"); return None
+                logger.error(f"Erro na API da Jupiter: {swap_response}"); return None
 
             raw_tx_bytes = b64decode(swap_tx_b64)
             swap_tx = VersionedTransaction.from_bytes(raw_tx_bytes)
-            
             signature = payer.sign_message(to_bytes_versioned(swap_tx.message))
             signed_tx = VersionedTransaction.populate(swap_tx.message, [signature])
 
             tx_opts = TxOpts(skip_preflight=False, preflight_commitment="confirmed")
             tx_signature = solana_client.send_raw_transaction(bytes(signed_tx), opts=tx_opts).value
             
-            logger.info(f"Transação enviada com sucesso! Assinatura: {tx_signature}")
+            logger.info(f"Transação enviada: {tx_signature}")
             solana_client.confirm_transaction(tx_signature, commitment="confirmed")
-            logger.info(f"Transação confirmada! Link: https://solscan.io/tx/{tx_signature}")
+            logger.info(f"Transação confirmada: https://solscan.io/tx/{tx_signature}")
             return str(tx_signature)
-
-        except httpx.HTTPStatusError as e:
-            logger.error(f"Erro de HTTP na API da Jupiter: {e.response.text}"); await send_telegram_message(f"⚠️ Falha na comunicação com a Jupiter: {e.response.text}"); return None
         except Exception as e:
-            logger.error(f"Falha na transação: {e}"); await send_telegram_message(f"⚠️ Falha na transação on-chain: {e}"); return None
+            logger.error(f"Falha na transação: {e}"); await send_telegram_message(f"⚠️ Falha na transação: {e}"); return None
 
 async def execute_buy_order(amount, price, manual=False):
     global in_position, entry_price
     if in_position:
-        if manual: await send_telegram_message("⚠️ Já existe uma posição aberta. Venda-a primeiro com /sell.")
+        if manual: await send_telegram_message("⚠️ Já existe uma posição aberta.")
         return
 
     details = parameters["trade_pair_details"]
-    logger.info(f"EXECUTANDO ORDEM DE COMPRA {'MANUAL' if manual else 'AUTOMÁTICA'} de {amount} {details['quote_symbol']} para {details['base_symbol']} ao preço de {price:.8f}")
-    
+    logger.info(f"EXECUTANDO ORDEM DE COMPRA {'MANUAL' if manual else 'AUTOMÁTICA'} de {amount} {details['quote_symbol']} para {details['base_symbol']}")
     entry_price = price
-
     tx_sig = await execute_swap(details['quote_address'], details['base_address'], amount, details['quote_decimals'])
     if tx_sig:
         in_position = True
@@ -176,18 +154,16 @@ async def execute_sell_order(reason="Venda Manual"):
         return
         
     details = parameters["trade_pair_details"]
-    logger.info(f"EXECUTANDO ORDEM DE VENDA REAL do token {details['base_symbol']}. Motivo: {reason}")
+    logger.info(f"EXECUTANDO ORDEM DE VENDA do token {details['base_symbol']}. Motivo: {reason}")
     try:
         token_mint_pubkey = Pubkey.from_string(details['base_address'])
         ata_address = get_associated_token_address(payer.pubkey(), token_mint_pubkey)
         balance_response = solana_client.get_token_account_balance(ata_address)
         token_balance_data = balance_response.value
-        amount_to_sell_wei = int(token_balance_data.amount)
-        token_decimals = token_balance_data.decimals
-        amount_to_sell = amount_to_sell_wei / (10**token_decimals)
-        if amount_to_sell_wei == 0:
+        amount_to_sell = token_balance_data.ui_amount
+        if amount_to_sell == 0:
             logger.warning("Tentativa de venda com saldo zero."); in_position = False; entry_price = 0.0; return
-        tx_sig = await execute_swap(details['base_address'], details['quote_address'], amount_to_sell, token_decimals)
+        tx_sig = await execute_swap(details['base_address'], details['quote_address'], amount_to_sell, token_balance_data.decimals)
         if tx_sig:
             in_position = False
             entry_price = 0.0
@@ -195,7 +171,7 @@ async def execute_sell_order(reason="Venda Manual"):
         else:
             await send_telegram_message(f"❌ FALHA NA VENDA do token {details['base_symbol']}")
     except Exception as e:
-        logger.error(f"Erro ao buscar saldo para venda: {e}"); await send_telegram_message(f"⚠️ Falha ao buscar saldo do token para venda: {e}")
+        logger.error(f"Erro ao vender: {e}"); await send_telegram_message(f"⚠️ Falha ao vender: {e}")
 
 # --- NOVA FUNÇÃO DE DADOS: MIGRADA PARA MORALIS ---
 async def fetch_ohlcv_data(pair_address, timeframe):
@@ -205,20 +181,11 @@ async def fetch_ohlcv_data(pair_address, timeframe):
         logger.error(f"Timeframe '{timeframe}' não suportado pela Moralis.")
         return None
 
-    url = f"https://solana-gateway.moralis-streams.com/market-data/{pair_address}/ohlcv"
+    # URL CORRETO E OFICIAL DA API MORALIS PARA OHLCV
+    url = f"https://solana-gateway.moralis.io/market-data/mainnet/{pair_address}/ohlcv"
     
-    params = {
-        "network": "mainnet",
-        "timeframe": resolution,
-        "limit": 200 # Busca as últimas 200 velas
-    }
-    
-    headers = {
-        "X-API-KEY": MORALIS_API_KEY,
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'Pragma': 'no-cache',
-        'Expires': '0'
-    }
+    params = {"timeframe": resolution}
+    headers = {"X-API-KEY": MORALIS_API_KEY, 'Cache-Control': 'no-cache'}
 
     try:
         async with httpx.AsyncClient() as client:
@@ -228,12 +195,8 @@ async def fetch_ohlcv_data(pair_address, timeframe):
 
             if isinstance(api_data, list) and len(api_data) > 0:
                 df = pd.DataFrame(api_data)
-                df.rename(columns={
-                    'timestamp': 'timestamp', 'open': 'open', 'high': 'high', 
-                    'low': 'low', 'close': 'close', 'volume': 'volume'
-                }, inplace=True)
-                
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms') # Moralis usa milissegundos
+                df.rename(columns={'timestamp': 'timestamp', 'openUsd': 'open', 'highUsd': 'high', 'lowUsd': 'low', 'closeUsd': 'close', 'volumeUsd': 'volume'}, inplace=True)
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
                 for col in ['open', 'high', 'low', 'close', 'volume']:
                     df[col] = pd.to_numeric(df[col])
                 return df.sort_values(by='timestamp').reset_index(drop=True)
@@ -250,7 +213,7 @@ async def fetch_ohlcv_data(pair_address, timeframe):
 # --- ESTRATÉGIA ---
 async def check_strategy():
     global in_position, entry_price
-    if not bot_running or not all(p is not None for p in parameters.values() if p != parameters['trade_pair_details']): return
+    if not bot_running: return
 
     try:
         pair_details = parameters["trade_pair_details"]
@@ -261,14 +224,11 @@ async def check_strategy():
             return
 
         lookback_data = data.tail(parameters["lookback_period"]).copy()
-        
         dynamic_support = lookback_data['low'].min()
         dynamic_resistance = lookback_data['high'].max()
         dynamic_range = dynamic_resistance - dynamic_support
 
-        if dynamic_range == 0:
-            logger.warning("Range dinâmico é zero, aguardando movimento.")
-            return
+        if dynamic_range == 0: return
 
         buy_zone_upper_limit = dynamic_support + (dynamic_range * 0.25)
         sell_zone_lower_limit = dynamic_resistance - (dynamic_range * 0.25)
@@ -291,26 +251,19 @@ async def check_strategy():
 
         if in_position:
             stop_loss_price = entry_price * (1 - parameters["stop_loss_percent"] / 100)
-            
             if current_price >= sell_zone_lower_limit:
                  await execute_sell_order(reason=f"Take Profit (Zona de Venda) atingido em {current_price:.8f}")
             elif current_price <= stop_loss_price:
                 await execute_sell_order(reason=f"Stop Loss atingido em {stop_loss_price:.8f}")
-
         else:
             price_in_buy_zone = current_price <= buy_zone_upper_limit
             rsi_ok = current_rsi < 45
             volume_ok = current_volume > volume_sma
-
-            logger.info(f"DEBUG: Avaliação de Compra -> Preço na Zona: {price_in_buy_zone} | RSI OK: {rsi_ok} | Volume OK: {volume_ok}")
-
             if price_in_buy_zone and (rsi_ok or volume_ok):
-                logger.info(f"Sinal de COMPRA (Lógica Ágil): Preço na zona ({current_price:.8f}) com RSI ({current_rsi:.2f}) OU Volume confirmados.")
                 await execute_buy_order(parameters["amount"], current_price)
-
     except Exception as e:
         logger.error(f"Ocorreu um erro em check_strategy: {e}", exc_info=True)
-        await send_telegram_message(f"⚠️ Erro inesperado ao executar a estratégia: {e}")
+        await send_telegram_message(f"⚠️ Erro inesperado na estratégia: {e}")
 
 # --- Comandos do Telegram ---
 async def start(update, context):
@@ -343,7 +296,6 @@ async def set_params(update, context):
         interval_map = {"1m": 60, "5m": 300, "15m": 900, "1h": 3600}
         check_interval_seconds = interval_map.get(timeframe, 60)
 
-        # Usamos Dexscreener para encontrar o par, pois é a fonte mais completa para isso
         token_search_url = f"https://api.dexscreener.com/latest/dex/tokens/{base_token_contract}"
         async with httpx.AsyncClient() as client:
             response = await client.get(token_search_url)
