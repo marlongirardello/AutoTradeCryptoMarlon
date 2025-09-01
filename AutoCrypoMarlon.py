@@ -234,7 +234,7 @@ async def fetch_dexscreener_real_time_price(pair_address):
         return None, None
 
 # --- ESTRATÉGIA ---
-# MODIFICAÇÃO PRINCIPAL: Regras de compra corrigidas para incluir todas as condições
+# MODIFICAÇÃO PRINCIPAL: Lógica de compra simplificada para faixa de RSI
 async def check_strategy():
     global in_position, entry_price
     if not bot_running: return
@@ -269,31 +269,23 @@ async def check_strategy():
             f"Volume: {current_volume:.2f}"
         )
         logger.info(
-            f"--> Critérios | Compra: RSI (<30,>35,<=48) + 3xVol>1k | Venda: RSI >= 52 + 3xVol>1k"
+            f"--> Critérios | Compra: RSI na faixa (35-48) + 3xVol>1k | Venda: RSI >= 52 + 3xVol>1k"
         )
         
         # --- Lógica de Decisão ---
         buy_reason = None
         sell_reason = None
 
-        # Calcula o volume sustentado (disponível para compra e venda)
         vol_1 = data['volume'].iloc[-1]
         vol_2 = data['volume'].iloc[-2]
         vol_3 = data['volume'].iloc[-3]
         sustained_high_volume = (vol_1 > 1000 and vol_2 > 1000 and vol_3 > 1000)
 
         if not in_position:
-            # --- LÓGICA DE COMPRA (ESTRATÉGIA CORRIGIDA E COMPLETA) ---
-            previous_rsi = data['rsi'].iloc[-2]
-            was_oversold = data['rsi'].tail(10).min() < 30
-
-            # Verifica TODAS as condições de compra
-            is_reversal_signal = was_oversold and current_rsi > 35 and previous_rsi <= 35
-            is_within_rsi_limit = current_rsi <= 48
-            
-            if is_reversal_signal and is_within_rsi_limit and sustained_high_volume:
-                buy_reason = (f"RSI Reversão ({previous_rsi:.2f} -> {current_rsi:.2f}) "
-                              f"na faixa (35-48), após sobrevenda (<30), com volume alto.")
+            # --- LÓGICA DE COMPRA (ESTRATÉGIA DE FAIXA DE RSI) ---
+            if (current_rsi > 35 and current_rsi <= 48 and sustained_high_volume):
+                buy_reason = (f"RSI ({current_rsi:.2f}) na faixa de compra (35-48) "
+                              f"com volume alto sustentado.")
                 await execute_buy_order(parameters["amount"], current_price_native, reason=buy_reason)
         
         else: # Já está em posição, procurar por VENDA
@@ -315,14 +307,13 @@ async def check_strategy():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot de **Trading Autônomo v10.2 (Regras Corrigidas)**.\n\n'
+        'Olá! Sou seu bot de **Trading Autônomo v10.3 (Estratégia de Faixa de RSI)**.\n\n'
         '**Estratégia de Compra:**\n'
-        '• RSI deve ter estado abaixo de 30 E\n'
-        '• Cruzar de volta para cima de 35 E\n'
-        '• Estar abaixo ou igual a 48 E\n'
+        '• RSI deve estar na faixa entre `35` e `48` E\n'
         '• As 3 últimas velas devem ter volume > 1000.\n\n'
         '**Estratégia de Venda:**\n'
-        'A venda ocorre se o RSI for `≥ 52` com 3 velas de volume alto, ou se o stop-loss fixo for atingido.\n\n'
+        '• RSI deve ser `≥ 52` com 3 velas de volume alto OU\n'
+        '• O stop-loss fixo é atingido.\n\n'
         'Use `/set` para configurar:\n'
         '`/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <LOOKBACK> <STOP_LOSS_%>`',
         parse_mode='Markdown'
@@ -382,7 +373,7 @@ async def set_params(update, context):
             f"✅ *Parâmetros definidos!*\n\n"
             f"📊 *Par:* `{base_token_symbol}/{quote_token_symbol}`\n"
             f"⏰ *Timeframe:* `{timeframe}`\n"
-            f"📈 *Estratégia:* **Reversão RSI + Volume**\n"
+            f"📈 *Estratégia:* **Faixa de RSI + Volume**\n"
             f"💰 *Valor por Ordem:* `{amount}` {quote_symbol_input}\n"
             f"🚀 *Taxa de Prioridade:* **Dinâmica (Automática)**\n"
             f"📉 *Stop Loss Fixo:* `{stop_loss_percent}%`",
@@ -409,7 +400,7 @@ async def run_bot(update, context):
     
     bot_running = True
     logger.info("Bot de trade iniciado.")
-    await update.effective_message.reply_text("🚀 Bot iniciado! Operando com a nova Estratégia de Reversão de RSI.")
+    await update.effective_message.reply_text("🚀 Bot iniciado! Operando com a Estratégia de Faixa de RSI.")
     
     if periodic_task is None or periodic_task.done():
         periodic_task = asyncio.create_task(periodic_checker())
