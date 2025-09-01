@@ -234,7 +234,7 @@ async def fetch_dexscreener_real_time_price(pair_address):
         return None, None
 
 # --- ESTRATÉGIA ---
-# MODIFICAÇÃO PRINCIPAL: Estratégia de Volume com lógica de RSI invertida (corrigida)
+# MODIFICAÇÃO PRINCIPAL: Nova estratégia de compra baseada em Reversão de RSI
 async def check_strategy():
     global in_position, entry_price
     if not bot_running: return
@@ -243,8 +243,9 @@ async def check_strategy():
         pair_details = parameters["trade_pair_details"]
         data = await fetch_geckoterminal_ohlcv(pair_details['pair_address'], parameters['timeframe'])
         
-        if data is None or data.empty or len(data) < 3:
-            logger.warning(f"Dados históricos insuficientes (necessário 3 velas, obtido {len(data)}). Aguardando...")
+        # Precisa de dados suficientes para calcular RSI e olhar para trás
+        if data is None or data.empty or len(data) < 30:
+            logger.warning(f"Dados históricos insuficientes (necessário ~30 velas, obtido {len(data)}). Aguardando...")
             return
 
         current_price_native, current_price_usd = await fetch_dexscreener_real_time_price(pair_details['pair_address'])
@@ -253,40 +254,53 @@ async def check_strategy():
             return
         
         data['rsi'] = ta.rsi(data['close'], length=14)
+        
+        # Remove valores nulos do RSI no início da série
+        data.dropna(subset=['rsi'], inplace=True)
+        if len(data) < 15: # Garante que temos dados suficientes após remover nulos
+            logger.warning("Não há dados de RSI suficientes para continuar a análise.")
+            return
 
         current_rsi = data['rsi'].iloc[-1]
         
-        vol_1 = data['volume'].iloc[-1]
-        vol_2 = data['volume'].iloc[-2]
-        vol_3 = data['volume'].iloc[-3]
+        # Log de Análise
         logger.info(
             f"Análise ({pair_details['base_symbol']}): "
             f"Preço: ${current_price_usd:.10f} USD ({current_price_native:.10f} {pair_details['quote_symbol']}) | "
-            f"RSI: {current_rsi:.2f} | "
-            f"Volumes (últimas 3 velas): [{vol_1:.2f}, {vol_2:.2f}, {vol_3:.2f}]"
+            f"RSI: {current_rsi:.2f}"
         )
         
-        sustained_high_volume = (vol_1 > 1000 and vol_2 > 1000 and vol_3 > 1000)
-
         buy_reason = None
         sell_reason = None
 
         if not in_position:
-            # Lógica de COMPRA CORRIGIDA
-            if current_rsi < 48 and sustained_high_volume:
-                buy_reason = (f"RSI ({current_rsi:.2f}) < 48 e 3 velas com volume > 1000 "
-                              f"([{vol_1:.2f}, {vol_2:.2f}, {vol_3:.2f}])")
+            # --- LÓGICA DE COMPRA (ESTRATÉGIA DE REVERSÃO) ---
+            previous_rsi = data['rsi'].iloc[-2]
+
+            # 1. Verifica se o RSI esteve sobrevendido (<30) recentemente (últimas 10 velas)
+            was_oversold = data['rsi'].tail(10).min() < 30
+
+            # 2. Gatilho de compra: se esteve sobrevendido E AGORA cruzou para cima de 35
+            if was_oversold and current_rsi > 35 and previous_rsi <= 35:
+                buy_reason = (f"Reversão de RSI: Cruzou para cima de 35 ({current_rsi:.2f}) "
+                              f"após sobrevenda recente (< 30).")
                 await execute_buy_order(parameters["amount"], current_price_native, reason=buy_reason)
         
-        else: # Já está em posição, procurar por VENDA
+        else: # Já está em posição, procurar por VENDA (lógica da v9.1 mantida)
+            # Verifica o volume sustentado para a lógica de venda
+            vol_1 = data['volume'].iloc[-1]
+            vol_2 = data['volume'].iloc[-2]
+            vol_3 = data['volume'].iloc[-3]
+            sustained_high_volume = (vol_1 > 1000 and vol_2 > 1000 and vol_3 > 1000)
+
             # Prioridade 1: Stop-Loss Percentual
             stop_loss_price = entry_price * (1 - parameters["stop_loss_percent"] / 100)
             if current_price_native <= stop_loss_price:
                 sell_reason = f"Stop Loss Fixo ({parameters['stop_loss_percent']}%) atingido em {current_price_native:.10f} (Entrada: {entry_price:.10f})"
             
-            # Prioridade 2: Lógica de VENDA CORRIGIDA da estratégia
+            # Prioridade 2: Lógica de VENDA da estratégia anterior
             elif current_rsi >= 52 and sustained_high_volume:
-                sell_reason = (f"RSI ({current_rsi:.2f}) >= 52 e 3 velas com volume > 1000 "
+                sell_reason = (f"Sinal de Venda: RSI ({current_rsi:.2f}) >= 52 e 3 velas com volume > 1000 "
                                f"([{vol_1:.2f}, {vol_2:.2f}, {vol_3:.2f}])")
             
             if sell_reason:
@@ -299,19 +313,15 @@ async def check_strategy():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot de **Trading Autônomo v9.1 (Estratégia de Volume Corrigida)**.\n\n'
-        '**Estratégia:**\n'
-        '• **Compra:** RSI `< 48` **E** as 3 últimas velas tiveram volume acima de 1000.\n'
-        '• **Venda:** RSI `≥ 52` **E** as 3 últimas velas tiveram volume acima de 1000.\n\n'
-        'Use `/set` para configurar (o `lookback` não é mais usado para S&R, mas ainda define o range dos dados):\n'
+        'Olá! Sou seu bot de **Trading Autônomo v10.0 (Estratégia de Reversão de RSI)**.\n\n'
+        '**Estratégia de Compra (NOVA):**\n'
+        'O bot agora espera o RSI cair abaixo de 30 (sobrevenda) e só executa a **compra** quando ele se recupera, cruzando de volta para **cima de 35**, para evitar entrar em quedas fortes.\n\n'
+        '**Estratégia de Venda (Anterior):**\n'
+        'A venda ocorre se o RSI for `≥ 52` com 3 velas de volume alto, ou se o stop-loss fixo for atingido.\n\n'
+        'Use `/set` para configurar:\n'
         '`/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <LOOKBACK> <STOP_LOSS_%>`\n\n'
         '**Exemplo (BONK/SOL):**\n'
-        '`/set DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263 SOL 1m 0.1 30 1.5`\n\n'
-        '**Comandos:**\n'
-        '• `/run` - Inicia o bot.\n'
-        '• `/stop` - Para o bot.\n'
-        '• `/buy <VALOR>` - Compra manual.\n'
-        '• `/sell` - Vende a posição atual.',
+        '`/set DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263 SOL 1m 0.1 30 1.5`',
         parse_mode='Markdown'
     )
 
@@ -368,9 +378,8 @@ async def set_params(update, context):
         await update.effective_message.reply_text(
             f"✅ *Parâmetros definidos!*\n\n"
             f"📊 *Par:* `{base_token_symbol}/{quote_token_symbol}`\n"
-            f"🌐 *Fonte de Dados:* `Híbrida (GeckoTerminal + Dexscreener)`\n"
             f"⏰ *Timeframe:* `{timeframe}`\n"
-            f"📈 *Estratégia:* **Volume Sustentado + RSI**\n"
+            f"📈 *Estratégia:* **Reversão de RSI (Compra) + Volume (Venda)**\n"
             f"💰 *Valor por Ordem:* `{amount}` {quote_symbol_input}\n"
             f"🚀 *Taxa de Prioridade:* **Dinâmica (Automática)**\n"
             f"📉 *Stop Loss Fixo:* `{stop_loss_percent}%`",
@@ -397,7 +406,7 @@ async def run_bot(update, context):
     
     bot_running = True
     logger.info("Bot de trade iniciado.")
-    await update.effective_message.reply_text("🚀 Bot iniciado! Operando com a nova Estratégia de Volume Sustentado.")
+    await update.effective_message.reply_text("🚀 Bot iniciado! Operando com a nova Estratégia de Reversão de RSI.")
     
     if periodic_task is None or periodic_task.done():
         periodic_task = asyncio.create_task(periodic_checker())
