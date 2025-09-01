@@ -63,7 +63,7 @@ parameters = {
     "timeframe": None,
     "amount": None,
     "stop_loss_percent": None,
-    "take_profit_percent": None, # NOVO PARÂMETRO
+    "take_profit_percent": None,
     "trade_pair_details": {}
 }
 application = None
@@ -93,7 +93,7 @@ async def get_dynamic_priority_fee(addresses):
         return 50000
 
 # --- Funções de Execução de Ordem ---
-async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, slippage_bps=500): # Slippage aumentado para scalping
+async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, slippage_bps=500):
     amount_wei = int(amount * (10**input_decimals))
     involved_addresses = [Pubkey.from_string(input_mint_str), Pubkey.from_string(output_mint_str)]
     priority_fee = await get_dynamic_priority_fee(involved_addresses)
@@ -118,12 +118,11 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
             signature = payer.sign_message(to_bytes_versioned(swap_tx.message))
             signed_tx = VersionedTransaction.populate(swap_tx.message, [signature])
 
-            tx_opts = TxOpts(skip_preflight=True, preflight_commitment="processed") # Opções mais rápidas para scalping
+            tx_opts = TxOpts(skip_preflight=True, preflight_commitment="processed")
             tx_signature = solana_client.send_raw_transaction(bytes(signed_tx), opts=tx_opts).value
             
             logger.info(f"Transação enviada: {tx_signature}")
-            # Confirmação mais rápida para scalping
-            await asyncio.sleep(5) # Aguarda um pouco para a transação propagar
+            await asyncio.sleep(5)
             solana_client.confirm_transaction(tx_signature, commitment="confirmed")
             logger.info(f"Transação confirmada: https://solscan.io/tx/{tx_signature}")
             return str(tx_signature)
@@ -174,7 +173,6 @@ async def execute_sell_order(reason):
         
         tx_sig = await execute_swap(details['base_address'], details['quote_address'], amount_to_sell, token_balance_data.decimals)
         if tx_sig:
-            profit_percent = ((solana_client.get_latest_blockhash().value.last_valid_block_height - entry_price) / entry_price) * 100 if entry_price > 0 else 0
             in_position = False
             entry_price = 0.0
             await send_telegram_message(
@@ -229,7 +227,7 @@ async def fetch_dexscreener_real_time_price(pair_address):
         logger.error(f"Erro ao buscar preço no Dexscreener: {e}"); return None, None
 
 # --- ESTRATÉGIA ---
-# MODIFICAÇÃO PRINCIPAL: Estratégia de Scalping de Momentum com EMAs
+# MODIFICAÇÃO PRINCIPAL: Estratégia Híbrida com janela de oportunidade de 3 velas
 async def check_strategy():
     global in_position, entry_price
     if not bot_running: return
@@ -242,7 +240,6 @@ async def check_strategy():
             return
 
         if in_position:
-            # --- LÓGICA DE VENDA (SAÍDA RÁPIDA) ---
             take_profit_price = entry_price * (1 + parameters["take_profit_percent"] / 100)
             stop_loss_price = entry_price * (1 - parameters["stop_loss_percent"] / 100)
             
@@ -254,7 +251,7 @@ async def check_strategy():
             
             if sell_reason:
                 await execute_sell_order(reason=sell_reason)
-            else: # Log de acompanhamento da posição
+            else:
                 profit = ((current_price_native - entry_price) / entry_price) * 100
                 logger.info(
                     f"Posição Aberta ({pair_details['base_symbol']}): "
@@ -263,38 +260,48 @@ async def check_strategy():
                     f"Lucro/Prejuízo: {profit:+.2f}% | "
                     f"Alvo: {take_profit_price:.10f} | Stop: {stop_loss_price:.10f}"
                 )
-            return # Se está em posição, não avalia a compra
+            return
 
-        # --- LÓGICA DE COMPRA (ENTRADA NO MOMENTUM) ---
         data = await fetch_geckoterminal_ohlcv(pair_details['pair_address'], parameters['timeframe'])
-        if data is None or data.empty or len(data) < 20: # Precisa de dados para EMAs
+        if data is None or data.empty or len(data) < 20:
             logger.warning(f"Dados históricos insuficientes para cálculo de EMAs. Aguardando...")
             return
 
-        # Cálculos de indicadores
         data.ta.ema(length=5, append=True, col_names=('EMA_5',))
         data.ta.ema(length=10, append=True, col_names=('EMA_10',))
         data['VOL_MA_9'] = data['volume'].rolling(window=9).mean()
         data.dropna(inplace=True)
-        if len(data) < 2: return # Garante que temos pelo menos 2 pontos para comparar
+        if len(data) < 5: return
 
-        # Pega os valores mais recentes
         last = data.iloc[-1]
-        prev = data.iloc[-2]
         
-        # Log de Análise para Compra
         logger.info(
             f"Análise Compra ({pair_details['base_symbol']}): EMA_5={last['EMA_5']:.10f} | EMA_10={last['EMA_10']:.10f} | "
             f"Volume={last['volume']:.2f} | Média Vol(9)={last['VOL_MA_9']:.2f}"
         )
+        logger.info(
+            f"--> Critérios | Compra: Cruz. EMA (últimas 3 velas) + Vol > Média | Venda: TP/SL Fixos"
+        )
         
-        # Condições da estratégia
-        ema_crossed_up = last['EMA_5'] > last['EMA_10'] and prev['EMA_5'] <= prev['EMA_10']
+        # --- LÓGICA DE COMPRA (ESTRATÉGIA HÍBRIDA) ---
+        is_bullish_state = last['EMA_5'] > last['EMA_10']
         volume_is_high = last['volume'] > last['VOL_MA_9']
-        
-        if ema_crossed_up and volume_is_high:
-            reason = f"Cruzamento de EMA (5>10) com Volume ({last['volume']:.2f}) > Média ({last['VOL_MA_9']:.2f})"
-            await execute_buy_order(parameters["amount"], current_price_native, reason=reason)
+
+        if is_bullish_state and volume_is_high:
+            crossover_in_window = False
+            # Janela de 3 velas para o cruzamento
+            for i in range(1, 4): 
+                if len(data) > i + 1:
+                    current_candle = data.iloc[-i]
+                    previous_candle = data.iloc[-i-1]
+                    
+                    if current_candle['EMA_5'] > current_candle['EMA_10'] and previous_candle['EMA_5'] <= previous_candle['EMA_10']:
+                        crossover_in_window = True
+                        break
+            
+            if crossover_in_window:
+                reason = f"EMA cruzou (últimas 3 velas) e Vol ({last['volume']:.2f}) > Média ({last['VOL_MA_9']:.2f})"
+                await execute_buy_order(parameters["amount"], current_price_native, reason=reason)
 
     except Exception as e:
         logger.error(f"Ocorreu um erro em check_strategy: {e}", exc_info=True)
@@ -303,46 +310,33 @@ async def check_strategy():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot de **Trading Autônomo v11.0 (Scalping de Momentum)**.\n\n'
-        '**Filosofia:** Realizar muitas operações curtas, buscando lucros pequenos e controlando as perdas de forma rigorosa.\n\n'
-        '**Estratégia de Compra:**\n'
-        '• A Média Móvel Exponencial (EMA) de 5 períodos cruza para **CIMA** da EMA de 10 períodos.\n'
-        '• O volume da vela atual é **MAIOR** que a média do volume das últimas 9 velas.\n\n'
+        'Olá! Sou seu bot de **Trading Autônomo v11.1 (Scalping Híbrido)**.\n\n'
+        '**Estratégia de Compra (NOVA):**\n'
+        'A compra ocorre se as EMAs estiverem cruzadas para alta, o volume for alto, **E** o cruzamento inicial tiver ocorrido nas **últimas 3 velas**.\n\n'
         '**Estratégia de Venda:**\n'
-        '• Atingir a meta de lucro (Take Profit) ou o limite de perda (Stop Loss) definidos.\n\n'
-        '**NOVO FORMATO DO COMANDO /SET:**\n'
+        'Baseada em metas fixas de Take Profit e Stop Loss.\n\n'
+        '**FORMATO DO COMANDO /SET:**\n'
         '`/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%>`\n\n'
         '**Exemplo:**\n'
-        '`/set DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263 SOL 1m 0.1 0.75 1.5`\n'
-        '(Stop de -0.75% e Alvo de +1.5%)',
+        '`/set DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263 SOL 1m 0.1 1.0 1.5`',
         parse_mode='Markdown'
     )
 
 async def set_params(update, context):
-    global parameters
+    global parameters, check_interval_seconds
     if bot_running:
         await update.effective_message.reply_text("Pare o bot com /stop antes de alterar os parâmetros.")
         return
     try:
-        # NOVO FORMATO: 6 argumentos
-        base_token_contract = context.args[0]
-        quote_symbol_input = context.args[1].upper()
-        timeframe = context.args[2].lower()
-        amount = float(context.args[3])
-        stop_loss_percent = float(context.args[4])
-        take_profit_percent = float(context.args[5])
+        base_token_contract, quote_symbol_input, timeframe, amount, stop_loss_percent, take_profit_percent = context.args[0], context.args[1].upper(), context.args[2].lower(), float(context.args[3]), float(context.args[4]), float(context.args[5])
         
-        # Otimização de intervalo para scalping
-        global check_interval_seconds
         interval_map = {"1m": 15, "5m": 60, "15m": 300, "1h": 900}
-        check_interval_seconds = interval_map.get(timeframe, 15) # Verifica a cada 15s para timeframe de 1m
+        check_interval_seconds = interval_map.get(timeframe, 15)
 
-        # Validações
         if stop_loss_percent <= 0 or take_profit_percent <= 0:
             await update.effective_message.reply_text("⚠️ Stop Loss e Take Profit devem ser valores positivos.")
             return
 
-        # ... (restante da busca de token é igual) ...
         async with httpx.AsyncClient() as client:
             response = await client.get(f"https://api.dexscreener.com/latest/dex/tokens/{base_token_contract}")
             response.raise_for_status()
@@ -355,24 +349,18 @@ async def set_params(update, context):
         trade_pair = max(valid_pairs, key=lambda p: p.get('liquidity', {}).get('usd', 0))
 
         parameters = {
-            "timeframe": timeframe,
-            "amount": amount,
-            "stop_loss_percent": stop_loss_percent,
-            "take_profit_percent": take_profit_percent,
+            "timeframe": timeframe, "amount": amount, "stop_loss_percent": stop_loss_percent, "take_profit_percent": take_profit_percent,
             "trade_pair_details": {
-                "base_symbol": trade_pair['baseToken']['symbol'].lstrip('$'),
-                "quote_symbol": trade_pair['quoteToken']['symbol'],
-                "base_address": trade_pair['baseToken']['address'],
-                "quote_address": trade_pair['quoteToken']['address'],
-                "pair_address": trade_pair['pairAddress'],
-                "quote_decimals": 9 if trade_pair['quoteToken']['symbol'] in ['SOL', 'WSOL'] else 6
+                "base_symbol": trade_pair['baseToken']['symbol'].lstrip('$'), "quote_symbol": trade_pair['quoteToken']['symbol'],
+                "base_address": trade_pair['baseToken']['address'], "quote_address": trade_pair['quoteToken']['address'],
+                "pair_address": trade_pair['pairAddress'], "quote_decimals": 9 if trade_pair['quoteToken']['symbol'] in ['SOL', 'WSOL'] else 6
             }
         }
         await update.effective_message.reply_text(
-            f"✅ *Parâmetros de Scalping definidos!*\n\n"
+            f"✅ *Parâmetros de Scalping Híbrido definidos!*\n\n"
             f"📊 *Par:* `{parameters['trade_pair_details']['base_symbol']}/{parameters['trade_pair_details']['quote_symbol']}`\n"
             f"⏰ *Timeframe:* `{timeframe}` (Verificação a cada {check_interval_seconds}s)\n"
-            f"📈 *Estratégia:* **Cruzamento de EMA (5/10) + Pico de Volume**\n"
+            f"📈 *Estratégia:* **Cruzamento de EMA (janela de 3 velas) + Pico de Volume**\n"
             f"💰 *Valor por Ordem:* `{amount}` {quote_symbol_input}\n"
             f"🛑 *Stop Loss:* `-{stop_loss_percent}%`\n"
             f"🎯 *Take Profit:* `+{take_profit_percent}%`",
@@ -385,10 +373,8 @@ async def set_params(update, context):
             parse_mode='Markdown'
         )
     except Exception as e:
-        logger.error(f"Erro em set_params: {e}")
-        await update.effective_message.reply_text(f"⚠️ Erro ao configurar: {e}")
+        logger.error(f"Erro em set_params: {e}"); await update.effective_message.reply_text(f"⚠️ Erro ao configurar: {e}")
 
-# ... (restante do código: run_bot, stop_bot, buy/sell_manual, etc. permanece funcionalmente o mesmo) ...
 async def run_bot(update, context):
     global bot_running, periodic_task
     if "take_profit_percent" not in parameters or parameters["take_profit_percent"] is None:
@@ -398,9 +384,8 @@ async def run_bot(update, context):
         await update.effective_message.reply_text("O bot já está em execução.")
         return
     
-    bot_running = True
-    logger.info("Bot de trade iniciado.")
-    await update.effective_message.reply_text("🚀 Bot de Scalping iniciado!")
+    bot_running = True; logger.info("Bot de trade iniciado.")
+    await update.effective_message.reply_text("🚀 Bot de Scalping Híbrido iniciado!")
     
     if periodic_task is None or periodic_task.done():
         periodic_task = asyncio.create_task(periodic_checker())
@@ -409,14 +394,10 @@ async def run_bot(update, context):
 async def stop_bot(update, context):
     global bot_running, periodic_task, in_position, entry_price
     if not bot_running:
-        await update.effective_message.reply_text("O bot já está parado.")
-        return
+        await update.effective_message.reply_text("O bot já está parado."); return
     
     bot_running = False
-    if periodic_task:
-        periodic_task.cancel()
-        periodic_task = None
-
+    if periodic_task: periodic_task.cancel(); periodic_task = None
     in_position, entry_price = False, 0.0
     logger.info("Bot de trade parado.")
     await update.effective_message.reply_text("🛑 Bot parado.")
@@ -426,18 +407,15 @@ async def buy_manual(update, context):
         amount = float(context.args[0])
         details = parameters.get("trade_pair_details")
         if not details:
-            await update.effective_message.reply_text("⚠️ Configure o par com /set primeiro.")
-            return
+            await update.effective_message.reply_text("⚠️ Configure o par com /set primeiro."); return
         current_price, _ = await fetch_dexscreener_real_time_price(details['pair_address'])
         if current_price is None:
-             await update.effective_message.reply_text("⚠️ Não foi possível obter o preço atual para a compra manual.")
-             return
+             await update.effective_message.reply_text("⚠️ Não foi possível obter o preço atual."); return
         await execute_buy_order(amount, current_price, reason="Comando /buy manual", manual=True)
     except (IndexError, ValueError):
-        await update.effective_message.reply_text("⚠️ *Formato incorreto.* Use: `/buy <VALOR>` (ex: `/buy 0.1`)")
+        await update.effective_message.reply_text("⚠️ *Formato incorreto.* Use: `/buy <VALOR>`")
     except Exception as e:
-        logger.error(f"Erro no comando /buy: {e}")
-        await update.effective_message.reply_text(f"⚠️ Erro ao executar compra manual: {e}")
+        logger.error(f"Erro no comando /buy: {e}"); await update.effective_message.reply_text(f"⚠️ Erro: {e}")
 
 async def sell_manual(update, context):
     await execute_sell_order(reason="Venda Manual")
@@ -448,13 +426,11 @@ async def periodic_checker():
             if bot_running:
                 logger.info("Executando verificação periódica da estratégia...")
                 await check_strategy()
-            # O intervalo de sleep agora é dinâmico
             await asyncio.sleep(check_interval_seconds)
         except asyncio.CancelledError:
             logger.info("Verificador periódico cancelado."); break
         except Exception as e:
-            logger.error(f"Erro no loop do verificador periódico: {e}")
-            await asyncio.sleep(60)
+            logger.error(f"Erro no loop do verificador periódico: {e}"); await asyncio.sleep(60)
 
 async def error_handler(update, context):
     logger.error(f"Exceção ao manusear uma atualização: {context.error}", exc_info=context.error)
