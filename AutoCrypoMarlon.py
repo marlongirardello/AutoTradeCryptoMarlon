@@ -197,7 +197,6 @@ async def fetch_geckoterminal_ohlcv(pair_address, timeframe):
     gt_aggregate = aggregate_map.get(timeframe)
     if not gt_timeframe: return None
 
-    # IMPORTANTE: A API OHLCV da GeckoTerminal retorna os valores de open, high, low, close em USD.
     url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools/{pair_address}/ohlcv/{gt_timeframe}?aggregate={gt_aggregate}&limit=200&currency=usd"
     headers = {'Cache-Control': 'no-cache, no-store, must-revalidate'}
     try:
@@ -235,6 +234,7 @@ async def fetch_dexscreener_real_time_price(pair_address):
         return None, None
 
 # --- ESTRATÉGIA ---
+# MODIFICAÇÃO PRINCIPAL: Estratégia de Volume com lógica de RSI invertida (corrigida)
 async def check_strategy():
     global in_position, entry_price
     if not bot_running: return
@@ -243,75 +243,54 @@ async def check_strategy():
         pair_details = parameters["trade_pair_details"]
         data = await fetch_geckoterminal_ohlcv(pair_details['pair_address'], parameters['timeframe'])
         
-        if data is None or data.empty or len(data) < parameters["lookback_period"]:
-            await send_telegram_message(f"⚠️ **Dados Históricos Insuficientes (GeckoTerminal):**\nNão foi possível obter velas suficientes.")
+        if data is None or data.empty or len(data) < 3:
+            logger.warning(f"Dados históricos insuficientes (necessário 3 velas, obtido {len(data)}). Aguardando...")
             return
 
         current_price_native, current_price_usd = await fetch_dexscreener_real_time_price(pair_details['pair_address'])
-        if current_price_native is None or current_price_usd is None or current_price_native == 0:
+        if current_price_native is None or current_price_usd is None:
             await send_telegram_message("⚠️ **Falha no Preço em Tempo Real (Dexscreener):**\nNão foi possível obter o preço atual.")
             return
         
-        # --- Cálculos de Indicadores e S/R ---
         data['rsi'] = ta.rsi(data['close'], length=14)
-        data['volume_sma'] = data['volume'].rolling(window=20).mean()
-
-        lookback_data = data.tail(parameters["lookback_period"]).copy()
-        
-        # Os valores de low/high da API são em USD.
-        support_usd = lookback_data['low'].min()
-        resistance_usd = lookback_data['high'].max()
-
-        # Calcula o preço da cotação (ex: SOL) em USD
-        quote_price_in_usd = current_price_usd / current_price_native
-        
-        # Converte o S/R de USD para a moeda nativa (SOL) para usar nos CÁLCULOS
-        support_native = support_usd / quote_price_in_usd if quote_price_in_usd > 0 else 0
-        resistance_native = resistance_usd / quote_price_in_usd if quote_price_in_usd > 0 else 0
 
         current_rsi = data['rsi'].iloc[-1]
-        current_volume = data['volume'].iloc[-1]
-        volume_sma = data['volume_sma'].iloc[-1]
         
-        # --- Log Detalhado da Análise com MAIOR PRECISÃO ---
+        vol_1 = data['volume'].iloc[-1]
+        vol_2 = data['volume'].iloc[-2]
+        vol_3 = data['volume'].iloc[-3]
         logger.info(
             f"Análise ({pair_details['base_symbol']}): "
             f"Preço: ${current_price_usd:.10f} USD ({current_price_native:.10f} {pair_details['quote_symbol']}) | "
             f"RSI: {current_rsi:.2f} | "
-            f"Vol: {current_volume:.2f} (Média: {volume_sma:.2f}) | "
-            f"Suporte: {support_native:.10f} {pair_details['quote_symbol']} (${support_usd:.10f} USD) | "
-            f"Resistência: {resistance_native:.10f} {pair_details['quote_symbol']} (${resistance_usd:.10f} USD)"
+            f"Volumes (últimas 3 velas): [{vol_1:.2f}, {vol_2:.2f}, {vol_3:.2f}]"
         )
         
-        # --- Lógica de Decisão (USA APENAS VALORES NATIVOS/SOL) ---
+        sustained_high_volume = (vol_1 > 1000 and vol_2 > 1000 and vol_3 > 1000)
+
         buy_reason = None
         sell_reason = None
 
-        if in_position:
+        if not in_position:
+            # Lógica de COMPRA CORRIGIDA
+            if current_rsi < 48 and sustained_high_volume:
+                buy_reason = (f"RSI ({current_rsi:.2f}) < 48 e 3 velas com volume > 1000 "
+                              f"([{vol_1:.2f}, {vol_2:.2f}, {vol_3:.2f}])")
+                await execute_buy_order(parameters["amount"], current_price_native, reason=buy_reason)
+        
+        else: # Já está em posição, procurar por VENDA
+            # Prioridade 1: Stop-Loss Percentual
             stop_loss_price = entry_price * (1 - parameters["stop_loss_percent"] / 100)
-            
             if current_price_native <= stop_loss_price:
-                sell_reason = f"Stop Loss atingido em {current_price_native:.10f} {pair_details['quote_symbol']} (Preço de entrada: {entry_price:.10f})"
-            elif current_rsi >= 55:
-                sell_reason = f"RSI ({current_rsi:.2f}) atingiu ou ultrapassou a zona de venda (>= 55)"
-            elif 46 <= current_rsi < 55:
-                if current_volume > volume_sma and current_price_native >= resistance_native:
-                    sell_reason = (f"Zona Neutra: RSI ({current_rsi:.2f}) + Volume ({current_volume:.2f}) > Média ({volume_sma:.2f}) "
-                                   f"e preço rompeu a resistência.")
+                sell_reason = f"Stop Loss Fixo ({parameters['stop_loss_percent']}%) atingido em {current_price_native:.10f} (Entrada: {entry_price:.10f})"
+            
+            # Prioridade 2: Lógica de VENDA CORRIGIDA da estratégia
+            elif current_rsi >= 52 and sustained_high_volume:
+                sell_reason = (f"RSI ({current_rsi:.2f}) >= 52 e 3 velas com volume > 1000 "
+                               f"([{vol_1:.2f}, {vol_2:.2f}, {vol_3:.2f}])")
             
             if sell_reason:
                 await execute_sell_order(reason=sell_reason)
-        
-        else:
-            if current_rsi <= 45:
-                buy_reason = f"RSI ({current_rsi:.2f}) está na zona de compra (<= 45)"
-            elif 46 <= current_rsi < 55:
-                if current_volume > volume_sma and current_price_native <= support_native:
-                    buy_reason = (f"Zona Neutra: RSI ({current_rsi:.2f}) + Volume ({current_volume:.2f}) > Média ({volume_sma:.2f}) "
-                                  f"e preço rompeu o suporte.")
-            
-            if buy_reason:
-                await execute_buy_order(parameters["amount"], current_price_native, reason=buy_reason)
     
     except Exception as e:
         logger.error(f"Ocorreu um erro em check_strategy: {e}", exc_info=True)
@@ -320,11 +299,11 @@ async def check_strategy():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot de **Range Trading Autônomo v8.1 (Lógica Corrigida)**.\n\n'
+        'Olá! Sou seu bot de **Trading Autônomo v9.1 (Estratégia de Volume Corrigida)**.\n\n'
         '**Estratégia:**\n'
-        '• **Compra:** RSI <= 45 OU (RSI 46-54 + Volume > Média + Rompimento de Suporte).\n'
-        '• **Venda:** RSI >= 55 OU (RSI 46-54 + Volume > Média + Rompimento de Resistência).\n\n'
-        'Use `/set` para configurar:\n'
+        '• **Compra:** RSI `< 48` **E** as 3 últimas velas tiveram volume acima de 1000.\n'
+        '• **Venda:** RSI `≥ 52` **E** as 3 últimas velas tiveram volume acima de 1000.\n\n'
+        'Use `/set` para configurar (o `lookback` não é mais usado para S&R, mas ainda define o range dos dados):\n'
         '`/set <CONTRATO> <COTAÇÃO> <TIMEFRAME> <VALOR> <LOOKBACK> <STOP_LOSS_%>`\n\n'
         '**Exemplo (BONK/SOL):**\n'
         '`/set DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263 SOL 1m 0.1 30 1.5`\n\n'
@@ -391,10 +370,10 @@ async def set_params(update, context):
             f"📊 *Par:* `{base_token_symbol}/{quote_token_symbol}`\n"
             f"🌐 *Fonte de Dados:* `Híbrida (GeckoTerminal + Dexscreener)`\n"
             f"⏰ *Timeframe:* `{timeframe}`\n"
-            f"📈 *Estratégia:* RSI + Volume (Lookback: {lookback_period} velas)\n"
+            f"📈 *Estratégia:* **Volume Sustentado + RSI**\n"
             f"💰 *Valor por Ordem:* `{amount}` {quote_symbol_input}\n"
             f"🚀 *Taxa de Prioridade:* **Dinâmica (Automática)**\n"
-            f"📉 *Stop Loss:* `{stop_loss_percent}%`",
+            f"📉 *Stop Loss Fixo:* `{stop_loss_percent}%`",
             parse_mode='Markdown'
         )
     except (IndexError, ValueError):
@@ -418,7 +397,7 @@ async def run_bot(update, context):
     
     bot_running = True
     logger.info("Bot de trade iniciado.")
-    await update.effective_message.reply_text("🚀 Bot iniciado! Operando com a nova estratégia de RSI + Volume.")
+    await update.effective_message.reply_text("🚀 Bot iniciado! Operando com a nova Estratégia de Volume Sustentado.")
     
     if periodic_task is None or periodic_task.done():
         periodic_task = asyncio.create_task(periodic_checker())
