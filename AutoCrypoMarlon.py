@@ -97,7 +97,7 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
                 "userPublicKey": str(payer.pubkey()),
                 "quoteResponse": quote_response,
                 "wrapAndUnwrapSol": True,
-                "dynamicComputeUnitLimit": True, # Ajuda a evitar falhas de transação
+                "dynamicComputeUnitLimit": True,
             }
             swap_url = "https://quote-api.jup.ag/v6/swap"
             swap_res = await client.post(swap_url, json=swap_payload)
@@ -116,8 +116,7 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
             tx_signature = solana_client.send_raw_transaction(bytes(signed_tx), opts=tx_opts).value
             
             logger.info(f"Transação enviada: {tx_signature}")
-            # Confirmação mais robusta
-            await asyncio.sleep(8) # Aumenta a espera para a transação se propagar
+            await asyncio.sleep(8)
             solana_client.confirm_transaction(tx_signature, commitment="confirmed")
             logger.info(f"Transação confirmada: https://solscan.io/tx/{tx_signature}")
             return str(tx_signature)
@@ -129,7 +128,7 @@ async def execute_buy_order(amount, price, pair_details):
     if in_position: return
     
     logger.info(f"EXECUTANDO ORDEM DE COMPRA de {amount} SOL para {pair_details['base_symbol']} ao preço de {price}")
-    tx_sig = await execute_swap(pair_details['quote_address'], pair_details['base_address'], amount, 9) # Assumindo 9 decimais para SOL
+    tx_sig = await execute_swap(pair_details['quote_address'], pair_details['base_address'], amount, 9)
     if tx_sig:
         in_position = True
         entry_price = price
@@ -168,11 +167,11 @@ async def execute_sell_order(reason=""):
             await send_telegram_message(f"❌ FALHA NA VENDA do token {symbol}")
     except Exception as e:
         logger.error(f"Erro ao vender {symbol}: {e}"); await send_telegram_message(f"⚠️ Falha ao vender {symbol}: {e}")
-    finally: # Garante que a posição seja resetada
+    finally:
         in_position = False
         entry_price = 0.0
         automation_state["position_opened_timestamp"] = 0
-
+    
 # --- Funções de Análise e Descoberta ---
 async def fetch_geckoterminal_ohlcv(pair_address, timeframe, limit=60):
     timeframe_map = {"1m": "minute", "5m": "minute"}
@@ -190,8 +189,7 @@ async def fetch_geckoterminal_ohlcv(pair_address, timeframe, limit=60):
                 df.rename(columns={'o': 'open', 'h': 'high', 'l': 'low', 'c': 'close', 'v': 'volume'}, inplace=True)
                 return df
         return None
-    except Exception:
-        return None
+    except Exception: return None
 
 async def fetch_dexscreener_real_time_price(pair_address):
     url = f"https://api.dexscreener.com/latest/dex/pairs/solana/{pair_address}"
@@ -203,8 +201,7 @@ async def fetch_dexscreener_real_time_price(pair_address):
             if pair_data:
                 return float(pair_data.get('priceNative', 0)), float(pair_data.get('priceUsd', 0))
         return None, None
-    except Exception:
-        return None, None
+    except Exception: return None, None
 
 async def get_pair_details(pair_address):
     url = f"https://api.dexscreener.com/latest/dex/pairs/solana/{pair_address}"
@@ -220,8 +217,7 @@ async def get_pair_details(pair_address):
                 "base_address": pair_data['baseToken']['address'],
                 "quote_address": pair_data['quoteToken']['address'],
             }
-    except Exception:
-        return None
+    except Exception: return None
 
 async def discover_and_filter_pairs():
     logger.info("--- FASE 1: DESCOBERTA --- Buscando e filtrando os melhores pares...")
@@ -339,7 +335,7 @@ async def autonomous_loop():
             if not in_position:
                 await check_scalping_strategy()
                 await asyncio.sleep(30)
-            else: # Se em posição, verifica saídas mais rapidamente
+            else:
                 price, _ = await fetch_dexscreener_real_time_price(automation_state["current_target_pair_address"])
                 if price:
                     take_profit_price = entry_price * (1 + parameters["take_profit_percent"] / 100)
@@ -389,7 +385,7 @@ async def set_params(update, context):
 
 async def run_bot(update, context):
     global bot_running, periodic_task
-    if not all(parameters.values()):
+    if not all(p is not None for p in parameters.values()):
         await update.effective_message.reply_text("Defina os parâmetros com /set primeiro."); return
     if bot_running:
         await update.effective_message.reply_text("O bot já está em execução."); return
