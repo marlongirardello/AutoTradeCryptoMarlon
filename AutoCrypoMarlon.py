@@ -67,9 +67,9 @@ except Exception as e:
 # --- LISTA DE MOEDAS PARA O SCANNER ---
 # Adicione ou remova moedas aqui. Use o "Pair Address" do Dexscreener.
 CANDIDATE_TOKENS = {
-    "WIF": "21AErpiB8uSb94oQKRcwuHqyHF93njAxBSbdUrpupump",
+    "WIF": "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm",
     "BONK": "DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263", 
-    "TROLL": "5UUH9RTDiSpq6HKS6bp4NdU9PNJpXRXuiw6ShBTBhgH2", 
+    "TROLL": "0xf8ebf4849f1fa4faf0dff2106a173d3a6cb2eb3a", 
     "PENGU": "2zMMhcVQEXDtdE6vsFS7S7D5oUodfJHE8vd1gnBouauv",
     "PUMP": "pumpCmXqMfrsAkQ5r49WcJnRayYRqmXz6ae8H7H9Dfn",
     "MROCKS": "moon3CP11XLvrAxUPBnPtueDEJvmjqAyZwPuq7wBC1y",
@@ -431,3 +431,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
