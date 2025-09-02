@@ -213,51 +213,57 @@ async def get_pair_details(pair_address):
 # --- FUNÇÃO DE DESCOBERTA ATUALIZADA ---
 async def discover_and_filter_pairs():
     logger.info("--- FASE 1: DESCOBERTA --- Buscando os top 100 pares no GeckoTerminal...")
-    # MODIFICADO: Pede os 100 melhores pares de uma vez só para maior eficiência
-    url = "https://api.geckoterminal.com/api/v2/networks/solana/pools?page=1&include=base_token,quote_token&per_page=100"
+    all_pools = []
+    
+    # Faz um loop por 5 páginas para buscar 100 resultados (20 por página)
+    for page in range(1, 6):
+        url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools?page={page}&include=base_token,quote_token"
+        try:
+            async with httpx.AsyncClient() as client:
+                res = await client.get(url, timeout=20.0)
+                res.raise_for_status()
+                pools_data = res.json().get('data', [])
+                if not pools_data: # Para de buscar se uma página vier vazia
+                    break
+                all_pools.extend(pools_data)
+                await asyncio.sleep(0.5) # Pausa para não sobrecarregar a API
+        except Exception as e:
+            logger.error(f"Erro ao buscar página {page} no GeckoTerminal: {e}")
+            break # Em caso de erro, para de buscar
     
     filtered_pairs = {}
-    try:
-        async with httpx.AsyncClient() as client:
-            res = await client.get(url, timeout=30.0) # Aumenta o timeout para a requisição maior
-            res.raise_for_status()
-            pools = res.json().get('data', [])
-            logger.info(f"Encontrados {len(pools)} pares populares. Aplicando filtros...")
+    logger.info(f"Encontrados {len(all_pools)} pares populares. Aplicando filtros...")
+    
+    for pool in all_pools:
+        try:
+            attr = pool.get('attributes', {})
+            relationships = pool.get('relationships', {})
+            liquidity = float(attr.get('reserve_in_usd', 0))
+            volume_24h = float(attr.get('volume_usd', {}).get('h24', 0))
             
-            for pool in pools:
-                try:
-                    attr = pool.get('attributes', {})
-                    relationships = pool.get('relationships', {})
-                    
-                    liquidity = float(attr.get('reserve_in_usd', 0))
-                    volume_24h = float(attr.get('volume_usd', {}).get('h24', 0))
-                    
-                    age_str = attr.get('pool_created_at')
-                    if age_str:
-                        age_dt = datetime.fromisoformat(age_str.replace('Z', '+00:00'))
-                        age_hours = (datetime.now(timezone.utc) - age_dt).total_seconds() / 3600
-                    else: age_hours = 0
-                    
-                    quote_token_addr = relationships.get('quote_token', {}).get('data', {}).get('id')
-                    
-                    if (quote_token_addr == 'So11111111111111111111111111111111111111112' and 
-                        liquidity > 200000 and 
-                        volume_24h > 1000000 and 
-                        age_hours > 2):
-                        
-                        symbol = attr.get('name', 'N/A').split(' / ')[0]
-                        address = pool.get('id')
-                        if address.startswith("solana_"):
-                            address = address.split('_')[1]
-                        filtered_pairs[symbol] = address
-                except (ValueError, TypeError, KeyError, IndexError):
-                    continue
+            age_str = attr.get('pool_created_at')
+            if age_str:
+                age_dt = datetime.fromisoformat(age_str.replace('Z', '+00:00'))
+                age_hours = (datetime.now(timezone.utc) - age_dt).total_seconds() / 3600
+            else: age_hours = 0
+            
+            quote_token_addr = relationships.get('quote_token', {}).get('data', {}).get('id')
+            
+            if (quote_token_addr == 'So11111111111111111111111111111111111111112' and 
+                liquidity > 200000 and 
+                volume_24h > 1000000 and 
+                age_hours > 2):
+                
+                symbol = attr.get('name', 'N/A').split(' / ')[0]
+                address = pool.get('id')
+                if address.startswith("solana_"):
+                    address = address.split('_')[1]
+                filtered_pairs[symbol] = address
+        except (ValueError, TypeError, KeyError, IndexError):
+            continue
 
-        logger.info(f"Descoberta finalizada. {len(filtered_pairs)} pares passaram nos filtros.")
-        return filtered_pairs
-    except Exception as e:
-        logger.error(f"Erro ao descobrir pares no GeckoTerminal: {e}")
-        return {}
+    logger.info(f"Descoberta finalizada. {len(filtered_pairs)} pares passaram nos filtros.")
+    return filtered_pairs
 
 async def analyze_and_score_coin(pair_address, symbol):
     try:
@@ -368,7 +374,7 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v14.0 (Scanner Amplo)**.\n\n'
+        'Olá! Sou seu bot **v14.1 (Busca Paginada)**.\n\n'
         '**Dinâmica Autônoma:**\n'
         'Eu agora escaneio os **TOP 100 pares** no GeckoTerminal, analiso e seleciono a melhor moeda para operar, trocando de alvo a cada 2 horas.\n\n'
         '**Gerenciamento de Risco:**\n'
