@@ -210,11 +210,11 @@ async def get_pair_details(pair_address):
             return {"base_symbol": pair_data['baseToken']['symbol'], "quote_symbol": pair_data['quoteToken']['symbol'], "base_address": pair_data['baseToken']['address'], "quote_address": pair_data['quoteToken']['address']}
     except Exception: return None
 
-# --- FUNÇÃO DE DESCOBERTA ATUALIZADA ---
+# --- FUNÇÃO DE DESCOBERTA CORRIGIDA ---
 async def discover_and_filter_pairs():
     logger.info("--- FASE 1: DESCOBERTA --- Buscando e filtrando os melhores pares no GeckoTerminal...")
-    # CORREÇÃO: Removido o "-" do parâmetro sort. Decrescente é o padrão.
-    url = "https://api.geckoterminal.com/api/v2/networks/solana/pools?sort=volume_usd_h24&page=1&include=base_token,quote_token"
+    # CORREÇÃO: Removido o parâmetro `sort` para usar a ordenação padrão da API (volume descrescente)
+    url = "https://api.geckoterminal.com/api/v2/networks/solana/pools?page=1&include=base_token,quote_token"
     
     filtered_pairs = {}
     try:
@@ -247,7 +247,7 @@ async def discover_and_filter_pairs():
                         
                         symbol = attr.get('name', 'N/A').split(' / ')[0]
                         address = pool.get('id')
-                        if address.startswith("solana_"): # Remove prefixo do GeckoTerminal se existir
+                        if address.startswith("solana_"):
                             address = address.split('_')[1]
                         filtered_pairs[symbol] = address
                 except (ValueError, TypeError, KeyError, IndexError):
@@ -368,7 +368,7 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v13.2 (Discovery Fix)**.\n\n'
+        'Olá! Sou seu bot **v13.3 (Discovery Fix)**.\n\n'
         '**Dinâmica Autônoma:**\n'
         'Eu agora **descubro (via GeckoTerminal), analiso e seleciono** as melhores moedas para operar por conta própria, trocando de alvo a cada 2 horas.\n\n'
         '**Gerenciamento de Risco:**\n'
