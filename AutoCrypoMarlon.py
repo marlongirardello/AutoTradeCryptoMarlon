@@ -10,6 +10,7 @@ from base64 import b64decode
 import pandas as pd
 import pandas_ta as ta
 import httpx
+from datetime import datetime, timezone
 
 # --- Libs da Solana ---
 from solders.pubkey import Pubkey
@@ -89,18 +90,13 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
     async with httpx.AsyncClient() as client:
         try:
             quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={input_mint_str}&outputMint={output_mint_str}&amount={amount_wei}&slippageBps={slippage_bps}&maxAccounts=64"
-            quote_res = await client.get(quote_url)
+            quote_res = await client.get(quote_url, timeout=30.0)
             quote_res.raise_for_status()
             quote_response = quote_res.json()
 
-            swap_payload = {
-                "userPublicKey": str(payer.pubkey()),
-                "quoteResponse": quote_response,
-                "wrapAndUnwrapSol": True,
-                "dynamicComputeUnitLimit": True,
-            }
+            swap_payload = { "userPublicKey": str(payer.pubkey()), "quoteResponse": quote_response, "wrapAndUnwrapSol": True, "dynamicComputeUnitLimit": True }
             swap_url = "https://quote-api.jup.ag/v6/swap"
-            swap_res = await client.post(swap_url, json=swap_payload)
+            swap_res = await client.post(swap_url, json=swap_payload, timeout=30.0)
             swap_res.raise_for_status()
             swap_response = swap_res.json()
             swap_tx_b64 = swap_response.get('swapTransaction')
@@ -171,7 +167,7 @@ async def execute_sell_order(reason=""):
         in_position = False
         entry_price = 0.0
         automation_state["position_opened_timestamp"] = 0
-    
+
 # --- Funções de Análise e Descoberta ---
 async def fetch_geckoterminal_ohlcv(pair_address, timeframe, limit=60):
     timeframe_map = {"1m": "minute", "5m": "minute"}
@@ -211,38 +207,57 @@ async def get_pair_details(pair_address):
             res.raise_for_status()
             pair_data = res.json().get('pair')
             if not pair_data: return None
-            return {
-                "base_symbol": pair_data['baseToken']['symbol'],
-                "quote_symbol": pair_data['quoteToken']['symbol'],
-                "base_address": pair_data['baseToken']['address'],
-                "quote_address": pair_data['quoteToken']['address'],
-            }
+            return {"base_symbol": pair_data['baseToken']['symbol'], "quote_symbol": pair_data['quoteToken']['symbol'], "base_address": pair_data['baseToken']['address'], "quote_address": pair_data['quoteToken']['address']}
     except Exception: return None
 
+# --- NOVA FUNÇÃO DE DESCOBERTA USANDO GECKOTERMINAL ---
 async def discover_and_filter_pairs():
-    logger.info("--- FASE 1: DESCOBERTA --- Buscando e filtrando os melhores pares...")
-    url = "https://io.dexscreener.com/u/search/pairs?q=sol"
+    logger.info("--- FASE 1: DESCOBERTA --- Buscando e filtrando os melhores pares no GeckoTerminal...")
+    # API pública e documentada do GeckoTerminal para buscar pools por volume
+    url = "https://api.geckoterminal.com/api/v2/networks/solana/pools?sort=-volume_usd_h24&page=1&include=base_token,quote_token"
+    
     filtered_pairs = {}
     try:
         async with httpx.AsyncClient() as client:
             res = await client.get(url, timeout=20.0)
             res.raise_for_status()
-            pairs = res.json().get('pairs', [])
-            logger.info(f"Encontrados {len(pairs)} pares populares. Aplicando filtros...")
-            for pair in pairs:
+            pools = res.json().get('data', [])
+            logger.info(f"Encontrados {len(pools)} pares populares. Aplicando filtros...")
+            
+            for pool in pools:
                 try:
-                    liquidity = float(pair.get('liquidity', {}).get('usd', 0))
-                    volume_24h = float(pair.get('volume', {}).get('h24', 0))
-                    age_ms = pair.get('pairCreatedAt', 0)
-                    age_hours = (time.time() * 1000 - age_ms) / (1000 * 60 * 60) if age_ms else 0
-                    if (pair.get('quoteToken',{}).get('symbol') == 'SOL' and liquidity > 200000 and volume_24h > 1000000 and age_hours > 2):
-                        symbol, address = pair['baseToken']['symbol'], pair['pairAddress']
+                    attr = pool.get('attributes', {})
+                    relationships = pool.get('relationships', {})
+                    
+                    liquidity = float(attr.get('reserve_in_usd', 0))
+                    volume_24h = float(attr.get('volume_usd', {}).get('h24', 0))
+                    
+                    age_str = attr.get('pool_created_at')
+                    if age_str:
+                        age_dt = datetime.fromisoformat(age_str.replace('Z', '+00:00'))
+                        age_hours = (datetime.now(timezone.utc) - age_dt).total_seconds() / 3600
+                    else:
+                        age_hours = 0
+                    
+                    quote_token_addr = relationships.get('quote_token', {}).get('data', {}).get('id')
+                    
+                    # O endereço do Wrapped SOL é 'So11111111111111111111111111111111111111112'
+                    if (quote_token_addr == 'So11111111111111111111111111111111111111112' and 
+                        liquidity > 200000 and 
+                        volume_24h > 1000000 and 
+                        age_hours > 2):
+                        
+                        symbol = attr.get('name', 'N/A').split(' / ')[0]
+                        address = pool.get('id')
                         filtered_pairs[symbol] = address
-                except (ValueError, TypeError): continue
+                except (ValueError, TypeError, KeyError):
+                    continue
+
         logger.info(f"Descoberta finalizada. {len(filtered_pairs)} pares passaram nos filtros.")
         return filtered_pairs
     except Exception as e:
-        logger.error(f"Erro ao descobrir pares no Dexscreener: {e}"); return {}
+        logger.error(f"Erro ao descobrir pares no GeckoTerminal: {e}")
+        return {}
 
 async def analyze_and_score_coin(pair_address, symbol):
     try:
@@ -311,7 +326,7 @@ async def autonomous_loop():
     while bot_running:
         try:
             now = time.time()
-            if now - automation_state.get("last_scan_timestamp", 0) > 7200:
+            if now - automation_state.get("last_scan_timestamp", 0) > 7200: # 2 horas
                 discovered_pairs = await discover_and_filter_pairs()
                 automation_state["discovered_pairs"] = discovered_pairs
                 best_coin = await find_best_coin_to_trade(discovered_pairs)
@@ -353,9 +368,9 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v13.0 (Discovery Mode)**.\n\n'
+        'Olá! Sou seu bot **v13.1 (GeckoTerminal Discovery)**.\n\n'
         '**Dinâmica Autônoma:**\n'
-        'Eu agora **descubro, analiso e seleciono** as melhores moedas para operar por conta própria, trocando de alvo a cada 2 horas.\n\n'
+        'Eu agora **descubro (via GeckoTerminal), analiso e seleciono** as melhores moedas para operar por conta própria, trocando de alvo a cada 2 horas.\n\n'
         '**Gerenciamento de Risco:**\n'
         'Posições abertas por mais de 30 minutos são fechadas automaticamente.\n\n'
         '**Configure-me uma vez com `/set` e depois use `/run`.**\n'
