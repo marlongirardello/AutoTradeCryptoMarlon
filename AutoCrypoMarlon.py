@@ -210,11 +210,11 @@ async def get_pair_details(pair_address):
             return {"base_symbol": pair_data['baseToken']['symbol'], "quote_symbol": pair_data['quoteToken']['symbol'], "base_address": pair_data['baseToken']['address'], "quote_address": pair_data['quoteToken']['address']}
     except Exception: return None
 
-# --- NOVA FUNÇÃO DE DESCOBERTA USANDO GECKOTERMINAL ---
+# --- FUNÇÃO DE DESCOBERTA ATUALIZADA ---
 async def discover_and_filter_pairs():
     logger.info("--- FASE 1: DESCOBERTA --- Buscando e filtrando os melhores pares no GeckoTerminal...")
-    # API pública e documentada do GeckoTerminal para buscar pools por volume
-    url = "https://api.geckoterminal.com/api/v2/networks/solana/pools?sort=-volume_usd_h24&page=1&include=base_token,quote_token"
+    # CORREÇÃO: Removido o "-" do parâmetro sort. Decrescente é o padrão.
+    url = "https://api.geckoterminal.com/api/v2/networks/solana/pools?sort=volume_usd_h24&page=1&include=base_token,quote_token"
     
     filtered_pairs = {}
     try:
@@ -236,12 +236,10 @@ async def discover_and_filter_pairs():
                     if age_str:
                         age_dt = datetime.fromisoformat(age_str.replace('Z', '+00:00'))
                         age_hours = (datetime.now(timezone.utc) - age_dt).total_seconds() / 3600
-                    else:
-                        age_hours = 0
+                    else: age_hours = 0
                     
                     quote_token_addr = relationships.get('quote_token', {}).get('data', {}).get('id')
                     
-                    # O endereço do Wrapped SOL é 'So11111111111111111111111111111111111111112'
                     if (quote_token_addr == 'So11111111111111111111111111111111111111112' and 
                         liquidity > 200000 and 
                         volume_24h > 1000000 and 
@@ -249,8 +247,10 @@ async def discover_and_filter_pairs():
                         
                         symbol = attr.get('name', 'N/A').split(' / ')[0]
                         address = pool.get('id')
+                        if address.startswith("solana_"): # Remove prefixo do GeckoTerminal se existir
+                            address = address.split('_')[1]
                         filtered_pairs[symbol] = address
-                except (ValueError, TypeError, KeyError):
+                except (ValueError, TypeError, KeyError, IndexError):
                     continue
 
         logger.info(f"Descoberta finalizada. {len(filtered_pairs)} pares passaram nos filtros.")
@@ -326,7 +326,7 @@ async def autonomous_loop():
     while bot_running:
         try:
             now = time.time()
-            if now - automation_state.get("last_scan_timestamp", 0) > 7200: # 2 horas
+            if now - automation_state.get("last_scan_timestamp", 0) > 7200:
                 discovered_pairs = await discover_and_filter_pairs()
                 automation_state["discovered_pairs"] = discovered_pairs
                 best_coin = await find_best_coin_to_trade(discovered_pairs)
@@ -368,7 +368,7 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v13.1 (GeckoTerminal Discovery)**.\n\n'
+        'Olá! Sou seu bot **v13.2 (Discovery Fix)**.\n\n'
         '**Dinâmica Autônoma:**\n'
         'Eu agora **descubro (via GeckoTerminal), analiso e seleciono** as melhores moedas para operar por conta própria, trocando de alvo a cada 2 horas.\n\n'
         '**Gerenciamento de Risco:**\n'
