@@ -210,16 +210,16 @@ async def get_pair_details(pair_address):
             return {"base_symbol": pair_data['baseToken']['symbol'], "quote_symbol": pair_data['quoteToken']['symbol'], "base_address": pair_data['baseToken']['address'], "quote_address": pair_data['quoteToken']['address']}
     except Exception: return None
 
-# --- FUNÇÃO DE DESCOBERTA CORRIGIDA ---
+# --- FUNÇÃO DE DESCOBERTA ATUALIZADA ---
 async def discover_and_filter_pairs():
-    logger.info("--- FASE 1: DESCOBERTA --- Buscando e filtrando os melhores pares no GeckoTerminal...")
-    # CORREÇÃO: Removido o parâmetro `sort` para usar a ordenação padrão da API (volume descrescente)
-    url = "https://api.geckoterminal.com/api/v2/networks/solana/pools?page=1&include=base_token,quote_token"
+    logger.info("--- FASE 1: DESCOBERTA --- Buscando os top 100 pares no GeckoTerminal...")
+    # MODIFICADO: Pede os 100 melhores pares de uma vez só para maior eficiência
+    url = "https://api.geckoterminal.com/api/v2/networks/solana/pools?page=1&include=base_token,quote_token&per_page=100"
     
     filtered_pairs = {}
     try:
         async with httpx.AsyncClient() as client:
-            res = await client.get(url, timeout=20.0)
+            res = await client.get(url, timeout=30.0) # Aumenta o timeout para a requisição maior
             res.raise_for_status()
             pools = res.json().get('data', [])
             logger.info(f"Encontrados {len(pools)} pares populares. Aplicando filtros...")
@@ -368,9 +368,9 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v13.3 (Discovery Fix)**.\n\n'
+        'Olá! Sou seu bot **v14.0 (Scanner Amplo)**.\n\n'
         '**Dinâmica Autônoma:**\n'
-        'Eu agora **descubro (via GeckoTerminal), analiso e seleciono** as melhores moedas para operar por conta própria, trocando de alvo a cada 2 horas.\n\n'
+        'Eu agora escaneio os **TOP 100 pares** no GeckoTerminal, analiso e seleciono a melhor moeda para operar, trocando de alvo a cada 2 horas.\n\n'
         '**Gerenciamento de Risco:**\n'
         'Posições abertas por mais de 30 minutos são fechadas automaticamente.\n\n'
         '**Configure-me uma vez com `/set` e depois use `/run`.**\n'
