@@ -210,12 +210,10 @@ async def get_pair_details(pair_address):
             return {"base_symbol": pair_data['baseToken']['symbol'], "quote_symbol": pair_data['quoteToken']['symbol'], "base_address": pair_data['baseToken']['address'], "quote_address": pair_data['quoteToken']['address']}
     except Exception: return None
 
-# --- FUNÇÃO DE DESCOBERTA ATUALIZADA ---
 async def discover_and_filter_pairs():
     logger.info("--- FASE 1: DESCOBERTA --- Buscando os top 100 pares no GeckoTerminal...")
     all_pools = []
     
-    # Faz um loop por 5 páginas para buscar 100 resultados (20 por página)
     for page in range(1, 6):
         url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools?page={page}&include=base_token,quote_token"
         try:
@@ -223,13 +221,11 @@ async def discover_and_filter_pairs():
                 res = await client.get(url, timeout=20.0)
                 res.raise_for_status()
                 pools_data = res.json().get('data', [])
-                if not pools_data: # Para de buscar se uma página vier vazia
-                    break
+                if not pools_data: break
                 all_pools.extend(pools_data)
-                await asyncio.sleep(0.5) # Pausa para não sobrecarregar a API
+                await asyncio.sleep(0.5)
         except Exception as e:
-            logger.error(f"Erro ao buscar página {page} no GeckoTerminal: {e}")
-            break # Em caso de erro, para de buscar
+            logger.error(f"Erro ao buscar página {page} no GeckoTerminal: {e}"); break
     
     filtered_pairs = {}
     logger.info(f"Encontrados {len(all_pools)} pares populares. Aplicando filtros...")
@@ -249,10 +245,11 @@ async def discover_and_filter_pairs():
             
             quote_token_addr = relationships.get('quote_token', {}).get('data', {}).get('id')
             
+            # --- MODIFICAÇÃO PRINCIPAL AQUI ---
             if (quote_token_addr == 'So11111111111111111111111111111111111111112' and 
                 liquidity > 200000 and 
                 volume_24h > 1000000 and 
-                age_hours > 2):
+                age_hours > 0.5): # De 2 horas para 30 minutos
                 
                 symbol = attr.get('name', 'N/A').split(' / ')[0]
                 address = pool.get('id')
@@ -374,9 +371,9 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v14.1 (Busca Paginada)**.\n\n'
+        'Olá! Sou seu bot **v14.2 (Filtro de Idade Reduzido)**.\n\n'
         '**Dinâmica Autônoma:**\n'
-        'Eu agora escaneio os **TOP 100 pares** no GeckoTerminal, analiso e seleciono a melhor moeda para operar, trocando de alvo a cada 2 horas.\n\n'
+        'Eu agora escaneio os TOP 100 pares no GeckoTerminal com filtros otimizados para maior atividade (idade mínima de 30 min).\n\n'
         '**Gerenciamento de Risco:**\n'
         'Posições abertas por mais de 30 minutos são fechadas automaticamente.\n\n'
         '**Configure-me uma vez com `/set` e depois use `/run`.**\n'
