@@ -82,6 +82,7 @@ parameters = {
     "amount": None,
     "stop_loss_percent": None,
     "take_profit_percent": None,
+    "volume_multiplier": 3.0 # Padrão
 }
 
 # --- Funções de Execução de Ordem ---
@@ -212,6 +213,19 @@ async def get_pair_details(pair_address):
             if not pair_data: return None
             return {"base_symbol": pair_data['baseToken']['symbol'], "quote_symbol": pair_data['quoteToken']['symbol'], "base_address": pair_data['baseToken']['address'], "quote_address": pair_data['quoteToken']['address']}
     except Exception: return None
+    
+# --- NOVA FUNÇÃO DE VERIFICAÇÃO NA JUPITER ---
+async def is_pair_quotable_on_jupiter(pair_details):
+    if not pair_details: return False
+    # Usa uma quantidade mínima para o teste, apenas para verificar a rota
+    test_amount_wei = 10000 # ~0.00001 SOL
+    url = f"https://quote-api.jup.ag/v6/quote?inputMint={pair_details['quote_address']}&outputMint={pair_details['base_address']}&amount={test_amount_wei}"
+    try:
+        async with httpx.AsyncClient() as client:
+            res = await client.get(url, timeout=10.0)
+            return res.status_code == 200
+    except Exception:
+        return False
 
 async def discover_and_filter_pairs():
     logger.info("--- FASE 1: DESCOBERTA --- Buscando os top 100 pares no GeckoTerminal...")
@@ -279,13 +293,22 @@ async def discover_and_filter_pairs():
 
 async def analyze_and_score_coin(pair_address, symbol):
     try:
+        pair_details = await get_pair_details(pair_address)
+        if not pair_details: return 0, None
+
+        # Validação na Jupiter ANTES de prosseguir
+        if not await is_pair_quotable_on_jupiter(pair_details):
+            logger.warning(f"Candidato {symbol} descartado: Não foi possível obter cotação na Jupiter.")
+            return 0, None
+
         df = await fetch_geckoterminal_ohlcv(pair_address, "1m", limit=60)
         if df is None or len(df) < 30: return 0, None
+        
         price_range = df['high'].max() - df['low'].min()
         volatility_score = (price_range / df['low'].min()) * 100
         volume_score = df['volume'].sum()
+        
         final_score = (volatility_score * 1000) + volume_score
-        pair_details = await get_pair_details(pair_address)
         return final_score, pair_details
     except Exception as e:
         logger.error(f"Erro ao analisar {symbol} ({pair_address}): {e}"); return 0, None
@@ -315,7 +338,7 @@ async def find_best_coin_to_trade(candidate_pairs, penalized_pairs=set()):
         logger.warning("--- SELEÇÃO FINALIZADA --- Nenhuma moeda com oportunidade clara encontrada.")
     return best_coin_info
 
-# --- ESTRATÉGIA ---
+# --- Estratégia ---
 async def check_pullback_strategy():
     global in_position, entry_price
     target_address = automation_state.get("current_target_pair_address")
@@ -332,7 +355,6 @@ async def check_pullback_strategy():
     
     last_candle = data.iloc[-1]
     
-    # Condições da estratégia de Pullback
     in_uptrend = last_candle['EMA_5'] > last_candle['EMA_10']
     pullback_occured = last_candle['low'] <= last_candle['EMA_5']
     is_green_candle = last_candle['close'] > last_candle['open']
@@ -356,7 +378,7 @@ async def autonomous_loop():
             now = time.time()
             force_rescan = False
             
-            if not in_position and automation_state.get("current_target_pair_address") and (now - automation_state.get("target_selected_timestamp", 0) > 900): # 15 minutos
+            if not in_position and automation_state.get("current_target_pair_address") and (now - automation_state.get("target_selected_timestamp", 0) > 900):
                 penalized_symbol = automation_state["current_target_symbol"]
                 penalized_address = automation_state["current_target_pair_address"]
                 logger.warning(f"TIMEOUT DE CAÇA: 15 min sem entrada para {penalized_symbol}. Abandonando e penalizando.")
@@ -365,7 +387,7 @@ async def autonomous_loop():
                 automation_state["current_target_pair_address"] = None
                 force_rescan = True
 
-            if now - automation_state.get("last_scan_timestamp", 0) > 7200: # 2 horas
+            if now - automation_state.get("last_scan_timestamp", 0) > 7200:
                 logger.info("Timer de 2 horas atingido. Iniciando novo ciclo de descoberta.")
                 force_rescan = True
             
@@ -420,12 +442,12 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v17.0 (Pullback Hunter)**.\n\n'
+        'Olá! Sou seu bot **v18.0 (Validador Jupiter)**.\n\n'
         '**Dinâmica Autônoma:**\n'
         '1. Eu descubro e seleciono a melhor moeda para operar a cada 2 horas.\n'
-        '2. Se eu não encontrar uma entrada em **15 minutos**, abandono o alvo e o penalizo por 10 buscas.\n'
-        '3. Após fechar qualquer operação, eu imediatamente procuro uma nova oportunidade no mercado.\n\n'
-        '**Estratégia:** Compra em **pullbacks na EMA 5** dentro de uma tendência de alta.\n\n'
+        '2. **(NOVO)** Antes de selecionar uma moeda, eu confirmo se ela é negociável na Jupiter para evitar erros.\n'
+        '3. Após fechar qualquer operação, eu imediatamente procuro uma nova oportunidade.\n\n'
+        '**Estratégia:** Pullback na EMA 5.\n\n'
         '**Configure-me com `/set` e inicie com `/run`.**\n'
         '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%>`',
         parse_mode='Markdown'
@@ -458,7 +480,7 @@ async def run_bot(update, context):
         await update.effective_message.reply_text("O bot já está em execução."); return
     bot_running = True
     logger.info("Bot de trade autônomo iniciado.")
-    await update.effective_message.reply_text("🚀 Modo de caça (Pullback) iniciado!")
+    await update.effective_message.reply_text("🚀 Modo de caça (Pullback com Validador Jupiter) iniciado!")
     if periodic_task is None or periodic_task.done():
         periodic_task = asyncio.create_task(autonomous_loop())
 
