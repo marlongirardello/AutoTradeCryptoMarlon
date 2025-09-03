@@ -210,6 +210,7 @@ async def get_pair_details(pair_address):
             return {"base_symbol": pair_data['baseToken']['symbol'], "quote_symbol": pair_data['quoteToken']['symbol'], "base_address": pair_data['baseToken']['address'], "quote_address": pair_data['quoteToken']['address']}
     except Exception: return None
 
+# --- FUNÇÃO DE DESCOBERTA COM LOGS DETALHADOS ---
 async def discover_and_filter_pairs():
     logger.info("--- FASE 1: DESCOBERTA --- Buscando os top 100 pares no GeckoTerminal...")
     all_pools = []
@@ -231,31 +232,44 @@ async def discover_and_filter_pairs():
     logger.info(f"Encontrados {len(all_pools)} pares populares. Aplicando filtros...")
     
     for pool in all_pools:
+        rejection_reasons = []
         try:
             attr = pool.get('attributes', {})
             relationships = pool.get('relationships', {})
-            liquidity = float(attr.get('reserve_in_usd', 0))
-            volume_24h = float(attr.get('volume_usd', {}).get('h24', 0))
             
+            symbol = attr.get('name', 'N/A').split(' / ')[0]
+            address = pool.get('id', 'N/A')
+            if address.startswith("solana_"): address = address.split('_')[1]
+
+            logger.info(f"Analisando candidato: {symbol}...")
+            
+            # Filtros
+            liquidity = float(attr.get('reserve_in_usd', 0))
+            if liquidity < 200000:
+                rejection_reasons.append(f"Liquidez Baixa (${liquidity:,.0f})")
+
+            volume_24h = float(attr.get('volume_usd', {}).get('h24', 0))
+            if volume_24h < 1000000:
+                rejection_reasons.append(f"Volume 24h Baixo (${volume_24h:,.0f})")
+
             age_str = attr.get('pool_created_at')
             if age_str:
                 age_dt = datetime.fromisoformat(age_str.replace('Z', '+00:00'))
                 age_hours = (datetime.now(timezone.utc) - age_dt).total_seconds() / 3600
-            else: age_hours = 0
+                if age_hours < 0.5:
+                    rejection_reasons.append(f"Muito Nova ({age_hours:.2f} horas)")
             
             quote_token_addr = relationships.get('quote_token', {}).get('data', {}).get('id')
-            
-            # --- MODIFICAÇÃO PRINCIPAL AQUI ---
-            if (quote_token_addr == 'So11111111111111111111111111111111111111112' and 
-                liquidity > 200000 and 
-                volume_24h > 1000000 and 
-                age_hours > 0.5): # De 2 horas para 30 minutos
-                
-                symbol = attr.get('name', 'N/A').split(' / ')[0]
-                address = pool.get('id')
-                if address.startswith("solana_"):
-                    address = address.split('_')[1]
+            if quote_token_addr != 'So11111111111111111111111111111111111111112':
+                 rejection_reasons.append("Não é par contra SOL")
+
+            # Decisão
+            if not rejection_reasons:
+                logger.info(f"✅ APROVADO: {symbol} | Liquidez: ${liquidity:,.0f}, Volume: ${volume_24h:,.0f}")
                 filtered_pairs[symbol] = address
+            else:
+                logger.info(f"❌ DESCARTADO: {symbol} | Motivos: {', '.join(rejection_reasons)}")
+                
         except (ValueError, TypeError, KeyError, IndexError):
             continue
 
@@ -279,6 +293,10 @@ async def analyze_and_score_coin(pair_address, symbol):
 
 async def find_best_coin_to_trade(candidate_pairs):
     logger.info("--- FASE 2: SELEÇÃO --- Pontuando os melhores pares...")
+    if not candidate_pairs:
+        logger.warning("Nenhum candidato para pontuar.")
+        return None
+        
     best_score, best_coin_info = -1, None
     tasks = [analyze_and_score_coin(addr, symbol) for symbol, addr in candidate_pairs.items()]
     results = await asyncio.gather(*tasks)
@@ -371,9 +389,9 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v14.2 (Filtro de Idade Reduzido)**.\n\n'
+        'Olá! Sou seu bot **v14.3 (Log de Filtragem)**.\n\n'
         '**Dinâmica Autônoma:**\n'
-        'Eu agora escaneio os TOP 100 pares no GeckoTerminal com filtros otimizados para maior atividade (idade mínima de 30 min).\n\n'
+        'Eu escaneio os TOP 100 pares, aplico filtros de segurança e pontuo os melhores para operar, trocando de alvo a cada 2 horas.\n\n'
         '**Gerenciamento de Risco:**\n'
         'Posições abertas por mais de 30 minutos são fechadas automaticamente.\n\n'
         '**Configure-me uma vez com `/set` e depois use `/run`.**\n'
