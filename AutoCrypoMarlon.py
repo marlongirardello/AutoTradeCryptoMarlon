@@ -210,11 +210,9 @@ async def get_pair_details(pair_address):
             return {"base_symbol": pair_data['baseToken']['symbol'], "quote_symbol": pair_data['quoteToken']['symbol'], "base_address": pair_data['baseToken']['address'], "quote_address": pair_data['quoteToken']['address']}
     except Exception: return None
 
-# --- FUNÇÃO DE DESCOBERTA COM CORREÇÃO DE BUG ---
 async def discover_and_filter_pairs():
     logger.info("--- FASE 1: DESCOBERTA --- Buscando os top 100 pares no GeckoTerminal...")
     all_pools = []
-    
     for page in range(1, 6):
         url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools?page={page}&include=base_token,quote_token"
         try:
@@ -236,39 +234,29 @@ async def discover_and_filter_pairs():
         try:
             attr = pool.get('attributes', {})
             relationships = pool.get('relationships', {})
-            
             symbol = attr.get('name', 'N/A').split(' / ')[0]
             address = pool.get('id', 'N/A')
             if address.startswith("solana_"): address = address.split('_')[1]
 
             logger.info(f"Analisando candidato: {symbol}...")
-            
-            # --- LÓGICA DE VERIFICAÇÃO DE PAR CORRIGIDA ---
             is_sol_pair = False
-            # 1. Tenta pelo método principal (relationships)
             quote_token_addr = relationships.get('quote_token', {}).get('data', {}).get('id')
-            if quote_token_addr == 'So11111111111111111111111111111111111111112':
-                is_sol_pair = True
-            # 2. Se falhar, tenta pelo nome (fallback)
-            elif attr.get('name', '').endswith(' / SOL'):
+            if quote_token_addr == 'So11111111111111111111111111111111111111112' or attr.get('name', '').endswith(' / SOL'):
                 is_sol_pair = True
 
-            if not is_sol_pair:
-                rejection_reasons.append("Não é par contra SOL")
+            if not is_sol_pair: rejection_reasons.append("Não é par contra SOL")
             
             liquidity = float(attr.get('reserve_in_usd', 0))
-            if liquidity < 200000:
-                rejection_reasons.append(f"Liquidez Baixa (${liquidity:,.0f})")
+            if liquidity < 200000: rejection_reasons.append(f"Liquidez Baixa (${liquidity:,.0f})")
 
             volume_24h = float(attr.get('volume_usd', {}).get('h24', 0))
-            if volume_24h < 1000000:
-                rejection_reasons.append(f"Volume 24h Baixo (${volume_24h:,.0f})")
+            if volume_24h < 1000000: rejection_reasons.append(f"Volume 24h Baixo (${volume_24h:,.0f})")
 
             age_str = attr.get('pool_created_at')
             if age_str:
                 age_dt = datetime.fromisoformat(age_str.replace('Z', '+00:00'))
                 age_hours = (datetime.now(timezone.utc) - age_dt).total_seconds() / 3600
-                if age_hours < 0.5:
+                if age_hours < 2.0: # Filtro de idade de volta para 2 horas
                     rejection_reasons.append(f"Muito Nova ({age_hours:.2f} horas)")
             
             if not rejection_reasons:
@@ -276,7 +264,6 @@ async def discover_and_filter_pairs():
                 filtered_pairs[symbol] = address
             else:
                 logger.info(f"❌ DESCARTADO: {symbol} | Motivos: {', '.join(rejection_reasons)}")
-                
         except (ValueError, TypeError, KeyError, IndexError):
             continue
 
@@ -287,11 +274,9 @@ async def analyze_and_score_coin(pair_address, symbol):
     try:
         df = await fetch_geckoterminal_ohlcv(pair_address, "1m", limit=60)
         if df is None or len(df) < 30: return 0, None
-        
         price_range = df['high'].max() - df['low'].min()
         volatility_score = (price_range / df['low'].min()) * 100
         volume_score = df['volume'].sum()
-        
         final_score = (volatility_score * 1000) + volume_score
         pair_details = await get_pair_details(pair_address)
         return final_score, pair_details
@@ -301,9 +286,7 @@ async def analyze_and_score_coin(pair_address, symbol):
 async def find_best_coin_to_trade(candidate_pairs):
     logger.info("--- FASE 2: SELEÇÃO --- Pontuando os melhores pares...")
     if not candidate_pairs:
-        logger.warning("Nenhum candidato para pontuar.")
-        return None
-        
+        logger.warning("Nenhum candidato para pontuar."); return None
     best_score, best_coin_info = -1, None
     tasks = [analyze_and_score_coin(addr, symbol) for symbol, addr in candidate_pairs.items()]
     results = await asyncio.gather(*tasks)
@@ -311,49 +294,57 @@ async def find_best_coin_to_trade(candidate_pairs):
         if details and score > 0:
             logger.info(f"Candidato: {symbol} | Pontuação: {score:.2f}")
             if score > best_score:
-                best_score = score
-                best_coin_info = {"symbol": symbol, "pair_address": addr, "score": score, "details": details}
+                best_score, best_coin_info = score, {"symbol": symbol, "pair_address": addr, "score": score, "details": details}
     if best_coin_info:
         logger.info(f"--- SELEÇÃO FINALIZADA --- Melhor moeda: {best_coin_info['symbol']} (Pontuação: {best_coin_info['score']:.2f})")
     else:
         logger.warning("--- SELEÇÃO FINALIZADA --- Nenhuma moeda com oportunidade clara encontrada.")
     return best_coin_info
 
-async def check_scalping_strategy():
+# --- ESTRATÉGIA ATUALIZADA ---
+async def check_breakout_strategy():
     global in_position, entry_price
     target_address = automation_state.get("current_target_pair_address")
-    if not target_address:
-        # logger.info("Nenhuma moeda alvo definida. Aguardando próximo scan.") # Removido para diminuir poluição no log
-        return
-    pair_details = automation_state.get("current_target_pair_details")
-    if not in_position:
-        data = await fetch_geckoterminal_ohlcv(target_address, parameters["timeframe"])
-        if data is None or len(data) < 20: return
-        data.ta.ema(length=5, append=True, col_names=('EMA_5',))
-        data.ta.ema(length=10, append=True, col_names=('EMA_10',))
-        data['VOL_MA_9'] = data['volume'].rolling(window=9).mean()
-        data.dropna(inplace=True);
-        if len(data) < 5: return
-        last = data.iloc[-1]
-        is_bullish_state = last['EMA_5'] > last['EMA_10']
-        volume_is_high = last['volume'] > last['VOL_MA_9']
-        if is_bullish_state and volume_is_high:
-            crossover_in_window = False
-            for i in range(1, 4):
-                if len(data) > i + 1 and (data.iloc[-i]['EMA_5'] > data.iloc[-i]['EMA_10'] and data.iloc[-i-1]['EMA_5'] <= data.iloc[-i-1]['EMA_10']):
-                    crossover_in_window = True; break
-            if crossover_in_window:
-                price, _ = await fetch_dexscreener_real_time_price(target_address)
-                if price:
-                    reason = f"Cruzamento de EMA (últimas 3 velas) com Volume ({last['volume']:.2f}) > Média ({last['VOL_MA_9']:.2f})"
-                    await execute_buy_order(parameters["amount"], price, pair_details)
+    if not target_address or in_position: return
 
+    pair_details = automation_state.get("current_target_pair_details")
+    data = await fetch_geckoterminal_ohlcv(target_address, parameters["timeframe"], limit=30)
+    if data is None or len(data) < 20: return
+
+    # Calcular indicadores na vela mais recente e fechada
+    last_candle = data.iloc[-2]
+    current_candle = data.iloc[-1]
+    
+    # Define a janela de análise para a resistência
+    lookback_period = 15
+    analysis_window = data.iloc[-(lookback_period+1):-1] # 15 velas antes da atual
+    
+    resistance = analysis_window['high'].max()
+    volume_ma = analysis_window['volume'].mean()
+    volume_breakout_threshold = volume_ma * 3 # Volume 3x maior que a média
+
+    logger.info(f"Análise Compra ({pair_details['base_symbol']}): "
+                f"Preço Atual={current_candle['close']:.10f} | Resistência={resistance:.10f} | "
+                f"Volume={current_candle['volume']:.2f} | Vol. Necessário={volume_breakout_threshold:.2f}")
+
+    # Condições da estratégia de Breakout
+    price_breakout = current_candle['close'] > resistance
+    volume_confirmed = current_candle['volume'] > volume_breakout_threshold
+
+    if price_breakout and volume_confirmed:
+        price, _ = await fetch_dexscreener_real_time_price(target_address)
+        if price:
+            reason = f"Rompimento da resistência {resistance:.10f} com volume explosivo ({current_candle['volume']:.2f})."
+            await execute_buy_order(parameters["amount"], price, pair_details)
+
+# --- Loop Principal Autônomo ---
 async def autonomous_loop():
     global bot_running
     logger.info("Loop de caça autônoma iniciado.")
     while bot_running:
         try:
             now = time.time()
+            # 1. Re-scan a cada 2 horas
             if now - automation_state.get("last_scan_timestamp", 0) > 7200:
                 discovered_pairs = await discover_and_filter_pairs()
                 automation_state["discovered_pairs"] = discovered_pairs
@@ -366,6 +357,7 @@ async def autonomous_loop():
                     automation_state.update(current_target_pair_address=best_coin["pair_address"], current_target_symbol=best_coin["symbol"], current_target_pair_details=best_coin["details"])
                     await send_telegram_message(f"🎯 **Novo Alvo:** {best_coin['symbol']}. Procurando por entradas...")
 
+            # 2. Se não tem alvo, encontra um
             if not automation_state.get("current_target_pair_address"):
                 if not automation_state.get("discovered_pairs"):
                     automation_state["discovered_pairs"] = await discover_and_filter_pairs()
@@ -375,19 +367,28 @@ async def autonomous_loop():
                     automation_state.update(current_target_pair_address=best_coin["pair_address"], current_target_symbol=best_coin["symbol"], current_target_pair_details=best_coin["details"])
                     await send_telegram_message(f"🎯 **Alvo Definido:** {best_coin['symbol']}. Iniciando operações.")
             
+            # 3. Executa a estratégia de trading
             if not in_position:
-                await check_scalping_strategy()
+                await check_breakout_strategy()
                 await asyncio.sleep(30)
-            else:
+            else: # Se em posição, verifica saídas e timeouts
                 price, _ = await fetch_dexscreener_real_time_price(automation_state["current_target_pair_address"])
                 if price:
+                    profit = ((price - entry_price) / entry_price) * 100 if entry_price > 0 else 0
+                    logger.info(f"Posição Aberta ({automation_state['current_target_symbol']}): P/L: {profit:+.2f}%")
                     take_profit_price = entry_price * (1 + parameters["take_profit_percent"] / 100)
                     stop_loss_price = entry_price * (1 - parameters["stop_loss_percent"] / 100)
+                    
+                    # Checa TP e SL
                     if price >= take_profit_price: await execute_sell_order(f"Take Profit (+{parameters['take_profit_percent']}%)"); continue
                     if price <= stop_loss_price: await execute_sell_order(f"Stop Loss (-{parameters['stop_loss_percent']}%)"); continue
+                    
+                    # Checa Timeout
                     if time.time() - automation_state.get("position_opened_timestamp", 0) > 1800:
                         await execute_sell_order("Timeout de 30 minutos"); continue
+                
                 await asyncio.sleep(15)
+
         except asyncio.CancelledError:
             logger.info("Loop autônomo cancelado."); break
         except Exception as e:
@@ -396,14 +397,14 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v14.4 (Fix Verificação de Par)**.\n\n'
+        'Olá! Sou seu bot **v15.0 (Breakout Hunter)**.\n\n'
         '**Dinâmica Autônoma:**\n'
-        'Eu agora escaneio os TOP 100 pares no GeckoTerminal, aplico filtros de segurança e pontuo os melhores para operar, trocando de alvo a cada 2 horas.\n\n'
-        '**Gerenciamento de Risco:**\n'
-        'Posições abertas por mais de 30 minutos são fechadas automaticamente.\n\n'
+        'Eu agora **descubro, analiso e seleciono** as melhores moedas para operar, trocando de alvo a cada 2 horas.\n\n'
+        '**Estratégia:** Compra em **rompimentos de resistência** confirmados por picos de volume (3x a média).\n\n'
+        '**Gerenciamento de Risco:** Saídas por Take Profit, Stop Loss e Timeout de 30 minutos.\n\n'
         '**Configure-me uma vez com `/set` e depois use `/run`.**\n'
         '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%>`\n'
-        '**Ex:** `/set 0.1 1.0 1.5`',
+        '**Ex:** `/set 0.1 1.5 2.5`',
         parse_mode='Markdown'
     )
 
@@ -424,7 +425,7 @@ async def set_params(update, context):
             parse_mode='Markdown'
         )
     except (IndexError, ValueError):
-        await update.effective_message.reply_text("⚠️ *Formato incorreto.*\nUse: `/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%>`\nEx: `/set 0.1 1.0 1.5`", parse_mode='Markdown')
+        await update.effective_message.reply_text("⚠️ *Formato incorreto.*\nUse: `/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%>`\nEx: `/set 0.1 1.5 2.5`", parse_mode='Markdown')
 
 async def run_bot(update, context):
     global bot_running, periodic_task
@@ -434,7 +435,7 @@ async def run_bot(update, context):
         await update.effective_message.reply_text("O bot já está em execução."); return
     bot_running = True
     logger.info("Bot de trade autônomo iniciado.")
-    await update.effective_message.reply_text("🚀 Modo de caça autônoma iniciado!")
+    await update.effective_message.reply_text("🚀 Modo de caça autônoma (Breakout) iniciado!")
     if periodic_task is None or periodic_task.done():
         periodic_task = asyncio.create_task(autonomous_loop())
 
