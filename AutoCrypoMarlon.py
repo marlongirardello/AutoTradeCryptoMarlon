@@ -73,7 +73,7 @@ automation_state = {
     "last_scan_timestamp": 0,
     "position_opened_timestamp": 0,
     "target_selected_timestamp": 0,
-    "penalty_box": set(),
+    "penalty_box": {}, # DE: set() PARA: dict() para contar as rodadas
     "discovered_pairs": {}
 }
 
@@ -81,7 +81,8 @@ parameters = {
     "timeframe": "1m",
     "amount": None,
     "stop_loss_percent": None,
-    "take_profit_percent": None
+    "take_profit_percent": None,
+    "volume_multiplier": None # NOVO PARÂMETRO
 }
 
 # --- Funções de Execução de Ordem ---
@@ -169,8 +170,7 @@ async def execute_sell_order(reason=""):
         in_position = False
         entry_price = 0.0
         automation_state["position_opened_timestamp"] = 0
-        # Força um re-scan imediato após qualquer venda
-        automation_state["current_target_pair_address"] = None
+        automation_state["current_target_pair_address"] = None # Força re-scan imediato
 
 # --- Funções de Análise e Descoberta ---
 async def fetch_geckoterminal_ohlcv(pair_address, timeframe, limit=60):
@@ -263,7 +263,7 @@ async def discover_and_filter_pairs():
             if age_str:
                 age_dt = datetime.fromisoformat(age_str.replace('Z', '+00:00'))
                 age_hours = (datetime.now(timezone.utc) - age_dt).total_seconds() / 3600
-                if age_hours < 2.0: # Filtro de idade de volta para 2 horas
+                if age_hours < 2.0:
                     rejection_reasons.append(f"Muito Nova ({age_hours:.2f} horas)")
             
             if not rejection_reasons:
@@ -282,9 +282,11 @@ async def analyze_and_score_coin(pair_address, symbol):
     try:
         df = await fetch_geckoterminal_ohlcv(pair_address, "1m", limit=60)
         if df is None or len(df) < 30: return 0, None
+        
         price_range = df['high'].max() - df['low'].min()
         volatility_score = (price_range / df['low'].min()) * 100
         volume_score = df['volume'].sum()
+        
         final_score = (volatility_score * 1000) + volume_score
         pair_details = await get_pair_details(pair_address)
         return final_score, pair_details
@@ -297,19 +299,21 @@ async def find_best_coin_to_trade(candidate_pairs, penalized_pairs=set()):
         logger.warning("Nenhum candidato para pontuar."); return None
         
     best_score, best_coin_info = -1, None
-    tasks = [analyze_and_score_coin(addr, symbol) for symbol, addr in candidate_pairs.items() if addr not in penalized_pairs]
     
-    # Mapeia de volta para os símbolos e endereços originais
+    # Filtra os candidatos antes de criar as tasks
     valid_candidates = {s: a for s, a in candidate_pairs.items() if a not in penalized_pairs}
+    if not valid_candidates:
+        logger.warning("Nenhum candidato válido após remover os penalizados.")
+        return None
 
+    tasks = [analyze_and_score_coin(addr, symbol) for symbol, addr in valid_candidates.items()]
     results = await asyncio.gather(*tasks)
 
     for (symbol, addr), (score, details) in zip(valid_candidates.items(), results):
         if details and score > 0:
             logger.info(f"Candidato: {symbol} | Pontuação: {score:.2f}")
             if score > best_score:
-                best_score = score
-                best_coin_info = {"symbol": symbol, "pair_address": addr, "score": score, "details": details}
+                best_score, best_coin_info = score, {"symbol": symbol, "pair_address": addr, "score": score, "details": details}
     if best_coin_info:
         logger.info(f"--- SELEÇÃO FINALIZADA --- Melhor moeda: {best_coin_info['symbol']} (Pontuação: {best_coin_info['score']:.2f})")
     else:
@@ -333,7 +337,7 @@ async def check_breakout_strategy():
 
     resistance = analysis_window['high'].max()
     volume_ma = analysis_window['volume'].mean()
-    volume_breakout_threshold = volume_ma * 3
+    volume_breakout_threshold = volume_ma * parameters["volume_multiplier"]
 
     logger.info(f"Análise Compra ({pair_details['base_symbol']}): "
                 f"Preço Atual={current_candle['close']:.10f} | Resistência={resistance:.10f} | "
@@ -356,14 +360,14 @@ async def autonomous_loop():
         try:
             now = time.time()
             force_rescan = False
-
-            # NOVO: Timeout de Caça
-            if not in_position and automation_state.get("current_target_pair_address") and (now - automation_state.get("target_selected_timestamp", 0) > 1800):
+            
+            # Timeout de Caça (15 minutos)
+            if not in_position and automation_state.get("current_target_pair_address") and (now - automation_state.get("target_selected_timestamp", 0) > 900):
                 penalized_symbol = automation_state["current_target_symbol"]
                 penalized_address = automation_state["current_target_pair_address"]
-                logger.warning(f"TIMEOUT DE CAÇA: 30 min sem entrada para {penalized_symbol}. Abandonando e procurando novo alvo.")
+                logger.warning(f"TIMEOUT DE CAÇA: 15 min sem entrada para {penalized_symbol}. Abandonando e penalizando.")
                 await send_telegram_message(f"⌛️ Timeout de caça para **{penalized_symbol}**. Procurando um novo alvo...")
-                automation_state["penalty_box"].add(penalized_address)
+                automation_state["penalty_box"][penalized_address] = 10 # Adiciona/reseta a contagem para 10
                 automation_state["current_target_pair_address"] = None
                 force_rescan = True
 
@@ -372,20 +376,24 @@ async def autonomous_loop():
                 logger.info("Timer de 2 horas atingido. Iniciando novo ciclo de descoberta.")
                 force_rescan = True
             
-            # Executa o ciclo de descoberta/seleção se forçado ou se não houver alvo
+            # Ciclo de Descoberta/Seleção
             if force_rescan or not automation_state.get("current_target_pair_address"):
-                if force_rescan and now - automation_state.get("last_scan_timestamp", 0) > 7200:
-                    automation_state["penalty_box"].clear() # Limpa penalidade no ciclo principal de 2h
                 
+                # Gerencia a caixa de penalidade
+                if automation_state["penalty_box"]:
+                    logger.info(f"Gerenciando caixa de penalidade: {list(automation_state['penalty_box'].keys())}")
+                    for addr in list(automation_state["penalty_box"].keys()):
+                        automation_state["penalty_box"][addr] -= 1
+                        if automation_state["penalty_box"][addr] <= 0:
+                            del automation_state["penalty_box"][addr]
+                            logger.info(f"Endereço {addr} removido da caixa de penalidade.")
+
                 discovered_pairs = await discover_and_filter_pairs()
                 automation_state["discovered_pairs"] = discovered_pairs
                 
-                best_coin = await find_best_coin_to_trade(discovered_pairs, automation_state["penalty_box"])
+                best_coin = await find_best_coin_to_trade(discovered_pairs, set(automation_state["penalty_box"].keys()))
                 automation_state["last_scan_timestamp"] = now
                 
-                if not force_rescan: # Limpa a penalidade se o scan foi forçado por timeout
-                    automation_state["penalty_box"].clear()
-
                 if best_coin:
                     if best_coin["pair_address"] != automation_state.get("current_target_pair_address"):
                         if in_position: await execute_sell_order(reason=f"Trocando para {best_coin['symbol']}")
@@ -411,7 +419,7 @@ async def autonomous_loop():
                     
                     if price >= take_profit_price: await execute_sell_order(f"Take Profit (+{parameters['take_profit_percent']}%)"); continue
                     if price <= stop_loss_price: await execute_sell_order(f"Stop Loss (-{parameters['stop_loss_percent']}%)"); continue
-                    if time.time() - automation_state.get("position_opened_timestamp", 0) > 1800:
+                    if time.time() - automation_state.get("position_opened_timestamp", 0) > 1800: # Timeout de posição de 30min
                         await execute_sell_order("Timeout de 30 minutos"); continue
                 await asyncio.sleep(15)
             else:
@@ -425,14 +433,15 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v15.1 (Caça Inteligente)**.\n\n'
-        '**Dinâmica Autônoma Aprimorada:**\n'
-        '1. Descubro e seleciono a melhor moeda para operar a cada 2 horas.\n'
-        '2. Se eu não encontrar uma entrada em 30 minutos, abandono o alvo e procuro um novo.\n'
-        '3. Após fechar qualquer operação, eu imediatamente procuro uma nova oportunidade no mercado.\n\n'
-        '**Estratégia:** Breakout com confirmação de volume explosivo.\n\n'
-        '**Configure-me com `/set` e inicie com `/run`.**\n'
-        '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%>`',
+        'Olá! Sou seu bot **v16.0 (Caçador Adaptável)**.\n\n'
+        '**Dinâmica Autônoma:**\n'
+        '1. Eu descubro e seleciono a melhor moeda para operar.\n'
+        '2. Se eu não encontrar uma entrada em **15 minutos**, abandono o alvo e o penalizo por 10 buscas.\n'
+        '3. Após fechar qualquer operação, eu imediatamente procuro uma nova oportunidade.\n\n'
+        '**Estratégia:** Breakout com confirmação de volume explosivo (multiplicador ajustável).\n\n'
+        '**NOVO COMANDO `/set`:**\n'
+        '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%> <VOL_MULT>`\n'
+        '**Ex:** `/set 0.1 1.5 2.5 3.0`',
         parse_mode='Markdown'
     )
 
@@ -440,20 +449,21 @@ async def set_params(update, context):
     if bot_running:
         await update.effective_message.reply_text("Pare o bot com /stop antes de alterar os parâmetros."); return
     try:
-        amount, stop_loss, take_profit = float(context.args[0]), float(context.args[1]), float(context.args[2])
-        if stop_loss <= 0 or take_profit <= 0:
-            await update.effective_message.reply_text("⚠️ Stop Loss e Take Profit devem ser valores positivos."); return
-        parameters.update(amount=amount, stop_loss_percent=stop_loss, take_profit_percent=take_profit)
+        amount, stop_loss, take_profit, vol_mult = float(context.args[0]), float(context.args[1]), float(context.args[2]), float(context.args[3])
+        if stop_loss <= 0 or take_profit <= 0 or vol_mult <= 1.0:
+            await update.effective_message.reply_text("⚠️ Stop/Profit devem ser > 0. Multiplicador de Volume deve ser > 1.0."); return
+        parameters.update(amount=amount, stop_loss_percent=stop_loss, take_profit_percent=take_profit, volume_multiplier=vol_mult)
         await update.effective_message.reply_text(
             f"✅ *Parâmetros de Scalping definidos!*\n"
             f"💰 *Valor por Ordem:* `{amount}` SOL\n"
             f"🛑 *Stop Loss:* `-{stop_loss}%`\n"
-            f"🎯 *Take Profit:* `+{take_profit}%`\n\n"
+            f"🎯 *Take Profit:* `+{take_profit}%`\n"
+            f"🔊 *Mult. de Volume:* `{vol_mult}x`\n\n"
             "Agora use `/run` para iniciar.",
             parse_mode='Markdown'
         )
     except (IndexError, ValueError):
-        await update.effective_message.reply_text("⚠️ *Formato incorreto.*\nUse: `/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%>`\nEx: `/set 0.1 1.5 2.5`", parse_mode='Markdown')
+        await update.effective_message.reply_text("⚠️ *Formato incorreto.*\nUse: `/set <VALOR> <STOP> <PROFIT> <VOL_MULT>`\nEx: `/set 0.1 1.5 2.5 3.0`", parse_mode='Markdown')
 
 async def run_bot(update, context):
     global bot_running, periodic_task
@@ -477,7 +487,7 @@ async def stop_bot(update, context):
         periodic_task = None
     if in_position:
         await execute_sell_order("Parada manual do bot")
-    automation_state.update(current_target_pair_address=None, current_target_symbol=None, last_scan_timestamp=0, position_opened_timestamp=0, target_selected_timestamp=0, penalty_box=set())
+    automation_state.update(current_target_pair_address=None, current_target_symbol=None, last_scan_timestamp=0, position_opened_timestamp=0, target_selected_timestamp=0, penalty_box={})
     logger.info("Bot de trade parado.")
     await update.effective_message.reply_text("🛑 Bot parado. Todas as tarefas e posições foram finalizadas.")
 
