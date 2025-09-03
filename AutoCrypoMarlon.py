@@ -72,6 +72,8 @@ automation_state = {
     "current_target_pair_details": None,
     "last_scan_timestamp": 0,
     "position_opened_timestamp": 0,
+    "target_selected_timestamp": 0,
+    "penalty_box": set(),
     "discovered_pairs": {}
 }
 
@@ -167,6 +169,8 @@ async def execute_sell_order(reason=""):
         in_position = False
         entry_price = 0.0
         automation_state["position_opened_timestamp"] = 0
+        # Força um re-scan imediato após qualquer venda
+        automation_state["current_target_pair_address"] = None
 
 # --- Funções de Análise e Descoberta ---
 async def fetch_geckoterminal_ohlcv(pair_address, timeframe, limit=60):
@@ -213,6 +217,7 @@ async def get_pair_details(pair_address):
 async def discover_and_filter_pairs():
     logger.info("--- FASE 1: DESCOBERTA --- Buscando os top 100 pares no GeckoTerminal...")
     all_pools = []
+    
     for page in range(1, 6):
         url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools?page={page}&include=base_token,quote_token"
         try:
@@ -234,11 +239,13 @@ async def discover_and_filter_pairs():
         try:
             attr = pool.get('attributes', {})
             relationships = pool.get('relationships', {})
+            
             symbol = attr.get('name', 'N/A').split(' / ')[0]
             address = pool.get('id', 'N/A')
             if address.startswith("solana_"): address = address.split('_')[1]
 
             logger.info(f"Analisando candidato: {symbol}...")
+            
             is_sol_pair = False
             quote_token_addr = relationships.get('quote_token', {}).get('data', {}).get('id')
             if quote_token_addr == 'So11111111111111111111111111111111111111112' or attr.get('name', '').endswith(' / SOL'):
@@ -264,6 +271,7 @@ async def discover_and_filter_pairs():
                 filtered_pairs[symbol] = address
             else:
                 logger.info(f"❌ DESCARTADO: {symbol} | Motivos: {', '.join(rejection_reasons)}")
+                
         except (ValueError, TypeError, KeyError, IndexError):
             continue
 
@@ -283,25 +291,32 @@ async def analyze_and_score_coin(pair_address, symbol):
     except Exception as e:
         logger.error(f"Erro ao analisar {symbol} ({pair_address}): {e}"); return 0, None
 
-async def find_best_coin_to_trade(candidate_pairs):
+async def find_best_coin_to_trade(candidate_pairs, penalized_pairs=set()):
     logger.info("--- FASE 2: SELEÇÃO --- Pontuando os melhores pares...")
     if not candidate_pairs:
         logger.warning("Nenhum candidato para pontuar."); return None
+        
     best_score, best_coin_info = -1, None
-    tasks = [analyze_and_score_coin(addr, symbol) for symbol, addr in candidate_pairs.items()]
+    tasks = [analyze_and_score_coin(addr, symbol) for symbol, addr in candidate_pairs.items() if addr not in penalized_pairs]
+    
+    # Mapeia de volta para os símbolos e endereços originais
+    valid_candidates = {s: a for s, a in candidate_pairs.items() if a not in penalized_pairs}
+
     results = await asyncio.gather(*tasks)
-    for (symbol, addr), (score, details) in zip(candidate_pairs.items(), results):
+
+    for (symbol, addr), (score, details) in zip(valid_candidates.items(), results):
         if details and score > 0:
             logger.info(f"Candidato: {symbol} | Pontuação: {score:.2f}")
             if score > best_score:
-                best_score, best_coin_info = score, {"symbol": symbol, "pair_address": addr, "score": score, "details": details}
+                best_score = score
+                best_coin_info = {"symbol": symbol, "pair_address": addr, "score": score, "details": details}
     if best_coin_info:
         logger.info(f"--- SELEÇÃO FINALIZADA --- Melhor moeda: {best_coin_info['symbol']} (Pontuação: {best_coin_info['score']:.2f})")
     else:
         logger.warning("--- SELEÇÃO FINALIZADA --- Nenhuma moeda com oportunidade clara encontrada.")
     return best_coin_info
 
-# --- ESTRATÉGIA ATUALIZADA ---
+# --- ESTRATÉGIA ---
 async def check_breakout_strategy():
     global in_position, entry_price
     target_address = automation_state.get("current_target_pair_address")
@@ -311,23 +326,19 @@ async def check_breakout_strategy():
     data = await fetch_geckoterminal_ohlcv(target_address, parameters["timeframe"], limit=30)
     if data is None or len(data) < 20: return
 
-    # Calcular indicadores na vela mais recente e fechada
-    last_candle = data.iloc[-2]
     current_candle = data.iloc[-1]
-    
-    # Define a janela de análise para a resistência
     lookback_period = 15
-    analysis_window = data.iloc[-(lookback_period+1):-1] # 15 velas antes da atual
-    
+    analysis_window = data.iloc[-(lookback_period+1):-1]
+    if analysis_window.empty: return
+
     resistance = analysis_window['high'].max()
     volume_ma = analysis_window['volume'].mean()
-    volume_breakout_threshold = volume_ma * 3 # Volume 3x maior que a média
+    volume_breakout_threshold = volume_ma * 3
 
     logger.info(f"Análise Compra ({pair_details['base_symbol']}): "
                 f"Preço Atual={current_candle['close']:.10f} | Resistência={resistance:.10f} | "
                 f"Volume={current_candle['volume']:.2f} | Vol. Necessário={volume_breakout_threshold:.2f}")
 
-    # Condições da estratégia de Breakout
     price_breakout = current_candle['close'] > resistance
     volume_confirmed = current_candle['volume'] > volume_breakout_threshold
 
@@ -344,34 +355,53 @@ async def autonomous_loop():
     while bot_running:
         try:
             now = time.time()
-            # 1. Re-scan a cada 2 horas
+            force_rescan = False
+
+            # NOVO: Timeout de Caça
+            if not in_position and automation_state.get("current_target_pair_address") and (now - automation_state.get("target_selected_timestamp", 0) > 1800):
+                penalized_symbol = automation_state["current_target_symbol"]
+                penalized_address = automation_state["current_target_pair_address"]
+                logger.warning(f"TIMEOUT DE CAÇA: 30 min sem entrada para {penalized_symbol}. Abandonando e procurando novo alvo.")
+                await send_telegram_message(f"⌛️ Timeout de caça para **{penalized_symbol}**. Procurando um novo alvo...")
+                automation_state["penalty_box"].add(penalized_address)
+                automation_state["current_target_pair_address"] = None
+                force_rescan = True
+
+            # Re-scan a cada 2 horas
             if now - automation_state.get("last_scan_timestamp", 0) > 7200:
+                logger.info("Timer de 2 horas atingido. Iniciando novo ciclo de descoberta.")
+                force_rescan = True
+            
+            # Executa o ciclo de descoberta/seleção se forçado ou se não houver alvo
+            if force_rescan or not automation_state.get("current_target_pair_address"):
+                if force_rescan and now - automation_state.get("last_scan_timestamp", 0) > 7200:
+                    automation_state["penalty_box"].clear() # Limpa penalidade no ciclo principal de 2h
+                
                 discovered_pairs = await discover_and_filter_pairs()
                 automation_state["discovered_pairs"] = discovered_pairs
-                best_coin = await find_best_coin_to_trade(discovered_pairs)
+                
+                best_coin = await find_best_coin_to_trade(discovered_pairs, automation_state["penalty_box"])
                 automation_state["last_scan_timestamp"] = now
-                if best_coin and best_coin["pair_address"] != automation_state.get("current_target_pair_address"):
-                    logger.info(f"Novo alvo com maior potencial encontrado: {best_coin['symbol']}.")
-                    if in_position:
-                        await execute_sell_order(reason=f"Trocando para {best_coin['symbol']}")
-                    automation_state.update(current_target_pair_address=best_coin["pair_address"], current_target_symbol=best_coin["symbol"], current_target_pair_details=best_coin["details"])
-                    await send_telegram_message(f"🎯 **Novo Alvo:** {best_coin['symbol']}. Procurando por entradas...")
+                
+                if not force_rescan: # Limpa a penalidade se o scan foi forçado por timeout
+                    automation_state["penalty_box"].clear()
 
-            # 2. Se não tem alvo, encontra um
-            if not automation_state.get("current_target_pair_address"):
-                if not automation_state.get("discovered_pairs"):
-                    automation_state["discovered_pairs"] = await discover_and_filter_pairs()
-                best_coin = await find_best_coin_to_trade(automation_state["discovered_pairs"])
-                automation_state["last_scan_timestamp"] = now
                 if best_coin:
-                    automation_state.update(current_target_pair_address=best_coin["pair_address"], current_target_symbol=best_coin["symbol"], current_target_pair_details=best_coin["details"])
-                    await send_telegram_message(f"🎯 **Alvo Definido:** {best_coin['symbol']}. Iniciando operações.")
+                    if best_coin["pair_address"] != automation_state.get("current_target_pair_address"):
+                        if in_position: await execute_sell_order(reason=f"Trocando para {best_coin['symbol']}")
+                        automation_state.update(
+                            current_target_pair_address=best_coin["pair_address"],
+                            current_target_symbol=best_coin["symbol"],
+                            current_target_pair_details=best_coin["details"],
+                            target_selected_timestamp=now
+                        )
+                        await send_telegram_message(f"🎯 **Novo Alvo:** {best_coin['symbol']}. Iniciando monitoramento...")
             
-            # 3. Executa a estratégia de trading
-            if not in_position:
+            # Executa a estratégia de trading
+            if not in_position and automation_state.get("current_target_pair_address"):
                 await check_breakout_strategy()
                 await asyncio.sleep(30)
-            else: # Se em posição, verifica saídas e timeouts
+            elif in_position:
                 price, _ = await fetch_dexscreener_real_time_price(automation_state["current_target_pair_address"])
                 if price:
                     profit = ((price - entry_price) / entry_price) * 100 if entry_price > 0 else 0
@@ -379,15 +409,13 @@ async def autonomous_loop():
                     take_profit_price = entry_price * (1 + parameters["take_profit_percent"] / 100)
                     stop_loss_price = entry_price * (1 - parameters["stop_loss_percent"] / 100)
                     
-                    # Checa TP e SL
                     if price >= take_profit_price: await execute_sell_order(f"Take Profit (+{parameters['take_profit_percent']}%)"); continue
                     if price <= stop_loss_price: await execute_sell_order(f"Stop Loss (-{parameters['stop_loss_percent']}%)"); continue
-                    
-                    # Checa Timeout
                     if time.time() - automation_state.get("position_opened_timestamp", 0) > 1800:
                         await execute_sell_order("Timeout de 30 minutos"); continue
-                
                 await asyncio.sleep(15)
+            else:
+                await asyncio.sleep(60)
 
         except asyncio.CancelledError:
             logger.info("Loop autônomo cancelado."); break
@@ -397,14 +425,14 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v15.0 (Breakout Hunter)**.\n\n'
-        '**Dinâmica Autônoma:**\n'
-        'Eu agora **descubro, analiso e seleciono** as melhores moedas para operar, trocando de alvo a cada 2 horas.\n\n'
-        '**Estratégia:** Compra em **rompimentos de resistência** confirmados por picos de volume (3x a média).\n\n'
-        '**Gerenciamento de Risco:** Saídas por Take Profit, Stop Loss e Timeout de 30 minutos.\n\n'
-        '**Configure-me uma vez com `/set` e depois use `/run`.**\n'
-        '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%>`\n'
-        '**Ex:** `/set 0.1 1.5 2.5`',
+        'Olá! Sou seu bot **v15.1 (Caça Inteligente)**.\n\n'
+        '**Dinâmica Autônoma Aprimorada:**\n'
+        '1. Descubro e seleciono a melhor moeda para operar a cada 2 horas.\n'
+        '2. Se eu não encontrar uma entrada em 30 minutos, abandono o alvo e procuro um novo.\n'
+        '3. Após fechar qualquer operação, eu imediatamente procuro uma nova oportunidade no mercado.\n\n'
+        '**Estratégia:** Breakout com confirmação de volume explosivo.\n\n'
+        '**Configure-me com `/set` e inicie com `/run`.**\n'
+        '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%>`',
         parse_mode='Markdown'
     )
 
@@ -449,7 +477,7 @@ async def stop_bot(update, context):
         periodic_task = None
     if in_position:
         await execute_sell_order("Parada manual do bot")
-    automation_state.update(current_target_pair_address=None, current_target_symbol=None, last_scan_timestamp=0, position_opened_timestamp=0)
+    automation_state.update(current_target_pair_address=None, current_target_symbol=None, last_scan_timestamp=0, position_opened_timestamp=0, target_selected_timestamp=0, penalty_box=set())
     logger.info("Bot de trade parado.")
     await update.effective_message.reply_text("🛑 Bot parado. Todas as tarefas e posições foram finalizadas.")
 
