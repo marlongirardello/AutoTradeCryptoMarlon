@@ -210,7 +210,7 @@ async def get_pair_details(pair_address):
             return {"base_symbol": pair_data['baseToken']['symbol'], "quote_symbol": pair_data['quoteToken']['symbol'], "base_address": pair_data['baseToken']['address'], "quote_address": pair_data['quoteToken']['address']}
     except Exception: return None
 
-# --- FUNÇÃO DE DESCOBERTA COM LOGS DETALHADOS ---
+# --- FUNÇÃO DE DESCOBERTA COM CORREÇÃO DE BUG ---
 async def discover_and_filter_pairs():
     logger.info("--- FASE 1: DESCOBERTA --- Buscando os top 100 pares no GeckoTerminal...")
     all_pools = []
@@ -243,7 +243,19 @@ async def discover_and_filter_pairs():
 
             logger.info(f"Analisando candidato: {symbol}...")
             
-            # Filtros
+            # --- LÓGICA DE VERIFICAÇÃO DE PAR CORRIGIDA ---
+            is_sol_pair = False
+            # 1. Tenta pelo método principal (relationships)
+            quote_token_addr = relationships.get('quote_token', {}).get('data', {}).get('id')
+            if quote_token_addr == 'So11111111111111111111111111111111111111112':
+                is_sol_pair = True
+            # 2. Se falhar, tenta pelo nome (fallback)
+            elif attr.get('name', '').endswith(' / SOL'):
+                is_sol_pair = True
+
+            if not is_sol_pair:
+                rejection_reasons.append("Não é par contra SOL")
+            
             liquidity = float(attr.get('reserve_in_usd', 0))
             if liquidity < 200000:
                 rejection_reasons.append(f"Liquidez Baixa (${liquidity:,.0f})")
@@ -259,11 +271,6 @@ async def discover_and_filter_pairs():
                 if age_hours < 0.5:
                     rejection_reasons.append(f"Muito Nova ({age_hours:.2f} horas)")
             
-            quote_token_addr = relationships.get('quote_token', {}).get('data', {}).get('id')
-            if quote_token_addr != 'So11111111111111111111111111111111111111112':
-                 rejection_reasons.append("Não é par contra SOL")
-
-            # Decisão
             if not rejection_reasons:
                 logger.info(f"✅ APROVADO: {symbol} | Liquidez: ${liquidity:,.0f}, Volume: ${volume_24h:,.0f}")
                 filtered_pairs[symbol] = address
@@ -316,7 +323,7 @@ async def check_scalping_strategy():
     global in_position, entry_price
     target_address = automation_state.get("current_target_pair_address")
     if not target_address:
-        logger.info("Nenhuma moeda alvo definida. Aguardando próximo scan.")
+        # logger.info("Nenhuma moeda alvo definida. Aguardando próximo scan.") # Removido para diminuir poluição no log
         return
     pair_details = automation_state.get("current_target_pair_details")
     if not in_position:
@@ -389,9 +396,9 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v14.3 (Log de Filtragem)**.\n\n'
+        'Olá! Sou seu bot **v14.4 (Fix Verificação de Par)**.\n\n'
         '**Dinâmica Autônoma:**\n'
-        'Eu escaneio os TOP 100 pares, aplico filtros de segurança e pontuo os melhores para operar, trocando de alvo a cada 2 horas.\n\n'
+        'Eu agora escaneio os TOP 100 pares no GeckoTerminal, aplico filtros de segurança e pontuo os melhores para operar, trocando de alvo a cada 2 horas.\n\n'
         '**Gerenciamento de Risco:**\n'
         'Posições abertas por mais de 30 minutos são fechadas automaticamente.\n\n'
         '**Configure-me uma vez com `/set` e depois use `/run`.**\n'
