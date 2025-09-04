@@ -195,7 +195,7 @@ async def execute_sell_order(reason=""):
 
 # --- Funções de Análise e Descoberta ---
 async def fetch_geckoterminal_ohlcv(pair_address, timeframe, limit=60):
-    timeframe_map = {"1m": "minute", "5m": "minute"}
+    timeframe_map = {"1m": "minute"}
     gt_timeframe = timeframe_map.get(timeframe)
     if not gt_timeframe: return None
     url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools/{pair_address}/ohlcv/{gt_timeframe}?aggregate=1&limit={limit}"
@@ -246,25 +246,26 @@ async def is_pair_quotable_on_jupiter(pair_details):
     except Exception:
         return False
 
+# --- FUNÇÃO DE SLIPPAGE DINÂMICO ATUALIZADA ---
 async def calculate_dynamic_slippage(pair_address):
     logger.info(f"Calculando slippage dinâmico para {pair_address}...")
     df = await fetch_geckoterminal_ohlcv(pair_address, "1m", limit=5)
     if df is None or df.empty or len(df) < 5:
-        logger.warning("Dados insuficientes para slippage dinâmico. Usando padrão (0.75%).")
-        return 75
+        logger.warning("Dados insuficientes para slippage dinâmico. Usando padrão (6%).")
+        return 600
 
     price_range = df['high'].max() - df['low'].min()
     volatility = (price_range / df['low'].min()) * 100 if df['low'].min() > 0 else 0
 
     if volatility > 3.0:
-        slippage_bps = 150
-        logger.info(f"Alta volatilidade detectada ({volatility:.2f}%). Usando slippage AGRESSIVO de 1.5%.")
+        slippage_bps = 700 # 7%
+        logger.info(f"Alta volatilidade detectada ({volatility:.2f}%). Usando slippage AGRESSIVO de 7.0%.")
     elif volatility > 1.5:
-        slippage_bps = 75
-        logger.info(f"Média volatilidade detectada ({volatility:.2f}%). Usando slippage PADRÃO de 0.75%.")
+        slippage_bps = 600 # 6%
+        logger.info(f"Média volatilidade detectada ({volatility:.2f}%). Usando slippage PADRÃO de 6.0%.")
     else:
-        slippage_bps = 30
-        logger.info(f"Baixa volatilidade detectada ({volatility:.2f}%). Usando slippage ECONÔMICO de 0.3%.")
+        slippage_bps = 500 # 5%
+        logger.info(f"Baixa volatilidade detectada ({volatility:.2f}%). Usando slippage ECONÔMICO de 5.0%.")
     
     return slippage_bps
 
@@ -344,18 +345,15 @@ async def analyze_and_score_coin(pair_address, symbol):
             logger.warning(f"Dados insuficientes (últimos 15 min) para {symbol}.")
             return 0, None
         
-        # Filtro de Atividade Recente
         if df['volume'].sum() < 500:
-            logger.info(f"❌ DESCARTADO: {symbol} | Motivos: Atividade Recente Baixa (Volume 15min < $500)")
+            logger.info(f"Candidato {symbol} descartado: Atividade Recente Baixa.")
             return 0, None
             
-        # Cálculo das métricas base
         price_range = df['high'].max() - df['low'].min()
         volatility_score = (price_range / df['low'].min()) * 100 if df['low'].min() > 0 else 0
         volume_score = df['volume'].sum()
         base_score = (volatility_score * 1000) + volume_score
 
-        # Índice de Qualidade de Tendência
         total_move = df['high'].max() - df['low'].min()
         if total_move > 0:
             df['candle_move'] = df['high'] - df['low']
@@ -502,14 +500,14 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v20.0 (Seleção Inteligente Avançada)**.\n\n'
+        'Olá! Sou seu bot **v19.3 (Slippage Agressivo)**.\n\n'
         '**Dinâmica Autônoma:**\n'
-        '1. Eu descubro (top 200) e seleciono a melhor moeda para operar.\n'
-        '2. **(NOVO)** A seleção agora usa um **Índice de Qualidade** para priorizar tendências saudáveis.\n'
-        '3. Após fechar qualquer operação, eu imediatamente procuro uma nova oportunidade.\n\n'
-        '**Estratégia:** Pullback na EMA 5.\n\n'
-        '**Configure-me com `/set` e inicie com `/run`.**\n'
-        '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%>`',
+        'Eu descubro (top 200), seleciono e opero a melhor moeda com base na atividade dos últimos 15 minutos e na qualidade da sua tendência.\n\n'
+        '**Gerenciamento de Risco:**\n'
+        'Slippage dinâmico (5%-7%), timeouts de caça e de posição, e caixa de penalidade estão ativos.\n\n'
+        '**Comandos Principais e Manuais:**\n'
+        '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%>`\n'
+        '`/run`, `/stop`, `/buy <valor>`, `/sell`',
         parse_mode='Markdown'
     )
 
@@ -540,7 +538,7 @@ async def run_bot(update, context):
         await update.effective_message.reply_text("O bot já está em execução."); return
     bot_running = True
     logger.info("Bot de trade autônomo iniciado.")
-    await update.effective_message.reply_text("🚀 Modo de caça (Seleção Inteligente) iniciado!")
+    await update.effective_message.reply_text("🚀 Modo de caça autônoma iniciado!")
     if periodic_task is None or periodic_task.done():
         periodic_task = asyncio.create_task(autonomous_loop())
 
