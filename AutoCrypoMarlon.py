@@ -74,9 +74,7 @@ automation_state = {
     "position_opened_timestamp": 0,
     "target_selected_timestamp": 0,
     "penalty_box": {},
-    "discovered_pairs": {},
-    "last_price_change_pct": None, # NOVO: Para o timeout de inatividade
-    "last_price_change_timestamp": 0 # NOVO: Para o timeout de inatividade
+    "discovered_pairs": {}
 }
 
 parameters = {
@@ -260,10 +258,11 @@ async def calculate_dynamic_slippage(pair_address):
     return slippage_bps
 
 async def discover_and_filter_pairs():
-    logger.info("--- FASE 1: DESCOBERTA --- Buscando os top 200 pares no GeckoTerminal...")
+    logger.info("--- FASE 1: DESCOBERTA --- Buscando os top 200 pares por volume/24h no GeckoTerminal...")
     all_pools = []
     
     for page in range(1, 11):
+        # A URL volta a ser a padrão, sem o parâmetro 'sort'
         url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools?page={page}&include=base_token,quote_token"
         try:
             async with httpx.AsyncClient() as client:
@@ -296,19 +295,27 @@ async def discover_and_filter_pairs():
             if not is_sol_pair: rejection_reasons.append("Não é par contra SOL")
             
             liquidity = float(attr.get('reserve_in_usd', 0))
-            if liquidity < 50000: rejection_reasons.append(f"Liquidez Baixa (${liquidity:,.0f})")
+            if liquidity < 200000: rejection_reasons.append(f"Liquidez Baixa (${liquidity:,.0f})")
 
             volume_24h = float(attr.get('volume_usd', {}).get('h24', 0))
-            if volume_24h < 250000: rejection_reasons.append(f"Volume 24h Baixo (${volume_24h:,.0f})")
+            if volume_24h < 250000:
+                rejection_reasons.append(f"Volume 24h Baixo (${volume_24h:,.0f})")
 
             age_str = attr.get('pool_created_at')
             if age_str:
                 age_dt = datetime.fromisoformat(age_str.replace('Z', '+00:00'))
                 age_hours = (datetime.now(timezone.utc) - age_dt).total_seconds() / 3600
-                if age_hours < 0.5: rejection_reasons.append(f"Muito Nova ({age_hours:.2f} horas)")
+                if age_hours < 2.0:
+                    rejection_reasons.append(f"Muito Nova ({age_hours:.2f} horas)")
+            
+            volume_1h = float(attr.get('volume_usd', {}).get('h1', 0))
+            if volume_1h < 50000:
+                rejection_reasons.append(f"Volume 1h Baixo (${volume_1h:,.0f})")
             
             if not rejection_reasons:
-                filtered_pairs[symbol] = address
+                # Armazena todos os atributos para uso posterior no filtro de momentum
+                filtered_pairs[symbol] = {"address": address, "attributes": attr}
+                
         except (ValueError, TypeError, KeyError, IndexError):
             continue
 
@@ -349,24 +356,41 @@ async def analyze_and_score_coin(pair_address, symbol):
     except Exception as e:
         logger.error(f"Erro ao analisar {symbol} ({pair_address}): {e}"); return 0, None
 
+# --- FUNÇÃO DE SELEÇÃO COM FILTRO DE MOMENTUM ---
 async def find_best_coin_to_trade(candidate_pairs, penalized_pairs=set()):
-    logger.info("--- FASE 2: SELEÇÃO --- Pontuando os melhores pares...")
+    logger.info("--- FASE 2: SELEÇÃO --- Aplicando filtros e pontuando os melhores pares...")
     if not candidate_pairs:
         logger.warning("Nenhum candidato para pontuar."); return None
         
-    best_score, best_coin_info = -1, None
-    valid_candidates = {s: a for s, a in candidate_pairs.items() if a not in penalized_pairs}
+    # Remove os penalizados
+    valid_candidates = {s: data for s, data in candidate_pairs.items() if data.get("address") not in penalized_pairs}
     if not valid_candidates:
-        logger.warning("Nenhum candidato válido após remover os penalizados.")
+        logger.warning("Nenhum candidato válido após remover os penalizados."); return None
+
+    # NOVO FILTRO DE MOMENTUM
+    logger.info("Aplicando filtro de momentum (Variação de preço em 1h > 0)...")
+    momentum_candidates = {}
+    for symbol, data in valid_candidates.items():
+        price_change_h1 = float(data.get("attributes", {}).get("price_change_percentage", {}).get('h1', 0))
+        if price_change_h1 > 0:
+            momentum_candidates[symbol] = data
+        else:
+            logger.info(f"❌ DESCARTADO: {symbol} | Motivo: Momentum de 1h negativo ou zero ({price_change_h1:.2f}%)")
+            
+    if not momentum_candidates:
+        logger.warning("Nenhum candidato com momentum positivo na última hora.")
         return None
 
-    tasks = [analyze_and_score_coin(addr, symbol) for symbol, addr in valid_candidates.items()]
+    logger.info(f"{len(momentum_candidates)} pares passaram no filtro de momentum. Iniciando análise de pontuação...")
+    
+    best_score, best_coin_info = -1, None
+    tasks = [analyze_and_score_coin(data.get("address"), symbol) for symbol, data in momentum_candidates.items()]
     results = await asyncio.gather(*tasks)
 
-    for (symbol, addr), (score, details) in zip(valid_candidates.items(), results):
+    for (symbol, data), (score, details) in zip(momentum_candidates.items(), results):
         if details and score > best_score:
             best_score = score
-            best_coin_info = {"symbol": symbol, "pair_address": addr, "score": score, "details": details}
+            best_coin_info = {"symbol": symbol, "pair_address": data.get("address"), "score": score, "details": details}
     
     if best_coin_info:
         logger.info(f"--- SELEÇÃO FINALIZADA --- Melhor moeda: {best_coin_info['symbol']} (Pontuação Final: {best_coin_info['score']:,.0f})")
@@ -605,3 +629,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
