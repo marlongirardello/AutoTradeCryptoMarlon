@@ -127,6 +127,15 @@ async def execute_buy_order(amount, price, pair_details, manual=False):
 
     reason = "Ordem Manual" if manual else "Sinal de Pullback na EMA 5"
 
+    logger.info(f"Verificação final de cotação para {pair_details['base_symbol']} antes da compra...")
+    if not await is_pair_quotable_on_jupiter(pair_details):
+        logger.error(f"FALHA NA COMPRA: Par {pair_details['base_symbol']} deixou de ser negociável na Jupiter. Penalizando e procurando novo alvo.")
+        await send_telegram_message(f"❌ Compra para **{pair_details['base_symbol']}** abortada. Moeda não mais negociável na Jupiter.")
+        
+        automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10
+        automation_state["current_target_pair_address"] = None
+        return
+
     slippage_bps = await calculate_dynamic_slippage(pair_details['pair_address'])
     logger.info(f"EXECUTANDO ORDEM DE COMPRA de {amount} SOL para {pair_details['base_symbol']} ao preço de {price}")
     
@@ -245,7 +254,7 @@ async def calculate_dynamic_slippage(pair_address):
         return 75
 
     price_range = df['high'].max() - df['low'].min()
-    volatility = (price_range / df['low'].min()) * 100
+    volatility = (price_range / df['low'].min()) * 100 if df['low'].min() > 0 else 0
 
     if volatility > 3.0:
         slippage_bps = 150
@@ -321,6 +330,7 @@ async def discover_and_filter_pairs():
     logger.info(f"Descoberta finalizada. {len(filtered_pairs)} pares passaram nos filtros.")
     return filtered_pairs
 
+# --- FUNÇÃO DE ANÁLISE COM ÍNDICE DE QUALIDADE ---
 async def analyze_and_score_coin(pair_address, symbol):
     try:
         pair_details = await get_pair_details(pair_address)
@@ -335,11 +345,27 @@ async def analyze_and_score_coin(pair_address, symbol):
             logger.warning(f"Dados insuficientes (últimos 15 min) para {symbol}.")
             return 0, None
         
+        # Cálculo das métricas base
         price_range = df['high'].max() - df['low'].min()
-        volatility_score = (price_range / df['low'].min()) * 100
+        volatility_score = (price_range / df['low'].min()) * 100 if df['low'].min() > 0 else 0
         volume_score = df['volume'].sum()
+        base_score = (volatility_score * 1000) + volume_score
+
+        # Cálculo do Índice de Qualidade de Tendência
+        total_move = df['high'].max() - df['low'].min()
+        if total_move > 0:
+            df['candle_move'] = df['high'] - df['low']
+            biggest_candle_move = df['candle_move'].max()
+            spike_ratio = biggest_candle_move / total_move
+            trend_quality_index = 1 - spike_ratio # 1.0 para tendência perfeita, 0.0 para pico único
+        else:
+            trend_quality_index = 0 # Sem movimento, qualidade zero
+            
+        # Aplica o índice como um multiplicador
+        final_score = base_score * trend_quality_index
         
-        final_score = (volatility_score * 1000) + volume_score
+        logger.info(f"Candidato: {symbol} | Pontuação Base: {base_score:,.0f}, Qualidade: {trend_quality_index:.2f} | Pontuação Final: {final_score:,.0f}")
+        
         return final_score, pair_details
     except Exception as e:
         logger.error(f"Erro ao analisar {symbol} ({pair_address}): {e}"); return 0, None
@@ -359,12 +385,12 @@ async def find_best_coin_to_trade(candidate_pairs, penalized_pairs=set()):
     results = await asyncio.gather(*tasks)
 
     for (symbol, addr), (score, details) in zip(valid_candidates.items(), results):
-        if details and score > 0:
-            logger.info(f"Candidato: {symbol} | Pontuação: {score:.2f}")
-            if score > best_score:
-                best_score, best_coin_info = score, {"symbol": symbol, "pair_address": addr, "score": score, "details": details}
+        if details and score > best_score:
+            best_score = score
+            best_coin_info = {"symbol": symbol, "pair_address": addr, "score": score, "details": details}
+    
     if best_coin_info:
-        logger.info(f"--- SELEÇÃO FINALIZADA --- Melhor moeda: {best_coin_info['symbol']} (Pontuação: {best_coin_info['score']:.2f})")
+        logger.info(f"--- SELEÇÃO FINALIZADA --- Melhor moeda: {best_coin_info['symbol']} (Pontuação Final: {best_coin_info['score']:,.0f})")
     else:
         logger.warning("--- SELEÇÃO FINALIZADA --- Nenhuma moeda com oportunidade clara encontrada.")
     return best_coin_info
@@ -473,16 +499,14 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v19.1 (Execução Robusta)**.\n\n'
+        'Olá! Sou seu bot **v19.2 (Índice de Qualidade)**.\n\n'
         '**Dinâmica Autônoma:**\n'
-        '1. Eu descubro (top 200) e seleciono a melhor moeda para operar.\n'
-        '2. Se uma compra falhar na execução, a moeda é penalizada e eu procuro um novo alvo.\n'
+        '1. Eu descubro (top 200) e seleciono a moeda para operar.\n'
+        '2. **(NOVO)** A seleção agora prioriza tendências sustentadas em vez de picos de uma só vela.\n'
         '3. Após fechar qualquer operação, eu imediatamente procuro uma nova oportunidade.\n\n'
         '**Estratégia:** Pullback na EMA 5.\n\n'
         '**Configure-me com `/set` e inicie com `/run`.**\n'
-        '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%>`\n\n'
-        '**Comandos Manuais:**\n'
-        '`/buy <valor>` e `/sell`',
+        '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%>`',
         parse_mode='Markdown'
     )
 
@@ -513,7 +537,7 @@ async def run_bot(update, context):
         await update.effective_message.reply_text("O bot já está em execução."); return
     bot_running = True
     logger.info("Bot de trade autônomo iniciado.")
-    await update.effective_message.reply_text("🚀 Modo de caça autônoma iniciado!")
+    await update.effective_message.reply_text("🚀 Modo de caça (com Índice de Qualidade) iniciado!")
     if periodic_task is None or periodic_task.done():
         periodic_task = asyncio.create_task(autonomous_loop())
 
