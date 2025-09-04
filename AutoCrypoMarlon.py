@@ -124,7 +124,17 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
 async def execute_buy_order(amount, price, pair_details):
     global in_position, entry_price
     if in_position: return
-    
+
+    # DUPLA VERIFICAÇÃO: Confirma se o par ainda é negociável na Jupiter
+    logger.info(f"Verificação final de cotação para {pair_details['base_symbol']} antes da compra...")
+    if not await is_pair_quotable_on_jupiter(pair_details):
+        logger.error(f"FALHA NA COMPRA: Par {pair_details['base_symbol']} deixou de ser negociável na Jupiter. Penalizando e procurando novo alvo.")
+        await send_telegram_message(f"❌ Compra para **{pair_details['base_symbol']}** abortada. Moeda não mais negociável na Jupiter.")
+        
+        automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10
+        automation_state["current_target_pair_address"] = None
+        return
+
     logger.info(f"EXECUTANDO ORDEM DE COMPRA de {amount} SOL para {pair_details['base_symbol']} ao preço de {price}")
     tx_sig = await execute_swap(pair_details['quote_address'], pair_details['base_address'], amount, 9)
     if tx_sig:
@@ -424,8 +434,8 @@ async def autonomous_loop():
                     stop_loss_price = entry_price * (1 - parameters["stop_loss_percent"] / 100)
                     if price >= take_profit_price: await execute_sell_order(f"Take Profit (+{parameters['take_profit_percent']}%)"); continue
                     if price <= stop_loss_price: await execute_sell_order(f"Stop Loss (-{parameters['stop_loss_percent']}%)"); continue
+                    
                     if time.time() - automation_state.get("position_opened_timestamp", 0) > 1800:
-                        # --- MODIFICAÇÃO PRINCIPAL AQUI ---
                         reason = f"Timeout de 30 minutos (P/L: {profit:+.2f}%)"
                         await execute_sell_order(reason); continue
                 await asyncio.sleep(15)
@@ -440,10 +450,12 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v17.1 (Log de Timeout Melhorado)**.\n\n'
+        'Olá! Sou seu bot **v18.1 (Dupla Verificação Jupiter)**.\n\n'
         '**Dinâmica Autônoma:**\n'
-        'Eu descubro, analiso e seleciono a melhor moeda para operar, com timeouts de caça e de posição para otimizar a atividade.\n\n'
-        '**Estratégia:** Compra em **pullbacks na EMA 5** dentro de uma tendência de alta.\n\n'
+        '1. Descubro e seleciono a melhor moeda (confirmando na Jupiter).\n'
+        '2. Abandono alvos sem entrada em 15 min (penalidade de 10 rodadas).\n'
+        '3. Após fechar qualquer operação, procuro imediatamente uma nova oportunidade.\n\n'
+        '**Estratégia:** Pullback na EMA 5.\n\n'
         '**Configure-me com `/set` e inicie com `/run`.**\n'
         '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%>`',
         parse_mode='Markdown'
@@ -476,7 +488,7 @@ async def run_bot(update, context):
         await update.effective_message.reply_text("O bot já está em execução."); return
     bot_running = True
     logger.info("Bot de trade autônomo iniciado.")
-    await update.effective_message.reply_text("🚀 Modo de caça (Pullback) iniciado!")
+    await update.effective_message.reply_text("🚀 Modo de caça (Pullback com Validador Jupiter) iniciado!")
     if periodic_task is None or periodic_task.done():
         periodic_task = asyncio.create_task(autonomous_loop())
 
