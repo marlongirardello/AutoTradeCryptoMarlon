@@ -258,13 +258,13 @@ async def calculate_dynamic_slippage(pair_address):
     return slippage_bps
 
 async def discover_and_filter_pairs():
-    logger.info("--- FASE 1: DESCOBERTA --- Buscando os top 200 pares por valorização/hora no GeckoTerminal...")
+    logger.info("--- FASE 1: DESCOBERTA --- Buscando os top 200 pares por valorização/24h no GeckoTerminal...")
     all_pools = []
     
     # --- ALTERAÇÃO PRINCIPAL AQUI ---
-    # O parâmetro "sort" foi adicionado para buscar pelos que mais subiram na última hora
+    # O parâmetro "sort" foi alterado para buscar pelos que mais subiram nas últimas 24 horas
     for page in range(1, 11):
-        url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools?page={page}&include=base_token,quote_token&sort=price_change_percentage_h1"
+        url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools?page={page}&include=base_token,quote_token&sort=price_change_percentage_h24"
         try:
             async with httpx.AsyncClient() as client:
                 res = await client.get(url, timeout=20.0)
@@ -301,9 +301,8 @@ async def discover_and_filter_pairs():
             liquidity = float(attr.get('reserve_in_usd', 0))
             if liquidity < 200000: rejection_reasons.append(f"Liquidez Baixa (${liquidity:,.0f})")
 
-            # --- ALTERAÇÃO DO FILTRO DE VOLUME ---
             volume_24h = float(attr.get('volume_usd', {}).get('h24', 0))
-            if volume_24h < 250000: # Reduzido de 1,000,000 para 250,000
+            if volume_24h < 250000:
                 rejection_reasons.append(f"Volume 24h Baixo (${volume_24h:,.0f})")
 
             age_str = attr.get('pool_created_at')
@@ -602,5 +601,6 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
