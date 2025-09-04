@@ -330,7 +330,6 @@ async def discover_and_filter_pairs():
     logger.info(f"Descoberta finalizada. {len(filtered_pairs)} pares passaram nos filtros.")
     return filtered_pairs
 
-# --- FUNÇÃO DE ANÁLISE COM ÍNDICE DE QUALIDADE ---
 async def analyze_and_score_coin(pair_address, symbol):
     try:
         pair_details = await get_pair_details(pair_address)
@@ -345,23 +344,27 @@ async def analyze_and_score_coin(pair_address, symbol):
             logger.warning(f"Dados insuficientes (últimos 15 min) para {symbol}.")
             return 0, None
         
+        # Filtro de Atividade Recente
+        if df['volume'].sum() < 500:
+            logger.info(f"❌ DESCARTADO: {symbol} | Motivos: Atividade Recente Baixa (Volume 15min < $500)")
+            return 0, None
+            
         # Cálculo das métricas base
         price_range = df['high'].max() - df['low'].min()
         volatility_score = (price_range / df['low'].min()) * 100 if df['low'].min() > 0 else 0
         volume_score = df['volume'].sum()
         base_score = (volatility_score * 1000) + volume_score
 
-        # Cálculo do Índice de Qualidade de Tendência
+        # Índice de Qualidade de Tendência
         total_move = df['high'].max() - df['low'].min()
         if total_move > 0:
             df['candle_move'] = df['high'] - df['low']
             biggest_candle_move = df['candle_move'].max()
             spike_ratio = biggest_candle_move / total_move
-            trend_quality_index = 1 - spike_ratio # 1.0 para tendência perfeita, 0.0 para pico único
+            trend_quality_index = 1 - spike_ratio
         else:
-            trend_quality_index = 0 # Sem movimento, qualidade zero
+            trend_quality_index = 0
             
-        # Aplica o índice como um multiplicador
         final_score = base_score * trend_quality_index
         
         logger.info(f"Candidato: {symbol} | Pontuação Base: {base_score:,.0f}, Qualidade: {trend_quality_index:.2f} | Pontuação Final: {final_score:,.0f}")
@@ -499,10 +502,10 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v19.2 (Índice de Qualidade)**.\n\n'
+        'Olá! Sou seu bot **v20.0 (Seleção Inteligente Avançada)**.\n\n'
         '**Dinâmica Autônoma:**\n'
-        '1. Eu descubro (top 200) e seleciono a moeda para operar.\n'
-        '2. **(NOVO)** A seleção agora prioriza tendências sustentadas em vez de picos de uma só vela.\n'
+        '1. Eu descubro (top 200) e seleciono a melhor moeda para operar.\n'
+        '2. **(NOVO)** A seleção agora usa um **Índice de Qualidade** para priorizar tendências saudáveis.\n'
         '3. Após fechar qualquer operação, eu imediatamente procuro uma nova oportunidade.\n\n'
         '**Estratégia:** Pullback na EMA 5.\n\n'
         '**Configure-me com `/set` e inicie com `/run`.**\n'
@@ -537,7 +540,7 @@ async def run_bot(update, context):
         await update.effective_message.reply_text("O bot já está em execução."); return
     bot_running = True
     logger.info("Bot de trade autônomo iniciado.")
-    await update.effective_message.reply_text("🚀 Modo de caça (com Índice de Qualidade) iniciado!")
+    await update.effective_message.reply_text("🚀 Modo de caça (Seleção Inteligente) iniciado!")
     if periodic_task is None or periodic_task.done():
         periodic_task = asyncio.create_task(autonomous_loop())
 
