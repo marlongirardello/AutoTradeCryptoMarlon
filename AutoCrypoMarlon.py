@@ -125,7 +125,6 @@ async def execute_buy_order(amount, price, pair_details):
     global in_position, entry_price
     if in_position: return
 
-    # DUPLA VERIFICAÇÃO: Confirma se o par ainda é negociável na Jupiter
     logger.info(f"Verificação final de cotação para {pair_details['base_symbol']} antes da compra...")
     if not await is_pair_quotable_on_jupiter(pair_details):
         logger.error(f"FALHA NA COMPRA: Par {pair_details['base_symbol']} deixou de ser negociável na Jupiter. Penalizando e procurando novo alvo.")
@@ -235,11 +234,13 @@ async def is_pair_quotable_on_jupiter(pair_details):
         return False
 
 async def discover_and_filter_pairs():
-    logger.info("--- FASE 1: DESCOBERTA --- Buscando os top 100 pares no GeckoTerminal...")
+    logger.info("--- FASE 1: DESCOBERTA --- Buscando os top 200 pares no GeckoTerminal...")
     all_pools = []
     
-    for page in range(1, 6):
-        url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools?page={page}&include=base_token,quote_token"
+    # --- MODIFICAÇÃO PRINCIPAL AQUI ---
+    # Busca 2 páginas de 100 resultados para ter uma amostragem maior
+    for page in range(1, 3):
+        url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools?page={page}&include=base_token,quote_token&per_page=100"
         try:
             async with httpx.AsyncClient() as client:
                 res = await client.get(url, timeout=20.0)
@@ -247,6 +248,7 @@ async def discover_and_filter_pairs():
                 pools_data = res.json().get('data', [])
                 if not pools_data: break
                 all_pools.extend(pools_data)
+                logger.info(f"Página {page} processada, {len(all_pools)} pares acumulados.")
                 await asyncio.sleep(0.5)
         except Exception as e:
             logger.error(f"Erro ao buscar página {page} no GeckoTerminal: {e}"); break
@@ -307,8 +309,10 @@ async def analyze_and_score_coin(pair_address, symbol):
             logger.warning(f"Candidato {symbol} descartado: Não foi possível obter cotação na Jupiter.")
             return 0, None
 
-        df = await fetch_geckoterminal_ohlcv(pair_address, "1m", limit=60)
-        if df is None or len(df) < 30: return 0, None
+        df = await fetch_geckoterminal_ohlcv(pair_address, "1m", limit=15)
+        if df is None or len(df) < 15:
+            logger.warning(f"Dados insuficientes (últimos 15 min) para {symbol}.")
+            return 0, None
         
         price_range = df['high'].max() - df['low'].min()
         volatility_score = (price_range / df['low'].min()) * 100
@@ -434,7 +438,6 @@ async def autonomous_loop():
                     stop_loss_price = entry_price * (1 - parameters["stop_loss_percent"] / 100)
                     if price >= take_profit_price: await execute_sell_order(f"Take Profit (+{parameters['take_profit_percent']}%)"); continue
                     if price <= stop_loss_price: await execute_sell_order(f"Stop Loss (-{parameters['stop_loss_percent']}%)"); continue
-                    
                     if time.time() - automation_state.get("position_opened_timestamp", 0) > 1800:
                         reason = f"Timeout de 30 minutos (P/L: {profit:+.2f}%)"
                         await execute_sell_order(reason); continue
@@ -450,11 +453,11 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v18.1 (Dupla Verificação Jupiter)**.\n\n'
+        'Olá! Sou seu bot **v18.3 (Scanner Super Amplo)**.\n\n'
         '**Dinâmica Autônoma:**\n'
-        '1. Descubro e seleciono a melhor moeda (confirmando na Jupiter).\n'
-        '2. Abandono alvos sem entrada em 15 min (penalidade de 10 rodadas).\n'
-        '3. Após fechar qualquer operação, procuro imediatamente uma nova oportunidade.\n\n'
+        '1. Eu descubro e seleciono a melhor moeda dos **TOP 200** pares para operar.\n'
+        '2. Confirmo se a moeda é negociável na Jupiter.\n'
+        '3. Abandono alvos sem entrada em 15 min e procuro um novo após cada trade.\n\n'
         '**Estratégia:** Pullback na EMA 5.\n\n'
         '**Configure-me com `/set` e inicie com `/run`.**\n'
         '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%>`',
@@ -488,7 +491,7 @@ async def run_bot(update, context):
         await update.effective_message.reply_text("O bot já está em execução."); return
     bot_running = True
     logger.info("Bot de trade autônomo iniciado.")
-    await update.effective_message.reply_text("🚀 Modo de caça (Pullback com Validador Jupiter) iniciado!")
+    await update.effective_message.reply_text("🚀 Modo de caça (Scanner Super Amplo) iniciado!")
     if periodic_task is None or periodic_task.done():
         periodic_task = asyncio.create_task(autonomous_loop())
 
