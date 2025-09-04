@@ -216,6 +216,7 @@ async def fetch_dexscreener_real_time_price(pair_address):
         return None, None
     except Exception: return None, None
 
+# --- FUNÇÃO CORRIGIDA ---
 async def get_pair_details(pair_address):
     url = f"https://api.dexscreener.com/latest/dex/pairs/solana/{pair_address}"
     try:
@@ -224,7 +225,14 @@ async def get_pair_details(pair_address):
             res.raise_for_status()
             pair_data = res.json().get('pair')
             if not pair_data: return None
-            return {"base_symbol": pair_data['baseToken']['symbol'], "quote_symbol": pair_data['quoteToken']['symbol'], "base_address": pair_data['baseToken']['address'], "quote_address": pair_data['quoteToken']['address']}
+            # CORREÇÃO: Adiciona o 'pairAddress' ao dicionário retornado
+            return {
+                "pair_address": pair_data['pairAddress'], 
+                "base_symbol": pair_data['baseToken']['symbol'], 
+                "quote_symbol": pair_data['quoteToken']['symbol'], 
+                "base_address": pair_data['baseToken']['address'], 
+                "quote_address": pair_data['quoteToken']['address']
+            }
     except Exception: return None
     
 async def is_pair_quotable_on_jupiter(pair_details):
@@ -293,8 +301,6 @@ async def discover_and_filter_pairs():
             address = pool.get('id', 'N/A')
             if address.startswith("solana_"): address = address.split('_')[1]
 
-            logger.info(f"Analisando candidato: {symbol}...")
-            
             is_sol_pair = False
             quote_token_addr = relationships.get('quote_token', {}).get('data', {}).get('id')
             if quote_token_addr == 'So11111111111111111111111111111111111111112' or attr.get('name', '').endswith(' / SOL'):
@@ -316,10 +322,7 @@ async def discover_and_filter_pairs():
                     rejection_reasons.append(f"Muito Nova ({age_hours:.2f} horas)")
             
             if not rejection_reasons:
-                logger.info(f"✅ APROVADO: {symbol} | Liquidez: ${liquidity:,.0f}, Volume: ${volume_24h:,.0f}")
                 filtered_pairs[symbol] = address
-            else:
-                logger.info(f"❌ DESCARTADO: {symbol} | Motivos: {', '.join(rejection_reasons)}")
                 
         except (ValueError, TypeError, KeyError, IndexError):
             continue
@@ -396,7 +399,6 @@ async def check_pullback_strategy():
     pullback_occured = last_candle['low'] <= last_candle['EMA_5']
     is_green_candle = last_candle['close'] > last_candle['open']
 
-    # --- NOVO LOG DETALHADO ---
     logger.info(f"Análise Compra ({pair_details['base_symbol']}): Tendência Alta (EMA5>10): {'✅' if in_uptrend else '❌'}, "
                 f"Pullback (Preço tocou EMA5): {'✅' if pullback_occured else '❌'}, "
                 f"Vela Verde: {'✅' if is_green_candle else '❌'}")
@@ -481,11 +483,11 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v18.5 (Log de Acompanhamento)**.\n\n'
+        'Olá! Sou seu bot **v18.6 (Slippage Dinâmico Conservador)**.\n\n'
         '**Dinâmica Autônoma:**\n'
         '1. Eu descubro (top 200) e seleciono a melhor moeda para operar.\n'
-        '2. O log agora mostra exatamente o que estou a aguardar para cada alvo.\n'
-        '3. Após fechar qualquer operação, eu imediatamente procuro uma nova oportunidade.\n\n'
+        '2. O slippage é ajustado automaticamente com base na volatilidade (0.3% a 1.5%).\n'
+        '3. Abandono alvos sem entrada em 15 min e procuro um novo após cada trade.\n\n'
         '**Estratégia:** Pullback na EMA 5.\n\n'
         '**Configure-me com `/set` e inicie com `/run`.**\n'
         '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%>`',
@@ -519,7 +521,7 @@ async def run_bot(update, context):
         await update.effective_message.reply_text("O bot já está em execução."); return
     bot_running = True
     logger.info("Bot de trade autônomo iniciado.")
-    await update.effective_message.reply_text("🚀 Modo de caça (Log de Acompanhamento) iniciado!")
+    await update.effective_message.reply_text("🚀 Modo de caça (Slippage Dinâmico) iniciado!")
     if periodic_task is None or periodic_task.done():
         periodic_task = asyncio.create_task(autonomous_loop())
 
