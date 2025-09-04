@@ -251,9 +251,9 @@ async def calculate_dynamic_slippage(pair_address):
         return 75
     price_range = df['high'].max() - df['low'].min()
     volatility = (price_range / df['low'].min()) * 100 if df['low'].min() > 0 else 0
-    if volatility > 3.0: slippage_bps = 150
-    elif volatility > 1.5: slippage_bps = 75
-    else: slippage_bps = 30
+    if volatility > 3.0: slippage_bps = 700
+    elif volatility > 1.5: slippage_bps = 600
+    else: slippage_bps = 500
     logger.info(f"Volatilidade ({volatility:.2f}%). Slippage definido para {slippage_bps/100:.2f}%.")
     return slippage_bps
 
@@ -268,7 +268,9 @@ async def discover_and_filter_pairs():
                 res = await client.get(url, timeout=20.0)
                 res.raise_for_status()
                 pools_data = res.json().get('data', [])
-                if not pools_data: break
+                if not pools_data:
+                    logger.info(f"Página {page} não retornou dados. Finalizando busca.")
+                    break
                 all_pools.extend(pools_data)
                 logger.info(f"Página {page} processada, {len(all_pools)} pares acumulados.")
                 await asyncio.sleep(0.5)
@@ -291,28 +293,37 @@ async def discover_and_filter_pairs():
             quote_token_addr = relationships.get('quote_token', {}).get('data', {}).get('id')
             if quote_token_addr == 'So11111111111111111111111111111111111111112' or attr.get('name', '').endswith(' / SOL'):
                 is_sol_pair = True
+
             if not is_sol_pair: rejection_reasons.append("Não é par contra SOL")
             
             liquidity = float(attr.get('reserve_in_usd', 0))
-            if liquidity < 50000: rejection_reasons.append(f"Liquidez Baixa (${liquidity:,.0f})")
+            if liquidity < 200000: rejection_reasons.append(f"Liquidez Baixa (${liquidity:,.0f})")
 
             volume_24h = float(attr.get('volume_usd', {}).get('h24', 0))
-            if volume_24h < 250000: rejection_reasons.append(f"Volume 24h Baixo (${volume_24h:,.0f})")
+            if volume_24h < 1000000: rejection_reasons.append(f"Volume 24h Baixo (${volume_24h:,.0f})")
 
             age_str = attr.get('pool_created_at')
             if age_str:
                 age_dt = datetime.fromisoformat(age_str.replace('Z', '+00:00'))
                 age_hours = (datetime.now(timezone.utc) - age_dt).total_seconds() / 3600
-                if age_hours < 0.5: rejection_reasons.append(f"Muito Nova ({age_hours:.2f} horas)")
+                if age_hours < 2.0:
+                    rejection_reasons.append(f"Muito Nova ({age_hours:.2f} horas)")
+            
+            # --- NOVO FILTRO DE ATIVIDADE RECENTE ---
+            volume_1h = float(attr.get('volume_usd', {}).get('h1', 0))
+            if volume_1h < 50000:
+                rejection_reasons.append(f"Volume 1h Baixo (${volume_1h:,.0f})")
             
             if not rejection_reasons:
+                logger.info(f"✅ APROVADO: {symbol} | Liquidez: ${liquidity:,.0f}, Volume 24h: ${volume_24h:,.0f}, Volume 1h: ${volume_1h:,.0f}")
                 filtered_pairs[symbol] = address
+                
         except (ValueError, TypeError, KeyError, IndexError):
             continue
 
     logger.info(f"Descoberta finalizada. {len(filtered_pairs)} pares passaram nos filtros.")
     return filtered_pairs
-
+    
 async def analyze_and_score_coin(pair_address, symbol):
     try:
         pair_details = await get_pair_details(pair_address)
@@ -588,3 +599,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
