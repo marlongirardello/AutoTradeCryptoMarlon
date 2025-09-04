@@ -121,14 +121,17 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
         except Exception as e:
             logger.error(f"Falha na transação: {e}"); await send_telegram_message(f"⚠️ Falha na transação: {e}"); return None
 
-async def execute_buy_order(amount, price, pair_details):
+async def execute_buy_order(amount, price, pair_details, manual=False):
     global in_position, entry_price
     if in_position: return
+
+    reason = "Ordem Manual" if manual else "Sinal de Pullback na EMA 5"
 
     logger.info(f"Verificação final de cotação para {pair_details['base_symbol']} antes da compra...")
     if not await is_pair_quotable_on_jupiter(pair_details):
         logger.error(f"FALHA NA COMPRA: Par {pair_details['base_symbol']} deixou de ser negociável na Jupiter. Penalizando e procurando novo alvo.")
         await send_telegram_message(f"❌ Compra para **{pair_details['base_symbol']}** abortada. Moeda não mais negociável na Jupiter.")
+        
         automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10
         automation_state["current_target_pair_address"] = None
         return
@@ -142,6 +145,7 @@ async def execute_buy_order(amount, price, pair_details):
         entry_price = price
         automation_state["position_opened_timestamp"] = time.time()
         log_message = (f"✅ COMPRA REALIZADA: {amount} SOL para {pair_details['base_symbol']}\n"
+                       f"Motivo: {reason}\n"
                        f"Entrada: {price:.10f} | Alvo: {price * (1 + parameters['take_profit_percent']/100):.10f} | "
                        f"Stop: {price * (1 - parameters['stop_loss_percent']/100):.10f}\n"
                        f"Slippage Usado: {slippage_bps/100:.2f}%\n"
@@ -237,26 +241,25 @@ async def is_pair_quotable_on_jupiter(pair_details):
     except Exception:
         return False
 
-# --- FUNÇÃO DE SLIPPAGE DINÂMICO ATUALIZADA ---
 async def calculate_dynamic_slippage(pair_address):
     logger.info(f"Calculando slippage dinâmico para {pair_address}...")
     df = await fetch_geckoterminal_ohlcv(pair_address, "1m", limit=5)
     if df is None or df.empty or len(df) < 5:
-        logger.warning("Dados insuficientes para slippage dinâmico. Usando padrão (0.6%).")
-        return 60 # 0.6%
+        logger.warning("Dados insuficientes para slippage dinâmico. Usando padrão (0.75%).")
+        return 75
 
     price_range = df['high'].max() - df['low'].min()
     volatility = (price_range / df['low'].min()) * 100
 
     if volatility > 3.0:
-        slippage_bps = 70 # 0.7% para mercado "foguete"
-        logger.info(f"Alta volatilidade detectada ({volatility:.2f}%). Usando slippage AGRESSIVO de 0.7%.")
+        slippage_bps = 150
+        logger.info(f"Alta volatilidade detectada ({volatility:.2f}%). Usando slippage AGRESSIVO de 1.5%.")
     elif volatility > 1.5:
-        slippage_bps = 60 # 0.6% para mercado normal
-        logger.info(f"Média volatilidade detectada ({volatility:.2f}%). Usando slippage PADRÃO de 0.6%.")
+        slippage_bps = 75
+        logger.info(f"Média volatilidade detectada ({volatility:.2f}%). Usando slippage PADRÃO de 0.75%.")
     else:
-        slippage_bps = 50 # 0.5% para mercado calmo
-        logger.info(f"Baixa volatilidade detectada ({volatility:.2f}%). Usando slippage ECONÔMICO de 0.5%.")
+        slippage_bps = 30
+        logger.info(f"Baixa volatilidade detectada ({volatility:.2f}%). Usando slippage ECONÔMICO de 0.3%.")
     
     return slippage_bps
 
@@ -474,14 +477,18 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v18.7 (Slippage Super Conservador)**.\n\n'
+        'Olá! Sou seu bot **v19.0 (Controlo Manual)**.\n\n'
         '**Dinâmica Autônoma:**\n'
-        '1. Eu descubro (top 200) e seleciono a melhor moeda para operar.\n'
-        '2. O slippage é ajustado automaticamente com base na volatilidade (0.3% a 0.7%).\n'
-        '3. Abandono alvos sem entrada em 15 min e procuro um novo após cada trade.\n\n'
-        '**Estratégia:** Pullback na EMA 5.\n\n'
-        '**Configure-me com `/set` e inicie com `/run`.**\n'
-        '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%>`',
+        'Eu descubro (top 200), seleciono e opero a melhor moeda com base na estratégia de Pullback na EMA 5.\n\n'
+        '**Gerenciamento de Risco:**\n'
+        'Slippage dinâmico, timeouts de caça e de posição, e caixa de penalidade estão ativos.\n\n'
+        '**Comandos Principais:**\n'
+        '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%>` - Configura os parâmetros.\n'
+        '`/run` - Inicia o modo autônomo.\n'
+        '`/stop` - Para o bot.\n\n'
+        '**Comandos Manuais:**\n'
+        '`/buy <valor>` - Força a compra do alvo atual.\n'
+        '`/sell` - Força a venda da posição atual.',
         parse_mode='Markdown'
     )
 
@@ -512,7 +519,7 @@ async def run_bot(update, context):
         await update.effective_message.reply_text("O bot já está em execução."); return
     bot_running = True
     logger.info("Bot de trade autônomo iniciado.")
-    await update.effective_message.reply_text("🚀 Modo de caça (Slippage Dinâmico) iniciado!")
+    await update.effective_message.reply_text("🚀 Modo de caça autônoma iniciado!")
     if periodic_task is None or periodic_task.done():
         periodic_task = asyncio.create_task(autonomous_loop())
 
