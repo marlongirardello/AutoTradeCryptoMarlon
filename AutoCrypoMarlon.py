@@ -124,7 +124,7 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
 async def execute_buy_order(amount, price, pair_details):
     global in_position, entry_price
     if in_position: return
-    
+
     logger.info(f"Verificação final de cotação para {pair_details['base_symbol']} antes da compra...")
     if not await is_pair_quotable_on_jupiter(pair_details):
         logger.error(f"FALHA NA COMPRA: Par {pair_details['base_symbol']} deixou de ser negociável na Jupiter. Penalizando e procurando novo alvo.")
@@ -133,7 +133,6 @@ async def execute_buy_order(amount, price, pair_details):
         automation_state["current_target_pair_address"] = None
         return
 
-    # Calcula o slippage dinâmico
     slippage_bps = await calculate_dynamic_slippage(pair_details['pair_address'])
     logger.info(f"EXECUTANDO ORDEM DE COMPRA de {amount} SOL para {pair_details['base_symbol']} ao preço de {price}")
     
@@ -170,7 +169,6 @@ async def execute_sell_order(reason=""):
             in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0; automation_state["current_target_pair_address"] = None
             return
 
-        # Calcula o slippage dinâmico para a venda
         slippage_bps = await calculate_dynamic_slippage(pair_details['pair_address'])
         tx_sig = await execute_swap(pair_details['base_address'], pair_details['quote_address'], amount_to_sell, token_balance_data.decimals, slippage_bps)
         
@@ -239,30 +237,27 @@ async def is_pair_quotable_on_jupiter(pair_details):
     except Exception:
         return False
 
-# --- NOVA FUNÇÃO DE SLIPPAGE DINÂMICO ---
 async def calculate_dynamic_slippage(pair_address):
     logger.info(f"Calculando slippage dinâmico para {pair_address}...")
-    # Busca os últimos 5 minutos de dados para medir a volatilidade recente
     df = await fetch_geckoterminal_ohlcv(pair_address, "1m", limit=5)
     if df is None or df.empty or len(df) < 5:
-        logger.warning("Dados insuficientes para slippage dinâmico. Usando padrão (1.5%).")
-        return 150 # 1.5% como padrão
+        logger.warning("Dados insuficientes para slippage dinâmico. Usando padrão (0.75%).")
+        return 75
 
     price_range = df['high'].max() - df['low'].min()
     volatility = (price_range / df['low'].min()) * 100
 
     if volatility > 3.0:
-        slippage_bps = 250 # 2.5% para mercado "foguete"
-        logger.info(f"Alta volatilidade detectada ({volatility:.2f}%). Usando slippage AGRESSIVO de 2.5%.")
+        slippage_bps = 150 # 1.5% para mercado "foguete"
+        logger.info(f"Alta volatilidade detectada ({volatility:.2f}%). Usando slippage AGRESSIVO de 1.5%.")
     elif volatility > 1.5:
-        slippage_bps = 150 # 1.5% para mercado normal
-        logger.info(f"Média volatilidade detectada ({volatility:.2f}%). Usando slippage PADRÃO de 1.5%.")
+        slippage_bps = 75 # 0.75% para mercado normal
+        logger.info(f"Média volatilidade detectada ({volatility:.2f}%). Usando slippage PADRÃO de 0.75%.")
     else:
-        slippage_bps = 50 # 0.5% para mercado calmo
-        logger.info(f"Baixa volatilidade detectada ({volatility:.2f}%). Usando slippage ECONÔMICO de 0.5%.")
+        slippage_bps = 30 # 0.3% para mercado calmo
+        logger.info(f"Baixa volatilidade detectada ({volatility:.2f}%). Usando slippage ECONÔMICO de 0.3%.")
     
     return slippage_bps
-
 
 async def discover_and_filter_pairs():
     logger.info("--- FASE 1: DESCOBERTA --- Buscando os top 200 pares no GeckoTerminal...")
