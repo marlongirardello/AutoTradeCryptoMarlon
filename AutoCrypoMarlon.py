@@ -129,7 +129,6 @@ async def execute_buy_order(amount, price, pair_details):
     if not await is_pair_quotable_on_jupiter(pair_details):
         logger.error(f"FALHA NA COMPRA: Par {pair_details['base_symbol']} deixou de ser negociável na Jupiter. Penalizando e procurando novo alvo.")
         await send_telegram_message(f"❌ Compra para **{pair_details['base_symbol']}** abortada. Moeda não mais negociável na Jupiter.")
-        
         automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10
         automation_state["current_target_pair_address"] = None
         return
@@ -216,7 +215,6 @@ async def fetch_dexscreener_real_time_price(pair_address):
         return None, None
     except Exception: return None, None
 
-# --- FUNÇÃO CORRIGIDA ---
 async def get_pair_details(pair_address):
     url = f"https://api.dexscreener.com/latest/dex/pairs/solana/{pair_address}"
     try:
@@ -225,14 +223,7 @@ async def get_pair_details(pair_address):
             res.raise_for_status()
             pair_data = res.json().get('pair')
             if not pair_data: return None
-            # CORREÇÃO: Adiciona o 'pairAddress' ao dicionário retornado
-            return {
-                "pair_address": pair_data['pairAddress'], 
-                "base_symbol": pair_data['baseToken']['symbol'], 
-                "quote_symbol": pair_data['quoteToken']['symbol'], 
-                "base_address": pair_data['baseToken']['address'], 
-                "quote_address": pair_data['quoteToken']['address']
-            }
+            return {"pair_address": pair_data['pairAddress'], "base_symbol": pair_data['baseToken']['symbol'], "quote_symbol": pair_data['quoteToken']['symbol'], "base_address": pair_data['baseToken']['address'], "quote_address": pair_data['quoteToken']['address']}
     except Exception: return None
     
 async def is_pair_quotable_on_jupiter(pair_details):
@@ -246,25 +237,26 @@ async def is_pair_quotable_on_jupiter(pair_details):
     except Exception:
         return False
 
+# --- FUNÇÃO DE SLIPPAGE DINÂMICO ATUALIZADA ---
 async def calculate_dynamic_slippage(pair_address):
     logger.info(f"Calculando slippage dinâmico para {pair_address}...")
     df = await fetch_geckoterminal_ohlcv(pair_address, "1m", limit=5)
     if df is None or df.empty or len(df) < 5:
-        logger.warning("Dados insuficientes para slippage dinâmico. Usando padrão (0.75%).")
-        return 75
+        logger.warning("Dados insuficientes para slippage dinâmico. Usando padrão (0.6%).")
+        return 60 # 0.6%
 
     price_range = df['high'].max() - df['low'].min()
     volatility = (price_range / df['low'].min()) * 100
 
     if volatility > 3.0:
-        slippage_bps = 150
-        logger.info(f"Alta volatilidade detectada ({volatility:.2f}%). Usando slippage AGRESSIVO de 1.5%.")
+        slippage_bps = 70 # 0.7% para mercado "foguete"
+        logger.info(f"Alta volatilidade detectada ({volatility:.2f}%). Usando slippage AGRESSIVO de 0.7%.")
     elif volatility > 1.5:
-        slippage_bps = 75
-        logger.info(f"Média volatilidade detectada ({volatility:.2f}%). Usando slippage PADRÃO de 0.75%.")
+        slippage_bps = 60 # 0.6% para mercado normal
+        logger.info(f"Média volatilidade detectada ({volatility:.2f}%). Usando slippage PADRÃO de 0.6%.")
     else:
-        slippage_bps = 30
-        logger.info(f"Baixa volatilidade detectada ({volatility:.2f}%). Usando slippage ECONÔMICO de 0.3%.")
+        slippage_bps = 50 # 0.5% para mercado calmo
+        logger.info(f"Baixa volatilidade detectada ({volatility:.2f}%). Usando slippage ECONÔMICO de 0.5%.")
     
     return slippage_bps
 
@@ -406,7 +398,6 @@ async def check_pullback_strategy():
     if in_uptrend and pullback_occured and is_green_candle:
         price, _ = await fetch_dexscreener_real_time_price(target_address)
         if price:
-            reason = f"Pullback na EMA 5 confirmado por vela verde."
             await execute_buy_order(parameters["amount"], price, pair_details)
 
 # --- Loop Principal Autônomo ---
@@ -483,10 +474,10 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v18.6 (Slippage Dinâmico Conservador)**.\n\n'
+        'Olá! Sou seu bot **v18.7 (Slippage Super Conservador)**.\n\n'
         '**Dinâmica Autônoma:**\n'
         '1. Eu descubro (top 200) e seleciono a melhor moeda para operar.\n'
-        '2. O slippage é ajustado automaticamente com base na volatilidade (0.3% a 1.5%).\n'
+        '2. O slippage é ajustado automaticamente com base na volatilidade (0.3% a 0.7%).\n'
         '3. Abandono alvos sem entrada em 15 min e procuro um novo após cada trade.\n\n'
         '**Estratégia:** Pullback na EMA 5.\n\n'
         '**Configure-me com `/set` e inicie com `/run`.**\n'
@@ -539,6 +530,43 @@ async def stop_bot(update, context):
     logger.info("Bot de trade parado.")
     await update.effective_message.reply_text("🛑 Bot parado. Todas as tarefas e posições foram finalizadas.")
 
+async def manual_buy(update, context):
+    if not bot_running:
+        await update.effective_message.reply_text("⚠️ O bot precisa de estar em execução. Use `/run` primeiro.")
+        return
+    if in_position:
+        await update.effective_message.reply_text("⚠️ Já existe uma posição aberta.")
+        return
+    if not automation_state.get("current_target_pair_address"):
+        await update.effective_message.reply_text("⚠️ O bot ainda não selecionou um alvo. Aguarde o ciclo de descoberta.")
+        return
+    try:
+        amount = float(context.args[0])
+        if amount <= 0:
+            await update.effective_message.reply_text("⚠️ O valor da compra deve ser positivo.")
+            return
+
+        pair_details = automation_state["current_target_pair_details"]
+        price, _ = await fetch_dexscreener_real_time_price(pair_details['pair_address'])
+        if price:
+            await update.effective_message.reply_text(f"Forçando compra manual de {amount} SOL em {pair_details['base_symbol']}...")
+            await execute_buy_order(amount, price, pair_details, manual=True)
+        else:
+            await update.effective_message.reply_text("⚠️ Não foi possível obter o preço atual para a compra.")
+            
+    except (IndexError, ValueError):
+        await update.effective_message.reply_text("⚠️ *Formato incorreto.* Use: `/buy <VALOR>`\nEx: `/buy 0.1`", parse_mode='Markdown')
+    except Exception as e:
+        logger.error(f"Erro no comando /buy: {e}")
+        await update.effective_message.reply_text(f"⚠️ Erro ao executar compra manual: {e}")
+        
+async def manual_sell(update, context):
+    if not in_position:
+        await update.effective_message.reply_text("⚠️ Nenhuma posição aberta para vender.")
+        return
+    await update.effective_message.reply_text("Forçando venda manual da posição atual...")
+    await execute_sell_order(reason="Venda Manual Forçada")
+
 async def send_telegram_message(message):
     if application:
         await application.bot.send_message(chat_id=CHAT_ID, text=message, parse_mode='Markdown')
@@ -547,10 +575,14 @@ def main():
     global application
     keep_alive()
     application = Application.builder().token(TELEGRAM_TOKEN).build()
+
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("set", set_params))
     application.add_handler(CommandHandler("run", run_bot))
     application.add_handler(CommandHandler("stop", stop_bot))
+    application.add_handler(CommandHandler("buy", manual_buy))
+    application.add_handler(CommandHandler("sell", manual_sell))
+    
     logger.info("Bot do Telegram iniciado e aguardando comandos...")
     application.run_polling()
 
