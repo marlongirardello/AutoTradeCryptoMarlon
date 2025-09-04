@@ -82,7 +82,6 @@ parameters = {
     "amount": None,
     "stop_loss_percent": None,
     "take_profit_percent": None,
-    "volume_multiplier": 3.0 # Padrão
 }
 
 # --- Funções de Execução de Ordem ---
@@ -214,11 +213,9 @@ async def get_pair_details(pair_address):
             return {"base_symbol": pair_data['baseToken']['symbol'], "quote_symbol": pair_data['quoteToken']['symbol'], "base_address": pair_data['baseToken']['address'], "quote_address": pair_data['quoteToken']['address']}
     except Exception: return None
     
-# --- NOVA FUNÇÃO DE VERIFICAÇÃO NA JUPITER ---
 async def is_pair_quotable_on_jupiter(pair_details):
     if not pair_details: return False
-    # Usa uma quantidade mínima para o teste, apenas para verificar a rota
-    test_amount_wei = 10000 # ~0.00001 SOL
+    test_amount_wei = 10000
     url = f"https://quote-api.jup.ag/v6/quote?inputMint={pair_details['quote_address']}&outputMint={pair_details['base_address']}&amount={test_amount_wei}"
     try:
         async with httpx.AsyncClient() as client:
@@ -296,7 +293,6 @@ async def analyze_and_score_coin(pair_address, symbol):
         pair_details = await get_pair_details(pair_address)
         if not pair_details: return 0, None
 
-        # Validação na Jupiter ANTES de prosseguir
         if not await is_pair_quotable_on_jupiter(pair_details):
             logger.warning(f"Candidato {symbol} descartado: Não foi possível obter cotação na Jupiter.")
             return 0, None
@@ -429,7 +425,9 @@ async def autonomous_loop():
                     if price >= take_profit_price: await execute_sell_order(f"Take Profit (+{parameters['take_profit_percent']}%)"); continue
                     if price <= stop_loss_price: await execute_sell_order(f"Stop Loss (-{parameters['stop_loss_percent']}%)"); continue
                     if time.time() - automation_state.get("position_opened_timestamp", 0) > 1800:
-                        await execute_sell_order("Timeout de 30 minutos"); continue
+                        # --- MODIFICAÇÃO PRINCIPAL AQUI ---
+                        reason = f"Timeout de 30 minutos (P/L: {profit:+.2f}%)"
+                        await execute_sell_order(reason); continue
                 await asyncio.sleep(15)
             else:
                 await asyncio.sleep(60)
@@ -442,12 +440,10 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v18.0 (Validador Jupiter)**.\n\n'
+        'Olá! Sou seu bot **v17.1 (Log de Timeout Melhorado)**.\n\n'
         '**Dinâmica Autônoma:**\n'
-        '1. Eu descubro e seleciono a melhor moeda para operar a cada 2 horas.\n'
-        '2. **(NOVO)** Antes de selecionar uma moeda, eu confirmo se ela é negociável na Jupiter para evitar erros.\n'
-        '3. Após fechar qualquer operação, eu imediatamente procuro uma nova oportunidade.\n\n'
-        '**Estratégia:** Pullback na EMA 5.\n\n'
+        'Eu descubro, analiso e seleciono a melhor moeda para operar, com timeouts de caça e de posição para otimizar a atividade.\n\n'
+        '**Estratégia:** Compra em **pullbacks na EMA 5** dentro de uma tendência de alta.\n\n'
         '**Configure-me com `/set` e inicie com `/run`.**\n'
         '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%>`',
         parse_mode='Markdown'
@@ -480,7 +476,7 @@ async def run_bot(update, context):
         await update.effective_message.reply_text("O bot já está em execução."); return
     bot_running = True
     logger.info("Bot de trade autônomo iniciado.")
-    await update.effective_message.reply_text("🚀 Modo de caça (Pullback com Validador Jupiter) iniciado!")
+    await update.effective_message.reply_text("🚀 Modo de caça (Pullback) iniciado!")
     if periodic_task is None or periodic_task.done():
         periodic_task = asyncio.create_task(autonomous_loop())
 
