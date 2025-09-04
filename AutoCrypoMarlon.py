@@ -134,7 +134,7 @@ async def execute_buy_order(amount, price, pair_details, manual=False, reason="S
             automation_state["current_target_pair_address"] = None
             return
 
-    slippage_bps = await calculate_dynamic_slippage(pair_details['pair_address'])
+    slippage_bps = 500 # Slippage fixo de 5%
     logger.info(f"EXECUTANDO ORDEM DE COMPRA de {amount} SOL para {pair_details['base_symbol']} ao preço de {price}")
     
     tx_sig = await execute_swap(pair_details['quote_address'], pair_details['base_address'], amount, 9, slippage_bps)
@@ -175,7 +175,7 @@ async def execute_sell_order(reason=""):
             in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0; automation_state["current_target_pair_address"] = None
             return
 
-        slippage_bps = await calculate_dynamic_slippage(pair_details['pair_address'])
+        slippage_bps = 500 # Slippage fixo de 5%
         tx_sig = await execute_swap(pair_details['base_address'], pair_details['quote_address'], amount_to_sell, token_balance_data.decimals, slippage_bps)
         
         if tx_sig:
@@ -243,36 +243,18 @@ async def is_pair_quotable_on_jupiter(pair_details):
     except Exception:
         return False
 
-async def calculate_dynamic_slippage(pair_address):
-    logger.info(f"Calculando slippage dinâmico para {pair_address}...")
-    df = await fetch_geckoterminal_ohlcv(pair_address, "1m", limit=5)
-    if df is None or df.empty or len(df) < 5:
-        logger.warning("Dados insuficientes. Usando slippage padrão (0.75%).")
-        return 75
-    price_range = df['high'].max() - df['low'].min()
-    volatility = (price_range / df['low'].min()) * 100 if df['low'].min() > 0 else 0
-    if volatility > 3.0: slippage_bps = 700
-    elif volatility > 1.5: slippage_bps = 600
-    else: slippage_bps = 500
-    logger.info(f"Volatilidade ({volatility:.2f}%). Slippage definido para {slippage_bps/100:.2f}%.")
-    return slippage_bps
-
 async def discover_and_filter_pairs():
-    logger.info("--- FASE 1: DESCOBERTA --- Buscando os top 200 pares por valorização/24h no GeckoTerminal...")
+    logger.info("--- FASE 1: DESCOBERTA --- Buscando os top 200 pares por nº de transações no GeckoTerminal...")
     all_pools = []
     
-    # --- ALTERAÇÃO PRINCIPAL AQUI ---
-    # O parâmetro "sort" foi alterado para buscar pelos que mais subiram nas últimas 24 horas
     for page in range(1, 11):
-        url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools?page={page}&include=base_token,quote_token&sort=price_change_percentage_h24"
+        url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools?page={page}&include=base_token,quote_token&sort=h24_tx_count_desc"
         try:
             async with httpx.AsyncClient() as client:
                 res = await client.get(url, timeout=20.0)
                 res.raise_for_status()
                 pools_data = res.json().get('data', [])
-                if not pools_data:
-                    logger.info(f"Página {page} não retornou dados. Finalizando busca.")
-                    break
+                if not pools_data: break
                 all_pools.extend(pools_data)
                 logger.info(f"Página {page} processada, {len(all_pools)} pares acumulados.")
                 await asyncio.sleep(0.5)
@@ -295,37 +277,28 @@ async def discover_and_filter_pairs():
             quote_token_addr = relationships.get('quote_token', {}).get('data', {}).get('id')
             if quote_token_addr == 'So11111111111111111111111111111111111111112' or attr.get('name', '').endswith(' / SOL'):
                 is_sol_pair = True
-
             if not is_sol_pair: rejection_reasons.append("Não é par contra SOL")
             
             liquidity = float(attr.get('reserve_in_usd', 0))
-            if liquidity < 200000: rejection_reasons.append(f"Liquidez Baixa (${liquidity:,.0f})")
+            if liquidity < 50000: rejection_reasons.append(f"Liquidez Baixa (${liquidity:,.0f})")
 
             volume_24h = float(attr.get('volume_usd', {}).get('h24', 0))
-            if volume_24h < 250000:
-                rejection_reasons.append(f"Volume 24h Baixo (${volume_24h:,.0f})")
+            if volume_24h < 250000: rejection_reasons.append(f"Volume 24h Baixo (${volume_24h:,.0f})")
 
             age_str = attr.get('pool_created_at')
             if age_str:
                 age_dt = datetime.fromisoformat(age_str.replace('Z', '+00:00'))
                 age_hours = (datetime.now(timezone.utc) - age_dt).total_seconds() / 3600
-                if age_hours < 2.0:
-                    rejection_reasons.append(f"Muito Nova ({age_hours:.2f} horas)")
-            
-            volume_1h = float(attr.get('volume_usd', {}).get('h1', 0))
-            if volume_1h < 50000:
-                rejection_reasons.append(f"Volume 1h Baixo (${volume_1h:,.0f})")
+                if age_hours < 0.5: rejection_reasons.append(f"Muito Nova ({age_hours:.2f} horas)")
             
             if not rejection_reasons:
-                logger.info(f"✅ APROVADO: {symbol} | Liquidez: ${liquidity:,.0f}, Volume 24h: ${volume_24h:,.0f}, Volume 1h: ${volume_1h:,.0f}")
                 filtered_pairs[symbol] = address
-                
         except (ValueError, TypeError, KeyError, IndexError):
             continue
 
     logger.info(f"Descoberta finalizada. {len(filtered_pairs)} pares passaram nos filtros.")
     return filtered_pairs
-    
+
 async def analyze_and_score_coin(pair_address, symbol):
     try:
         pair_details = await get_pair_details(pair_address)
@@ -385,7 +358,6 @@ async def find_best_coin_to_trade(candidate_pairs, penalized_pairs=set()):
         logger.warning("--- SELEÇÃO FINALIZADA --- Nenhuma moeda com oportunidade clara encontrada.")
     return best_coin_info
 
-# --- ESTRATÉGIA DE VELOCIDADE (NOVA) ---
 async def check_velocity_strategy():
     global in_position, entry_price
     target_address = automation_state.get("current_target_pair_address")
@@ -482,15 +454,13 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v21.2 (Velocidade Pura)**.\n\n'
+        'Olá! Sou seu bot **v20.4 (Caçador de Hype)**.\n\n'
         '**Dinâmica Autônoma:**\n'
-        '1. Descubro moedas novas (>30 min) com filtros agressivos para "foguetes".\n'
+        '1. Eu descubro os **TOP 200 pares por nº de transações**.\n'
         '2. Seleciono o alvo com base na atividade dos últimos 15 minutos e na qualidade da sua tendência.\n\n'
-        '**Nova Estratégia (Velocidade Pura):**\n'
-        'Compro se o preço subir **+2% em 1 minuto**. Sem filtro de volume na entrada.\n\n'
-        '**Comandos:**\n'
-        '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%>`\n'
-        '`/run`, `/stop`, `/buy <valor>`, `/sell`',
+        '**Estratégia:** Pullback na EMA 5.\n\n'
+        '**Configure-me com `/set` e inicie com `/run`.**\n'
+        '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%>`',
         parse_mode='Markdown'
     )
 
@@ -501,11 +471,7 @@ async def set_params(update, context):
         amount, stop_loss, take_profit = float(context.args[0]), float(context.args[1]), float(context.args[2])
         if stop_loss <= 0 or take_profit <= 0:
             await update.effective_message.reply_text("⚠️ Stop/Profit devem ser > 0."); return
-        
         parameters.update(amount=amount, stop_loss_percent=stop_loss, take_profit_percent=take_profit)
-        if "volume_multiplier" in parameters:
-            parameters["volume_multiplier"] = None # Garante que o parâmetro antigo seja limpo
-
         await update.effective_message.reply_text(
             f"✅ *Parâmetros definidos!*\n"
             f"💰 *Valor por Ordem:* `{amount}` SOL\n"
@@ -525,7 +491,7 @@ async def run_bot(update, context):
         await update.effective_message.reply_text("O bot já está em execução."); return
     bot_running = True
     logger.info("Bot de trade autônomo iniciado.")
-    await update.effective_message.reply_text("🚀 Modo Caçador de Velocidade Pura iniciado!")
+    await update.effective_message.reply_text("🚀 Modo Caçador de Hype iniciado!")
     if periodic_task is None or periodic_task.done():
         periodic_task = asyncio.create_task(autonomous_loop())
 
@@ -601,6 +567,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
-
