@@ -85,20 +85,20 @@ parameters = {
 }
 
 # --- Funções de Execução de Ordem ---
-async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, slippage_bps=500):
-    logger.info(f"Iniciando swap de {amount} do token {input_mint_str} para {output_mint_str}")
+async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, slippage_bps):
+    logger.info(f"Iniciando swap de {amount} do token {input_mint_str} para {output_mint_str} com slippage de {slippage_bps} BPS")
     amount_wei = int(amount * (10**input_decimals))
     
     async with httpx.AsyncClient() as client:
         try:
             quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={input_mint_str}&outputMint={output_mint_str}&amount={amount_wei}&slippageBps={slippage_bps}&maxAccounts=64"
-            quote_res = await client.get(quote_url, timeout=30.0)
+            quote_res = await client.get(quote_url, timeout=60.0)
             quote_res.raise_for_status()
             quote_response = quote_res.json()
 
             swap_payload = { "userPublicKey": str(payer.pubkey()), "quoteResponse": quote_response, "wrapAndUnwrapSol": True, "dynamicComputeUnitLimit": True }
             swap_url = "https://quote-api.jup.ag/v6/swap"
-            swap_res = await client.post(swap_url, json=swap_payload, timeout=30.0)
+            swap_res = await client.post(swap_url, json=swap_payload, timeout=60.0)
             swap_res.raise_for_status()
             swap_response = swap_res.json()
             swap_tx_b64 = swap_response.get('swapTransaction')
@@ -114,7 +114,7 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
             tx_signature = solana_client.send_raw_transaction(bytes(signed_tx), opts=tx_opts).value
             
             logger.info(f"Transação enviada: {tx_signature}")
-            await asyncio.sleep(8)
+            await asyncio.sleep(12)
             solana_client.confirm_transaction(tx_signature, commitment="confirmed")
             logger.info(f"Transação confirmada: https://solscan.io/tx/{tx_signature}")
             return str(tx_signature)
@@ -124,18 +124,20 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
 async def execute_buy_order(amount, price, pair_details):
     global in_position, entry_price
     if in_position: return
-
+    
     logger.info(f"Verificação final de cotação para {pair_details['base_symbol']} antes da compra...")
     if not await is_pair_quotable_on_jupiter(pair_details):
         logger.error(f"FALHA NA COMPRA: Par {pair_details['base_symbol']} deixou de ser negociável na Jupiter. Penalizando e procurando novo alvo.")
         await send_telegram_message(f"❌ Compra para **{pair_details['base_symbol']}** abortada. Moeda não mais negociável na Jupiter.")
-        
         automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10
         automation_state["current_target_pair_address"] = None
         return
 
+    # Calcula o slippage dinâmico
+    slippage_bps = await calculate_dynamic_slippage(pair_details['pair_address'])
     logger.info(f"EXECUTANDO ORDEM DE COMPRA de {amount} SOL para {pair_details['base_symbol']} ao preço de {price}")
-    tx_sig = await execute_swap(pair_details['quote_address'], pair_details['base_address'], amount, 9)
+    
+    tx_sig = await execute_swap(pair_details['quote_address'], pair_details['base_address'], amount, 9, slippage_bps)
     if tx_sig:
         in_position = True
         entry_price = price
@@ -143,6 +145,7 @@ async def execute_buy_order(amount, price, pair_details):
         log_message = (f"✅ COMPRA REALIZADA: {amount} SOL para {pair_details['base_symbol']}\n"
                        f"Entrada: {price:.10f} | Alvo: {price * (1 + parameters['take_profit_percent']/100):.10f} | "
                        f"Stop: {price * (1 - parameters['stop_loss_percent']/100):.10f}\n"
+                       f"Slippage Usado: {slippage_bps/100:.2f}%\n"
                        f"https://solscan.io/tx/{tx_sig}")
         logger.info(log_message)
         await send_telegram_message(log_message)
@@ -163,22 +166,25 @@ async def execute_sell_order(reason=""):
         token_balance_data = balance_response.value
         amount_to_sell = token_balance_data.ui_amount
         if amount_to_sell is None or amount_to_sell == 0:
-            logger.warning("Tentativa de venda com saldo zero."); in_position = False; entry_price = 0.0; return
+            logger.warning("Tentativa de venda com saldo zero, resetando posição.")
+            in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0; automation_state["current_target_pair_address"] = None
+            return
 
-        tx_sig = await execute_swap(pair_details['base_address'], pair_details['quote_address'], amount_to_sell, token_balance_data.decimals)
+        # Calcula o slippage dinâmico para a venda
+        slippage_bps = await calculate_dynamic_slippage(pair_details['pair_address'])
+        tx_sig = await execute_swap(pair_details['base_address'], pair_details['quote_address'], amount_to_sell, token_balance_data.decimals, slippage_bps)
+        
         if tx_sig:
-            log_message = f"🛑 VENDA REALIZADA: {symbol}\nMotivo: {reason}\nhttps://solscan.io/tx/{tx_sig}"
+            log_message = f"🛑 VENDA REALIZADA: {symbol}\nMotivo: {reason}\nSlippage Usado: {slippage_bps/100:.2f}%\nhttps://solscan.io/tx/{tx_sig}"
             logger.info(log_message)
             await send_telegram_message(log_message)
+            in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0; automation_state["current_target_pair_address"] = None
         else:
-            await send_telegram_message(f"❌ FALHA NA VENDA do token {symbol}")
+            logger.error(f"FALHA NA VENDA do token {symbol}. O bot permanecerá em posição e tentará vender novamente.")
+            await send_telegram_message(f"❌ FALHA NA VENDA do token {symbol}. O bot tentará novamente.")
     except Exception as e:
-        logger.error(f"Erro ao vender {symbol}: {e}"); await send_telegram_message(f"⚠️ Falha ao vender {symbol}: {e}")
-    finally:
-        in_position = False
-        entry_price = 0.0
-        automation_state["position_opened_timestamp"] = 0
-        automation_state["current_target_pair_address"] = None
+        logger.error(f"Erro crítico ao vender {symbol}: {e}")
+        await send_telegram_message(f"⚠️ Erro crítico ao vender {symbol}: {e}. O bot permanecerá em posição.")
 
 # --- Funções de Análise e Descoberta ---
 async def fetch_geckoterminal_ohlcv(pair_address, timeframe, limit=60):
@@ -233,14 +239,37 @@ async def is_pair_quotable_on_jupiter(pair_details):
     except Exception:
         return False
 
-# --- FUNÇÃO DE DESCOBERTA COM CORREÇÃO FINAL ---
+# --- NOVA FUNÇÃO DE SLIPPAGE DINÂMICO ---
+async def calculate_dynamic_slippage(pair_address):
+    logger.info(f"Calculando slippage dinâmico para {pair_address}...")
+    # Busca os últimos 5 minutos de dados para medir a volatilidade recente
+    df = await fetch_geckoterminal_ohlcv(pair_address, "1m", limit=5)
+    if df is None or df.empty or len(df) < 5:
+        logger.warning("Dados insuficientes para slippage dinâmico. Usando padrão (1.5%).")
+        return 150 # 1.5% como padrão
+
+    price_range = df['high'].max() - df['low'].min()
+    volatility = (price_range / df['low'].min()) * 100
+
+    if volatility > 3.0:
+        slippage_bps = 250 # 2.5% para mercado "foguete"
+        logger.info(f"Alta volatilidade detectada ({volatility:.2f}%). Usando slippage AGRESSIVO de 2.5%.")
+    elif volatility > 1.5:
+        slippage_bps = 150 # 1.5% para mercado normal
+        logger.info(f"Média volatilidade detectada ({volatility:.2f}%). Usando slippage PADRÃO de 1.5%.")
+    else:
+        slippage_bps = 50 # 0.5% para mercado calmo
+        logger.info(f"Baixa volatilidade detectada ({volatility:.2f}%). Usando slippage ECONÔMICO de 0.5%.")
+    
+    return slippage_bps
+
+
 async def discover_and_filter_pairs():
     logger.info("--- FASE 1: DESCOBERTA --- Buscando os top 200 pares no GeckoTerminal...")
     all_pools = []
     
-    # Faz um loop por 10 páginas para buscar 200 resultados (20 por página é o padrão da API)
-    for page in range(1, 11): 
-        url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools?page={page}&include=base_token,quote_token"
+    for page in range(1, 3):
+        url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools?page={page}&include=base_token,quote_token&per_page=100"
         try:
             async with httpx.AsyncClient() as client:
                 res = await client.get(url, timeout=20.0)
@@ -268,8 +297,6 @@ async def discover_and_filter_pairs():
             address = pool.get('id', 'N/A')
             if address.startswith("solana_"): address = address.split('_')[1]
 
-            logger.info(f"Analisando candidato: {symbol}...")
-            
             is_sol_pair = False
             quote_token_addr = relationships.get('quote_token', {}).get('data', {}).get('id')
             if quote_token_addr == 'So11111111111111111111111111111111111111112' or attr.get('name', '').endswith(' / SOL'):
@@ -291,10 +318,7 @@ async def discover_and_filter_pairs():
                     rejection_reasons.append(f"Muito Nova ({age_hours:.2f} horas)")
             
             if not rejection_reasons:
-                logger.info(f"✅ APROVADO: {symbol} | Liquidez: ${liquidity:,.0f}, Volume: ${volume_24h:,.0f}")
                 filtered_pairs[symbol] = address
-            else:
-                logger.info(f"❌ DESCARTADO: {symbol} | Motivos: {', '.join(rejection_reasons)}")
                 
         except (ValueError, TypeError, KeyError, IndexError):
             continue
@@ -455,10 +479,10 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v18.5 (Scanner 200 Pares)**.\n\n'
+        'Olá! Sou seu bot **v18.6 (Slippage Dinâmico)**.\n\n'
         '**Dinâmica Autônoma:**\n'
-        '1. Eu descubro e seleciono a melhor moeda dos **TOP 200 pares** para operar.\n'
-        '2. Confirmo se a moeda é negociável na Jupiter.\n'
+        '1. Eu descubro (top 200) e seleciono a melhor moeda para operar.\n'
+        '2. O slippage é ajustado automaticamente com base na volatilidade.\n'
         '3. Abandono alvos sem entrada em 15 min e procuro um novo após cada trade.\n\n'
         '**Estratégia:** Pullback na EMA 5.\n\n'
         '**Configure-me com `/set` e inicie com `/run`.**\n'
@@ -493,7 +517,7 @@ async def run_bot(update, context):
         await update.effective_message.reply_text("O bot já está em execução."); return
     bot_running = True
     logger.info("Bot de trade autônomo iniciado.")
-    await update.effective_message.reply_text("🚀 Modo de caça (Scanner 200 Pares) iniciado!")
+    await update.effective_message.reply_text("🚀 Modo de caça (Slippage Dinâmico) iniciado!")
     if periodic_task is None or periodic_task.done():
         periodic_task = asyncio.create_task(autonomous_loop())
 
