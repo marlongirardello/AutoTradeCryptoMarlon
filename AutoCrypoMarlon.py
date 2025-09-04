@@ -74,7 +74,9 @@ automation_state = {
     "position_opened_timestamp": 0,
     "target_selected_timestamp": 0,
     "penalty_box": {},
-    "discovered_pairs": {}
+    "discovered_pairs": {},
+    "last_price_change_pct": None, # NOVO: Para o timeout de inatividade
+    "last_price_change_timestamp": 0 # NOVO: Para o timeout de inatividade
 }
 
 parameters = {
@@ -134,7 +136,7 @@ async def execute_buy_order(amount, price, pair_details, manual=False, reason="S
             automation_state["current_target_pair_address"] = None
             return
 
-    slippage_bps = 500 # Slippage fixo de 5%
+    slippage_bps = await calculate_dynamic_slippage(pair_details['pair_address'])
     logger.info(f"EXECUTANDO ORDEM DE COMPRA de {amount} SOL para {pair_details['base_symbol']} ao preço de {price}")
     
     tx_sig = await execute_swap(pair_details['quote_address'], pair_details['base_address'], amount, 9, slippage_bps)
@@ -175,7 +177,7 @@ async def execute_sell_order(reason=""):
             in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0; automation_state["current_target_pair_address"] = None
             return
 
-        slippage_bps = 500 # Slippage fixo de 5%
+        slippage_bps = await calculate_dynamic_slippage(pair_details['pair_address'])
         tx_sig = await execute_swap(pair_details['base_address'], pair_details['quote_address'], amount_to_sell, token_balance_data.decimals, slippage_bps)
         
         if tx_sig:
@@ -243,12 +245,26 @@ async def is_pair_quotable_on_jupiter(pair_details):
     except Exception:
         return False
 
+async def calculate_dynamic_slippage(pair_address):
+    logger.info(f"Calculando slippage dinâmico para {pair_address}...")
+    df = await fetch_geckoterminal_ohlcv(pair_address, "1m", limit=5)
+    if df is None or df.empty or len(df) < 5:
+        logger.warning("Dados insuficientes. Usando slippage padrão (0.75%).")
+        return 75
+    price_range = df['high'].max() - df['low'].min()
+    volatility = (price_range / df['low'].min()) * 100 if df['low'].min() > 0 else 0
+    if volatility > 3.0: slippage_bps = 150
+    elif volatility > 1.5: slippage_bps = 75
+    else: slippage_bps = 30
+    logger.info(f"Volatilidade ({volatility:.2f}%). Slippage definido para {slippage_bps/100:.2f}%.")
+    return slippage_bps
+
 async def discover_and_filter_pairs():
-    logger.info("--- FASE 1: DESCOBERTA --- Buscando os top 200 pares por nº de transações no GeckoTerminal...")
+    logger.info("--- FASE 1: DESCOBERTA --- Buscando os top 200 pares no GeckoTerminal...")
     all_pools = []
     
     for page in range(1, 11):
-        url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools?page={page}&include=base_token,quote_token&sort=h24_tx_count_desc"
+        url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools?page={page}&include=base_token,quote_token"
         try:
             async with httpx.AsyncClient() as client:
                 res = await client.get(url, timeout=20.0)
@@ -358,6 +374,7 @@ async def find_best_coin_to_trade(candidate_pairs, penalized_pairs=set()):
         logger.warning("--- SELEÇÃO FINALIZADA --- Nenhuma moeda com oportunidade clara encontrada.")
     return best_coin_info
 
+# --- ESTRATÉGIA DE VELOCIDADE COM TIMEOUT DE INATIVIDADE ---
 async def check_velocity_strategy():
     global in_position, entry_price
     target_address = automation_state.get("current_target_pair_address")
@@ -370,6 +387,19 @@ async def check_velocity_strategy():
     last_closed_candle = data.iloc[0]
     
     price_change_pct = (last_closed_candle['close'] - last_closed_candle['open']) / last_closed_candle['open'] * 100 if last_closed_candle['open'] > 0 else 0
+
+    # Lógica do Timeout de Inatividade
+    now = time.time()
+    if price_change_pct != automation_state.get("last_price_change_pct"):
+        automation_state["last_price_change_pct"] = price_change_pct
+        automation_state["last_price_change_timestamp"] = now
+    else:
+        if now - automation_state.get("last_price_change_timestamp", 0) > 300: # 5 minutos
+            logger.warning(f"TIMEOUT DE INATIVIDADE: Variação de vela para {pair_details['base_symbol']} está estagnada. Abandonando e penalizando.")
+            await send_telegram_message(f"⌛️ Timeout de inatividade para **{pair_details['base_symbol']}**. Procurando um novo alvo...")
+            automation_state["penalty_box"][target_address] = 10
+            automation_state["current_target_pair_address"] = None
+            return
 
     logger.info(f"Análise Compra ({pair_details['base_symbol']}): "
                 f"Variação Vela: {price_change_pct:+.2f}% (Meta: >2%)")
@@ -423,7 +453,9 @@ async def autonomous_loop():
                             current_target_pair_address=best_coin["pair_address"],
                             current_target_symbol=best_coin["symbol"],
                             current_target_pair_details=best_coin["details"],
-                            target_selected_timestamp=now
+                            target_selected_timestamp=now,
+                            last_price_change_pct=None, # Reseta o estado para o novo alvo
+                            last_price_change_timestamp=now
                         )
                         await send_telegram_message(f"🎯 **Novo Alvo:** {best_coin['symbol']}. Iniciando monitoramento...")
             
@@ -454,13 +486,15 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v20.4 (Caçador de Hype)**.\n\n'
+        'Olá! Sou seu bot **v21.3 (Timeout de Inatividade)**.\n\n'
         '**Dinâmica Autônoma:**\n'
-        '1. Eu descubro os **TOP 200 pares por nº de transações**.\n'
-        '2. Seleciono o alvo com base na atividade dos últimos 15 minutos e na qualidade da sua tendência.\n\n'
-        '**Estratégia:** Pullback na EMA 5.\n\n'
-        '**Configure-me com `/set` e inicie com `/run`.**\n'
-        '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%>`',
+        '1. Descubro moedas novas (>30 min) com filtros agressivos para "foguetes".\n'
+        '2. **(NOVO)** Abandono alvos se a variação de preço ficar estagnada por mais de 5 minutos.\n\n'
+        '**Estratégia (Velocidade Pura):**\n'
+        'Compro se o preço subir **+2% em 1 minuto**.\n\n'
+        '**Comandos:**\n'
+        '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%>`\n'
+        '`/run`, `/stop`, `/buy <valor>`, `/sell`',
         parse_mode='Markdown'
     )
 
@@ -471,7 +505,11 @@ async def set_params(update, context):
         amount, stop_loss, take_profit = float(context.args[0]), float(context.args[1]), float(context.args[2])
         if stop_loss <= 0 or take_profit <= 0:
             await update.effective_message.reply_text("⚠️ Stop/Profit devem ser > 0."); return
+        
         parameters.update(amount=amount, stop_loss_percent=stop_loss, take_profit_percent=take_profit)
+        if "volume_multiplier" in parameters:
+            parameters["volume_multiplier"] = None
+
         await update.effective_message.reply_text(
             f"✅ *Parâmetros definidos!*\n"
             f"💰 *Valor por Ordem:* `{amount}` SOL\n"
@@ -491,7 +529,7 @@ async def run_bot(update, context):
         await update.effective_message.reply_text("O bot já está em execução."); return
     bot_running = True
     logger.info("Bot de trade autônomo iniciado.")
-    await update.effective_message.reply_text("🚀 Modo Caçador de Hype iniciado!")
+    await update.effective_message.reply_text("🚀 Modo Caçador de Velocidade Pura (com Timeout de Inatividade) iniciado!")
     if periodic_task is None or periodic_task.done():
         periodic_task = asyncio.create_task(autonomous_loop())
 
