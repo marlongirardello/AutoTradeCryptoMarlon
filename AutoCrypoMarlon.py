@@ -237,16 +237,17 @@ async def discover_and_filter_pairs():
     logger.info("--- FASE 1: DESCOBERTA --- Buscando os top 200 pares no GeckoTerminal...")
     all_pools = []
     
-    # --- MODIFICAÇÃO PRINCIPAL AQUI ---
-    # Busca 2 páginas de 100 resultados para ter uma amostragem maior
-    for page in range(1, 3):
+    # --- LÓGICA CORRIGIDA PARA BUSCAR 200 PARES ---
+    for page in range(1, 3): # Loop de 2 páginas
         url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools?page={page}&include=base_token,quote_token&per_page=100"
         try:
             async with httpx.AsyncClient() as client:
                 res = await client.get(url, timeout=20.0)
                 res.raise_for_status()
                 pools_data = res.json().get('data', [])
-                if not pools_data: break
+                if not pools_data:
+                    logger.info(f"Página {page} não retornou dados. Finalizando busca.")
+                    break
                 all_pools.extend(pools_data)
                 logger.info(f"Página {page} processada, {len(all_pools)} pares acumulados.")
                 await asyncio.sleep(0.5)
@@ -453,9 +454,9 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v18.3 (Scanner Super Amplo)**.\n\n'
+        'Olá! Sou seu bot **v18.4 (Scanner Amplo Corrigido)**.\n\n'
         '**Dinâmica Autônoma:**\n'
-        '1. Eu descubro e seleciono a melhor moeda dos **TOP 200** pares para operar.\n'
+        '1. Eu descubro e seleciono a melhor moeda dos **TOP 200 pares** para operar.\n'
         '2. Confirmo se a moeda é negociável na Jupiter.\n'
         '3. Abandono alvos sem entrada em 15 min e procuro um novo após cada trade.\n\n'
         '**Estratégia:** Pullback na EMA 5.\n\n'
@@ -491,7 +492,7 @@ async def run_bot(update, context):
         await update.effective_message.reply_text("O bot já está em execução."); return
     bot_running = True
     logger.info("Bot de trade autônomo iniciado.")
-    await update.effective_message.reply_text("🚀 Modo de caça (Scanner Super Amplo) iniciado!")
+    await update.effective_message.reply_text("🚀 Modo de caça (Scanner Amplo) iniciado!")
     if periodic_task is None or periodic_task.done():
         periodic_task = asyncio.create_task(autonomous_loop())
 
