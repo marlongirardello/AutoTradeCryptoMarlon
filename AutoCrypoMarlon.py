@@ -82,6 +82,7 @@ parameters = {
     "amount": None,
     "stop_loss_percent": None,
     "take_profit_percent": None,
+    "volume_multiplier": None
 }
 
 # --- Funções de Execução de Ordem ---
@@ -121,20 +122,18 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
         except Exception as e:
             logger.error(f"Falha na transação: {e}"); await send_telegram_message(f"⚠️ Falha na transação: {e}"); return None
 
-async def execute_buy_order(amount, price, pair_details, manual=False):
+async def execute_buy_order(amount, price, pair_details, manual=False, reason="Sinal da Estratégia"):
     global in_position, entry_price
     if in_position: return
 
-    reason = "Ordem Manual" if manual else "Sinal de Pullback na EMA 5"
-
-    logger.info(f"Verificação final de cotação para {pair_details['base_symbol']} antes da compra...")
-    if not await is_pair_quotable_on_jupiter(pair_details):
-        logger.error(f"FALHA NA COMPRA: Par {pair_details['base_symbol']} deixou de ser negociável na Jupiter. Penalizando e procurando novo alvo.")
-        await send_telegram_message(f"❌ Compra para **{pair_details['base_symbol']}** abortada. Moeda não mais negociável na Jupiter.")
-        
-        automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10
-        automation_state["current_target_pair_address"] = None
-        return
+    if not manual:
+        logger.info(f"Verificação final de cotação para {pair_details['base_symbol']} antes da compra...")
+        if not await is_pair_quotable_on_jupiter(pair_details):
+            logger.error(f"FALHA NA COMPRA: Par {pair_details['base_symbol']} deixou de ser negociável na Jupiter. Penalizando e procurando novo alvo.")
+            await send_telegram_message(f"❌ Compra para **{pair_details['base_symbol']}** abortada. Moeda não mais negociável na Jupiter.")
+            automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10
+            automation_state["current_target_pair_address"] = None
+            return
 
     slippage_bps = await calculate_dynamic_slippage(pair_details['pair_address'])
     logger.info(f"EXECUTANDO ORDEM DE COMPRA de {amount} SOL para {pair_details['base_symbol']} ao preço de {price}")
@@ -155,7 +154,6 @@ async def execute_buy_order(amount, price, pair_details, manual=False):
     else:
         logger.error(f"FALHA NA EXECUÇÃO da compra para {pair_details['base_symbol']}. Penalizando e procurando novo alvo.")
         await send_telegram_message(f"❌ FALHA NA EXECUÇÃO da compra para **{pair_details['base_symbol']}**. A moeda será penalizada.")
-        
         if automation_state.get("current_target_pair_address"):
             automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10
             automation_state["current_target_pair_address"] = None
@@ -246,27 +244,18 @@ async def is_pair_quotable_on_jupiter(pair_details):
     except Exception:
         return False
 
-# --- FUNÇÃO DE SLIPPAGE DINÂMICO ATUALIZADA ---
 async def calculate_dynamic_slippage(pair_address):
     logger.info(f"Calculando slippage dinâmico para {pair_address}...")
     df = await fetch_geckoterminal_ohlcv(pair_address, "1m", limit=5)
     if df is None or df.empty or len(df) < 5:
-        logger.warning("Dados insuficientes para slippage dinâmico. Usando padrão (6%).")
-        return 600
-
+        logger.warning("Dados insuficientes. Usando slippage padrão (0.75%).")
+        return 75
     price_range = df['high'].max() - df['low'].min()
     volatility = (price_range / df['low'].min()) * 100 if df['low'].min() > 0 else 0
-
-    if volatility > 3.0:
-        slippage_bps = 700 # 7%
-        logger.info(f"Alta volatilidade detectada ({volatility:.2f}%). Usando slippage AGRESSIVO de 7.0%.")
-    elif volatility > 1.5:
-        slippage_bps = 600 # 6%
-        logger.info(f"Média volatilidade detectada ({volatility:.2f}%). Usando slippage PADRÃO de 6.0%.")
-    else:
-        slippage_bps = 500 # 5%
-        logger.info(f"Baixa volatilidade detectada ({volatility:.2f}%). Usando slippage ECONÔMICO de 5.0%.")
-    
+    if volatility > 3.0: slippage_bps = 150
+    elif volatility > 1.5: slippage_bps = 75
+    else: slippage_bps = 30
+    logger.info(f"Volatilidade ({volatility:.2f}%). Slippage definido para {slippage_bps/100:.2f}%.")
     return slippage_bps
 
 async def discover_and_filter_pairs():
@@ -280,9 +269,7 @@ async def discover_and_filter_pairs():
                 res = await client.get(url, timeout=20.0)
                 res.raise_for_status()
                 pools_data = res.json().get('data', [])
-                if not pools_data:
-                    logger.info(f"Página {page} não retornou dados. Finalizando busca.")
-                    break
+                if not pools_data: break
                 all_pools.extend(pools_data)
                 logger.info(f"Página {page} processada, {len(all_pools)} pares acumulados.")
                 await asyncio.sleep(0.5)
@@ -297,7 +284,6 @@ async def discover_and_filter_pairs():
         try:
             attr = pool.get('attributes', {})
             relationships = pool.get('relationships', {})
-            
             symbol = attr.get('name', 'N/A').split(' / ')[0]
             address = pool.get('id', 'N/A')
             if address.startswith("solana_"): address = address.split('_')[1]
@@ -306,25 +292,22 @@ async def discover_and_filter_pairs():
             quote_token_addr = relationships.get('quote_token', {}).get('data', {}).get('id')
             if quote_token_addr == 'So11111111111111111111111111111111111111112' or attr.get('name', '').endswith(' / SOL'):
                 is_sol_pair = True
-
             if not is_sol_pair: rejection_reasons.append("Não é par contra SOL")
             
             liquidity = float(attr.get('reserve_in_usd', 0))
-            if liquidity < 200000: rejection_reasons.append(f"Liquidez Baixa (${liquidity:,.0f})")
+            if liquidity < 50000: rejection_reasons.append(f"Liquidez Baixa (${liquidity:,.0f})")
 
             volume_24h = float(attr.get('volume_usd', {}).get('h24', 0))
-            if volume_24h < 1000000: rejection_reasons.append(f"Volume 24h Baixo (${volume_24h:,.0f})")
+            if volume_24h < 250000: rejection_reasons.append(f"Volume 24h Baixo (${volume_24h:,.0f})")
 
             age_str = attr.get('pool_created_at')
             if age_str:
                 age_dt = datetime.fromisoformat(age_str.replace('Z', '+00:00'))
                 age_hours = (datetime.now(timezone.utc) - age_dt).total_seconds() / 3600
-                if age_hours < 2.0:
-                    rejection_reasons.append(f"Muito Nova ({age_hours:.2f} horas)")
+                if age_hours < 0.5: rejection_reasons.append(f"Muito Nova ({age_hours:.2f} horas)")
             
             if not rejection_reasons:
                 filtered_pairs[symbol] = address
-                
         except (ValueError, TypeError, KeyError, IndexError):
             continue
 
@@ -335,19 +318,15 @@ async def analyze_and_score_coin(pair_address, symbol):
     try:
         pair_details = await get_pair_details(pair_address)
         if not pair_details: return 0, None
-
         if not await is_pair_quotable_on_jupiter(pair_details):
-            logger.warning(f"Candidato {symbol} descartado: Não foi possível obter cotação na Jupiter.")
-            return 0, None
+            logger.warning(f"Candidato {symbol} descartado: Não negociável na Jupiter."); return 0, None
 
         df = await fetch_geckoterminal_ohlcv(pair_address, "1m", limit=15)
         if df is None or len(df) < 15:
-            logger.warning(f"Dados insuficientes (últimos 15 min) para {symbol}.")
-            return 0, None
+            logger.warning(f"Dados insuficientes para {symbol}."); return 0, None
         
         if df['volume'].sum() < 500:
-            logger.info(f"Candidato {symbol} descartado: Atividade Recente Baixa.")
-            return 0, None
+            logger.info(f"Candidato {symbol} descartado: Atividade Recente Baixa."); return 0, None
             
         price_range = df['high'].max() - df['low'].min()
         volatility_score = (price_range / df['low'].min()) * 100 if df['low'].min() > 0 else 0
@@ -364,9 +343,7 @@ async def analyze_and_score_coin(pair_address, symbol):
             trend_quality_index = 0
             
         final_score = base_score * trend_quality_index
-        
         logger.info(f"Candidato: {symbol} | Pontuação Base: {base_score:,.0f}, Qualidade: {trend_quality_index:.2f} | Pontuação Final: {final_score:,.0f}")
-        
         return final_score, pair_details
     except Exception as e:
         logger.error(f"Erro ao analisar {symbol} ({pair_address}): {e}"); return 0, None
@@ -396,35 +373,33 @@ async def find_best_coin_to_trade(candidate_pairs, penalized_pairs=set()):
         logger.warning("--- SELEÇÃO FINALIZADA --- Nenhuma moeda com oportunidade clara encontrada.")
     return best_coin_info
 
-# --- Estratégia ---
-async def check_pullback_strategy():
+# --- ESTRATÉGIA DE VELOCIDADE ---
+async def check_velocity_strategy():
     global in_position, entry_price
     target_address = automation_state.get("current_target_pair_address")
     if not target_address or in_position: return
 
     pair_details = automation_state.get("current_target_pair_details")
-    data = await fetch_geckoterminal_ohlcv(target_address, parameters["timeframe"], limit=30)
-    if data is None or len(data) < 15: return
+    data = await fetch_geckoterminal_ohlcv(target_address, parameters["timeframe"], limit=20)
+    if data is None or len(data) < 16: return
 
-    data.ta.ema(length=5, append=True, col_names=('EMA_5',))
-    data.ta.ema(length=10, append=True, col_names=('EMA_10',))
-    data.dropna(inplace=True)
-    if len(data) < 2: return
-    
-    last_candle = data.iloc[-1]
-    
-    in_uptrend = last_candle['EMA_5'] > last_candle['EMA_10']
-    pullback_occured = last_candle['low'] <= last_candle['EMA_5']
-    is_green_candle = last_candle['close'] > last_candle['open']
+    last_closed_candle = data.iloc[-2]
+    volume_window = data.iloc[-17:-2]
+    if volume_window.empty: return
+    avg_volume = volume_window['volume'].mean()
 
-    logger.info(f"Análise Compra ({pair_details['base_symbol']}): Tendência Alta (EMA5>10): {'✅' if in_uptrend else '❌'}, "
-                f"Pullback (Preço tocou EMA5): {'✅' if pullback_occured else '❌'}, "
-                f"Vela Verde: {'✅' if is_green_candle else '❌'}")
-    
-    if in_uptrend and pullback_occured and is_green_candle:
+    price_change_pct = (last_closed_candle['close'] - last_closed_candle['open']) / last_closed_candle['open'] * 100 if last_closed_candle['open'] > 0 else 0
+    volume_spike = last_closed_candle['volume'] > (avg_volume * parameters["volume_multiplier"])
+
+    logger.info(f"Análise Compra ({pair_details['base_symbol']}): "
+                f"Variação Vela: {price_change_pct:+.2f}% (Meta: >2%) | "
+                f"Volume Vela: {last_closed_candle['volume']:,.0f} (Meta: >{avg_volume * parameters['volume_multiplier']:,.0f})")
+
+    if price_change_pct > 2.0 and volume_spike:
         price, _ = await fetch_dexscreener_real_time_price(target_address)
         if price:
-            await execute_buy_order(parameters["amount"], price, pair_details)
+            reason = f"Aceleração de Preço (+{price_change_pct:.2f}%) com pico de volume."
+            await execute_buy_order(parameters["amount"], price, pair_details, reason=reason)
 
 # --- Loop Principal Autônomo ---
 async def autonomous_loop():
@@ -474,7 +449,7 @@ async def autonomous_loop():
                         await send_telegram_message(f"🎯 **Novo Alvo:** {best_coin['symbol']}. Iniciando monitoramento...")
             
             if not in_position and automation_state.get("current_target_pair_address"):
-                await check_pullback_strategy()
+                await check_velocity_strategy()
                 await asyncio.sleep(30)
             elif in_position:
                 price, _ = await fetch_dexscreener_real_time_price(automation_state["current_target_pair_address"])
@@ -500,14 +475,15 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v19.3 (Slippage Agressivo)**.\n\n'
+        'Olá! Sou seu bot **v21.1 (Estratégia de Velocidade Corrigida)**.\n\n'
         '**Dinâmica Autônoma:**\n'
-        'Eu descubro (top 200), seleciono e opero a melhor moeda com base na atividade dos últimos 15 minutos e na qualidade da sua tendência.\n\n'
-        '**Gerenciamento de Risco:**\n'
-        'Slippage dinâmico (5%-7%), timeouts de caça e de posição, e caixa de penalidade estão ativos.\n\n'
-        '**Comandos Principais e Manuais:**\n'
-        '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%>`\n'
-        '`/run`, `/stop`, `/buy <valor>`, `/sell`',
+        '1. Descubro moedas novas (>30 min) com filtros agressivos para "foguetes".\n'
+        '2. Seleciono o alvo com base na atividade dos últimos 15 minutos e na qualidade da sua tendência.\n'
+        '3. Procuro uma nova oportunidade após cada trade ou timeout.\n\n'
+        '**Nova Estratégia:**\n'
+        'Compro se o preço subir **+2% em 1 minuto** com um pico de volume (multiplicador ajustável).\n\n'
+        '**NOVO COMANDO `/set`:**\n'
+        '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%> <VOL_MULT>`',
         parse_mode='Markdown'
     )
 
@@ -515,20 +491,21 @@ async def set_params(update, context):
     if bot_running:
         await update.effective_message.reply_text("Pare o bot com /stop antes de alterar os parâmetros."); return
     try:
-        amount, stop_loss, take_profit = float(context.args[0]), float(context.args[1]), float(context.args[2])
-        if stop_loss <= 0 or take_profit <= 0:
-            await update.effective_message.reply_text("⚠️ Stop Loss e Take Profit devem ser valores positivos."); return
-        parameters.update(amount=amount, stop_loss_percent=stop_loss, take_profit_percent=take_profit)
+        amount, stop_loss, take_profit, vol_mult = float(context.args[0]), float(context.args[1]), float(context.args[2]), float(context.args[3])
+        if stop_loss <= 0 or take_profit <= 0 or vol_mult < 1.0:
+            await update.effective_message.reply_text("⚠️ Stop/Profit devem ser > 0. Multiplicador de Volume deve ser >= 1.0."); return
+        parameters.update(amount=amount, stop_loss_percent=stop_loss, take_profit_percent=take_profit, volume_multiplier=vol_mult)
         await update.effective_message.reply_text(
-            f"✅ *Parâmetros de Scalping definidos!*\n"
+            f"✅ *Parâmetros definidos!*\n"
             f"💰 *Valor por Ordem:* `{amount}` SOL\n"
             f"🛑 *Stop Loss:* `-{stop_loss}%`\n"
-            f"🎯 *Take Profit:* `+{take_profit}%`\n\n"
+            f"🎯 *Take Profit:* `+{take_profit}%`\n"
+            f"🔊 *Mult. de Volume:* `{vol_mult}x`\n\n"
             "Agora use `/run` para iniciar.",
             parse_mode='Markdown'
         )
     except (IndexError, ValueError):
-        await update.effective_message.reply_text("⚠️ *Formato incorreto.*\nUse: `/set <VALOR> <STOP> <PROFIT>`\nEx: `/set 0.1 1.5 2.5`", parse_mode='Markdown')
+        await update.effective_message.reply_text("⚠️ *Formato incorreto.*\nUse: `/set <VALOR> <STOP> <PROFIT> <VOL_MULT>`\nEx: `/set 0.1 2.0 5.0 3.0`", parse_mode='Markdown')
 
 async def run_bot(update, context):
     global bot_running, periodic_task
@@ -538,7 +515,7 @@ async def run_bot(update, context):
         await update.effective_message.reply_text("O bot já está em execução."); return
     bot_running = True
     logger.info("Bot de trade autônomo iniciado.")
-    await update.effective_message.reply_text("🚀 Modo de caça autônoma iniciado!")
+    await update.effective_message.reply_text("🚀 Modo Caçador de Velocidade iniciado!")
     if periodic_task is None or periodic_task.done():
         periodic_task = asyncio.create_task(autonomous_loop())
 
@@ -576,7 +553,7 @@ async def manual_buy(update, context):
         price, _ = await fetch_dexscreener_real_time_price(pair_details['pair_address'])
         if price:
             await update.effective_message.reply_text(f"Forçando compra manual de {amount} SOL em {pair_details['base_symbol']}...")
-            await execute_buy_order(amount, price, pair_details, manual=True)
+            await execute_buy_order(amount, price, pair_details, manual=True, reason="Compra Manual Forçada")
         else:
             await update.effective_message.reply_text("⚠️ Não foi possível obter o preço atual para a compra.")
             
