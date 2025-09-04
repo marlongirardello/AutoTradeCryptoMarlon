@@ -82,7 +82,6 @@ parameters = {
     "amount": None,
     "stop_loss_percent": None,
     "take_profit_percent": None,
-    "volume_multiplier": None
 }
 
 # --- Funções de Execução de Ordem ---
@@ -295,16 +294,17 @@ async def discover_and_filter_pairs():
             if not is_sol_pair: rejection_reasons.append("Não é par contra SOL")
             
             liquidity = float(attr.get('reserve_in_usd', 0))
-            if liquidity < 50000: rejection_reasons.append(f"Liquidez Baixa (${liquidity:,.0f})")
+            if liquidity < 200000: rejection_reasons.append(f"Liquidez Baixa (${liquidity:,.0f})")
 
             volume_24h = float(attr.get('volume_usd', {}).get('h24', 0))
-            if volume_24h < 250000: rejection_reasons.append(f"Volume 24h Baixo (${volume_24h:,.0f})")
+            if volume_24h < 1000000: rejection_reasons.append(f"Volume 24h Baixo (${volume_24h:,.0f})")
 
             age_str = attr.get('pool_created_at')
             if age_str:
                 age_dt = datetime.fromisoformat(age_str.replace('Z', '+00:00'))
                 age_hours = (datetime.now(timezone.utc) - age_dt).total_seconds() / 3600
-                if age_hours < 0.5: rejection_reasons.append(f"Muito Nova ({age_hours:.2f} horas)")
+                if age_hours < 2.0:
+                    rejection_reasons.append(f"Muito Nova ({age_hours:.2f} horas)")
             
             if not rejection_reasons:
                 filtered_pairs[symbol] = address
@@ -325,14 +325,18 @@ async def analyze_and_score_coin(pair_address, symbol):
         if df is None or len(df) < 15:
             logger.warning(f"Dados insuficientes para {symbol}."); return 0, None
         
-        if df['volume'].sum() < 500:
-            logger.info(f"Candidato {symbol} descartado: Atividade Recente Baixa."); return 0, None
+        # Filtro de Atividade Recente
+        if df['volume'].sum() < 500: # Volume mínimo de $500 nos últimos 15 min
+            logger.info(f"Candidato {symbol} descartado: Atividade Recente Baixa.")
+            return 0, None
             
+        # Cálculo das métricas base
         price_range = df['high'].max() - df['low'].min()
         volatility_score = (price_range / df['low'].min()) * 100 if df['low'].min() > 0 else 0
         volume_score = df['volume'].sum()
         base_score = (volatility_score * 1000) + volume_score
 
+        # Índice de Qualidade de Tendência
         total_move = df['high'].max() - df['low'].min()
         if total_move > 0:
             df['candle_move'] = df['high'] - df['low']
@@ -373,33 +377,35 @@ async def find_best_coin_to_trade(candidate_pairs, penalized_pairs=set()):
         logger.warning("--- SELEÇÃO FINALIZADA --- Nenhuma moeda com oportunidade clara encontrada.")
     return best_coin_info
 
-# --- ESTRATÉGIA DE VELOCIDADE ---
-async def check_velocity_strategy():
+# --- Estratégia ---
+async def check_pullback_strategy():
     global in_position, entry_price
     target_address = automation_state.get("current_target_pair_address")
     if not target_address or in_position: return
 
     pair_details = automation_state.get("current_target_pair_details")
-    data = await fetch_geckoterminal_ohlcv(target_address, parameters["timeframe"], limit=20)
-    if data is None or len(data) < 16: return
+    data = await fetch_geckoterminal_ohlcv(target_address, parameters["timeframe"], limit=30)
+    if data is None or len(data) < 15: return
 
-    last_closed_candle = data.iloc[-2]
-    volume_window = data.iloc[-17:-2]
-    if volume_window.empty: return
-    avg_volume = volume_window['volume'].mean()
+    data.ta.ema(length=5, append=True, col_names=('EMA_5',))
+    data.ta.ema(length=10, append=True, col_names=('EMA_10',))
+    data.dropna(inplace=True)
+    if len(data) < 2: return
+    
+    last_candle = data.iloc[-1]
+    
+    in_uptrend = last_candle['EMA_5'] > last_candle['EMA_10']
+    pullback_occured = last_candle['low'] <= last_candle['EMA_5']
+    is_green_candle = last_candle['close'] > last_candle['open']
 
-    price_change_pct = (last_closed_candle['close'] - last_closed_candle['open']) / last_closed_candle['open'] * 100 if last_closed_candle['open'] > 0 else 0
-    volume_spike = last_closed_candle['volume'] > (avg_volume * parameters["volume_multiplier"])
-
-    logger.info(f"Análise Compra ({pair_details['base_symbol']}): "
-                f"Variação Vela: {price_change_pct:+.2f}% (Meta: >2%) | "
-                f"Volume Vela: {last_closed_candle['volume']:,.0f} (Meta: >{avg_volume * parameters['volume_multiplier']:,.0f})")
-
-    if price_change_pct > 2.0 and volume_spike:
+    logger.info(f"Análise Compra ({pair_details['base_symbol']}): Tendência Alta (EMA5>10): {'✅' if in_uptrend else '❌'}, "
+                f"Pullback (Preço tocou EMA5): {'✅' if pullback_occured else '❌'}, "
+                f"Vela Verde: {'✅' if is_green_candle else '❌'}")
+    
+    if in_uptrend and pullback_occured and is_green_candle:
         price, _ = await fetch_dexscreener_real_time_price(target_address)
         if price:
-            reason = f"Aceleração de Preço (+{price_change_pct:.2f}%) com pico de volume."
-            await execute_buy_order(parameters["amount"], price, pair_details, reason=reason)
+            await execute_buy_order(parameters["amount"], price, pair_details)
 
 # --- Loop Principal Autônomo ---
 async def autonomous_loop():
@@ -449,7 +455,7 @@ async def autonomous_loop():
                         await send_telegram_message(f"🎯 **Novo Alvo:** {best_coin['symbol']}. Iniciando monitoramento...")
             
             if not in_position and automation_state.get("current_target_pair_address"):
-                await check_velocity_strategy()
+                await check_pullback_strategy()
                 await asyncio.sleep(30)
             elif in_position:
                 price, _ = await fetch_dexscreener_real_time_price(automation_state["current_target_pair_address"])
@@ -475,15 +481,14 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v21.1 (Estratégia de Velocidade Corrigida)**.\n\n'
+        'Olá! Sou seu bot **v20.0 (Seleção Inteligente Avançada)**.\n\n'
         '**Dinâmica Autônoma:**\n'
-        '1. Descubro moedas novas (>30 min) com filtros agressivos para "foguetes".\n'
-        '2. Seleciono o alvo com base na atividade dos últimos 15 minutos e na qualidade da sua tendência.\n'
-        '3. Procuro uma nova oportunidade após cada trade ou timeout.\n\n'
-        '**Nova Estratégia:**\n'
-        'Compro se o preço subir **+2% em 1 minuto** com um pico de volume (multiplicador ajustável).\n\n'
-        '**NOVO COMANDO `/set`:**\n'
-        '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%> <VOL_MULT>`',
+        '1. Eu descubro (top 200) e seleciono a melhor moeda para operar.\n'
+        '2. A seleção agora usa um **Índice de Qualidade** para priorizar tendências saudáveis.\n'
+        '3. Após fechar qualquer operação, eu imediatamente procuro uma nova oportunidade.\n\n'
+        '**Estratégia:** Pullback na EMA 5.\n\n'
+        '**Configure-me com `/set` e inicie com `/run`.**\n'
+        '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%>`',
         parse_mode='Markdown'
     )
 
@@ -491,21 +496,20 @@ async def set_params(update, context):
     if bot_running:
         await update.effective_message.reply_text("Pare o bot com /stop antes de alterar os parâmetros."); return
     try:
-        amount, stop_loss, take_profit, vol_mult = float(context.args[0]), float(context.args[1]), float(context.args[2]), float(context.args[3])
-        if stop_loss <= 0 or take_profit <= 0 or vol_mult < 1.0:
-            await update.effective_message.reply_text("⚠️ Stop/Profit devem ser > 0. Multiplicador de Volume deve ser >= 1.0."); return
-        parameters.update(amount=amount, stop_loss_percent=stop_loss, take_profit_percent=take_profit, volume_multiplier=vol_mult)
+        amount, stop_loss, take_profit = float(context.args[0]), float(context.args[1]), float(context.args[2])
+        if stop_loss <= 0 or take_profit <= 0:
+            await update.effective_message.reply_text("⚠️ Stop Loss e Take Profit devem ser valores positivos."); return
+        parameters.update(amount=amount, stop_loss_percent=stop_loss, take_profit_percent=take_profit)
         await update.effective_message.reply_text(
-            f"✅ *Parâmetros definidos!*\n"
+            f"✅ *Parâmetros de Scalping definidos!*\n"
             f"💰 *Valor por Ordem:* `{amount}` SOL\n"
             f"🛑 *Stop Loss:* `-{stop_loss}%`\n"
-            f"🎯 *Take Profit:* `+{take_profit}%`\n"
-            f"🔊 *Mult. de Volume:* `{vol_mult}x`\n\n"
+            f"🎯 *Take Profit:* `+{take_profit}%`\n\n"
             "Agora use `/run` para iniciar.",
             parse_mode='Markdown'
         )
     except (IndexError, ValueError):
-        await update.effective_message.reply_text("⚠️ *Formato incorreto.*\nUse: `/set <VALOR> <STOP> <PROFIT> <VOL_MULT>`\nEx: `/set 0.1 2.0 5.0 3.0`", parse_mode='Markdown')
+        await update.effective_message.reply_text("⚠️ *Formato incorreto.*\nUse: `/set <VALOR> <STOP> <PROFIT>`\nEx: `/set 0.1 1.5 2.5`", parse_mode='Markdown')
 
 async def run_bot(update, context):
     global bot_running, periodic_task
@@ -515,7 +519,7 @@ async def run_bot(update, context):
         await update.effective_message.reply_text("O bot já está em execução."); return
     bot_running = True
     logger.info("Bot de trade autônomo iniciado.")
-    await update.effective_message.reply_text("🚀 Modo Caçador de Velocidade iniciado!")
+    await update.effective_message.reply_text("🚀 Modo de caça (Seleção Inteligente) iniciado!")
     if periodic_task is None or periodic_task.done():
         periodic_task = asyncio.create_task(autonomous_loop())
 
@@ -553,7 +557,7 @@ async def manual_buy(update, context):
         price, _ = await fetch_dexscreener_real_time_price(pair_details['pair_address'])
         if price:
             await update.effective_message.reply_text(f"Forçando compra manual de {amount} SOL em {pair_details['base_symbol']}...")
-            await execute_buy_order(amount, price, pair_details, manual=True, reason="Compra Manual Forçada")
+            await execute_buy_order(amount, price, pair_details, manual=True)
         else:
             await update.effective_message.reply_text("⚠️ Não foi possível obter o preço atual para a compra.")
             
