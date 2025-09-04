@@ -248,23 +248,25 @@ async def calculate_dynamic_slippage(pair_address):
     volatility = (price_range / df['low'].min()) * 100
 
     if volatility > 3.0:
-        slippage_bps = 150 # 1.5% para mercado "foguete"
+        slippage_bps = 150 # 1.5%
         logger.info(f"Alta volatilidade detectada ({volatility:.2f}%). Usando slippage AGRESSIVO de 1.5%.")
     elif volatility > 1.5:
-        slippage_bps = 75 # 0.75% para mercado normal
+        slippage_bps = 75 # 0.75%
         logger.info(f"Média volatilidade detectada ({volatility:.2f}%). Usando slippage PADRÃO de 0.75%.")
     else:
-        slippage_bps = 30 # 0.3% para mercado calmo
+        slippage_bps = 30 # 0.3%
         logger.info(f"Baixa volatilidade detectada ({volatility:.2f}%). Usando slippage ECONÔMICO de 0.3%.")
     
     return slippage_bps
 
+# --- FUNÇÃO DE DESCOBERTA CORRIGIDA ---
 async def discover_and_filter_pairs():
     logger.info("--- FASE 1: DESCOBERTA --- Buscando os top 200 pares no GeckoTerminal...")
     all_pools = []
     
-    for page in range(1, 3):
-        url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools?page={page}&include=base_token,quote_token&per_page=100"
+    # CORREÇÃO: Loop de 1 a 10 para buscar 10 páginas de 20 (total 200)
+    for page in range(1, 11):
+        url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools?page={page}&include=base_token,quote_token"
         try:
             async with httpx.AsyncClient() as client:
                 res = await client.get(url, timeout=20.0)
@@ -474,10 +476,10 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v18.6 (Slippage Dinâmico)**.\n\n'
+        'Olá! Sou seu bot **v18.5 (Scanner 200 Pares - Fix)**.\n\n'
         '**Dinâmica Autônoma:**\n'
-        '1. Eu descubro (top 200) e seleciono a melhor moeda para operar.\n'
-        '2. O slippage é ajustado automaticamente com base na volatilidade.\n'
+        '1. Eu descubro e seleciono a melhor moeda dos **TOP 200 pares** para operar.\n'
+        '2. Confirmo se a moeda é negociável na Jupiter.\n'
         '3. Abandono alvos sem entrada em 15 min e procuro um novo após cada trade.\n\n'
         '**Estratégia:** Pullback na EMA 5.\n\n'
         '**Configure-me com `/set` e inicie com `/run`.**\n'
@@ -512,7 +514,7 @@ async def run_bot(update, context):
         await update.effective_message.reply_text("O bot já está em execução."); return
     bot_running = True
     logger.info("Bot de trade autônomo iniciado.")
-    await update.effective_message.reply_text("🚀 Modo de caça (Slippage Dinâmico) iniciado!")
+    await update.effective_message.reply_text("🚀 Modo de caça (Scanner 200 Pares) iniciado!")
     if periodic_task is None or periodic_task.done():
         periodic_task = asyncio.create_task(autonomous_loop())
 
