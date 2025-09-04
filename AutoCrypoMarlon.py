@@ -258,11 +258,13 @@ async def calculate_dynamic_slippage(pair_address):
     return slippage_bps
 
 async def discover_and_filter_pairs():
-    logger.info("--- FASE 1: DESCOBERTA --- Buscando os top 200 pares no GeckoTerminal...")
+    logger.info("--- FASE 1: DESCOBERTA --- Buscando os top 200 pares por valorização/hora no GeckoTerminal...")
     all_pools = []
     
+    # --- ALTERAÇÃO PRINCIPAL AQUI ---
+    # O parâmetro "sort" foi adicionado para buscar pelos que mais subiram na última hora
     for page in range(1, 11):
-        url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools?page={page}&include=base_token,quote_token"
+        url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools?page={page}&include=base_token,quote_token&sort=price_change_percentage_h1"
         try:
             async with httpx.AsyncClient() as client:
                 res = await client.get(url, timeout=20.0)
@@ -299,8 +301,10 @@ async def discover_and_filter_pairs():
             liquidity = float(attr.get('reserve_in_usd', 0))
             if liquidity < 200000: rejection_reasons.append(f"Liquidez Baixa (${liquidity:,.0f})")
 
+            # --- ALTERAÇÃO DO FILTRO DE VOLUME ---
             volume_24h = float(attr.get('volume_usd', {}).get('h24', 0))
-            if volume_24h < 1000000: rejection_reasons.append(f"Volume 24h Baixo (${volume_24h:,.0f})")
+            if volume_24h < 250000: # Reduzido de 1,000,000 para 250,000
+                rejection_reasons.append(f"Volume 24h Baixo (${volume_24h:,.0f})")
 
             age_str = attr.get('pool_created_at')
             if age_str:
@@ -309,7 +313,6 @@ async def discover_and_filter_pairs():
                 if age_hours < 2.0:
                     rejection_reasons.append(f"Muito Nova ({age_hours:.2f} horas)")
             
-            # --- NOVO FILTRO DE ATIVIDADE RECENTE ---
             volume_1h = float(attr.get('volume_usd', {}).get('h1', 0))
             if volume_1h < 50000:
                 rejection_reasons.append(f"Volume 1h Baixo (${volume_1h:,.0f})")
@@ -599,4 +602,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
