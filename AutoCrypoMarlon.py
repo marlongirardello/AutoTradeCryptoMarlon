@@ -233,13 +233,14 @@ async def is_pair_quotable_on_jupiter(pair_details):
     except Exception:
         return False
 
+# --- FUNÇÃO DE DESCOBERTA COM CORREÇÃO FINAL ---
 async def discover_and_filter_pairs():
     logger.info("--- FASE 1: DESCOBERTA --- Buscando os top 200 pares no GeckoTerminal...")
     all_pools = []
     
-    # --- LÓGICA CORRIGIDA PARA BUSCAR 200 PARES ---
-    for page in range(1, 3): # Loop de 2 páginas
-        url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools?page={page}&include=base_token,quote_token&per_page=100"
+    # Faz um loop por 10 páginas para buscar 200 resultados (20 por página é o padrão da API)
+    for page in range(1, 11): 
+        url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools?page={page}&include=base_token,quote_token"
         try:
             async with httpx.AsyncClient() as client:
                 res = await client.get(url, timeout=20.0)
@@ -454,7 +455,7 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v18.4 (Scanner Amplo Corrigido)**.\n\n'
+        'Olá! Sou seu bot **v18.5 (Scanner 200 Pares)**.\n\n'
         '**Dinâmica Autônoma:**\n'
         '1. Eu descubro e seleciono a melhor moeda dos **TOP 200 pares** para operar.\n'
         '2. Confirmo se a moeda é negociável na Jupiter.\n'
@@ -492,7 +493,7 @@ async def run_bot(update, context):
         await update.effective_message.reply_text("O bot já está em execução."); return
     bot_running = True
     logger.info("Bot de trade autônomo iniciado.")
-    await update.effective_message.reply_text("🚀 Modo de caça (Scanner Amplo) iniciado!")
+    await update.effective_message.reply_text("🚀 Modo de caça (Scanner 200 Pares) iniciado!")
     if periodic_task is None or periodic_task.done():
         periodic_task = asyncio.create_task(autonomous_loop())
 
