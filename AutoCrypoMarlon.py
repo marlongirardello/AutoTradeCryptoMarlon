@@ -39,7 +39,6 @@ def keep_alive():
 load_dotenv()
 
 # --- Configurações Iniciais ---
-BOT_VERSION = "v1.00.22.01 (Caçador Ativo Agressivo)"
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 PRIVATE_KEY_B58 = os.getenv("PRIVATE_KEY_BASE58")
@@ -246,26 +245,21 @@ async def is_pair_quotable_on_jupiter(pair_details):
     except Exception:
         return False
 
-# --- FUNÇÃO DE SLIPPAGE DINÂMICO ATUALIZADA ---
 async def calculate_dynamic_slippage(pair_address):
     logger.info(f"Calculando slippage dinâmico para {pair_address}...")
     df = await fetch_geckoterminal_ohlcv(pair_address, "1m", limit=5)
     if df is None or df.empty or len(df) < 5:
-        logger.warning("Dados insuficientes para slippage dinâmico. Usando padrão (6%).")
-        return 600
-
+        logger.warning("Dados insuficientes. Usando slippage padrão (0.75%).")
+        return 75
     price_range = df['high'].max() - df['low'].min()
     volatility = (price_range / df['low'].min()) * 100 if df['low'].min() > 0 else 0
-
-    if volatility > 1.5:
-        slippage_bps = 600 # 6% para mercado normal ou alto
-        logger.info(f"Volatilidade detectada ({volatility:.2f}%). Usando slippage de 6.0%.")
-    else:
-        slippage_bps = 500 # 5% para mercado calmo
-        logger.info(f"Baixa volatilidade detectada ({volatility:.2f}%). Usando slippage de 5.0%.")
-    
+    if volatility > 3.0: slippage_bps = 600
+    elif volatility > 1.5: slippage_bps = 600
+    else: slippage_bps = 500
+    logger.info(f"Volatilidade ({volatility:.2f}%). Slippage definido para {slippage_bps/100:.2f}%.")
     return slippage_bps
 
+# --- FUNÇÃO DE DESCOBERTA ATUALIZADA ---
 async def discover_and_filter_pairs():
     logger.info("--- FASE 1: DESCOBERTA --- Buscando os top 200 pares no GeckoTerminal...")
     all_pools = []
@@ -303,22 +297,22 @@ async def discover_and_filter_pairs():
             if not is_sol_pair: rejection_reasons.append("Não é par contra SOL")
             
             liquidity = float(attr.get('reserve_in_usd', 0))
-            if liquidity < 200000: rejection_reasons.append(f"Liquidez Baixa (${liquidity:,.0f})")
+            if liquidity < 50000: rejection_reasons.append(f"Liquidez Baixa (${liquidity:,.0f})")
 
             volume_24h = float(attr.get('volume_usd', {}).get('h24', 0))
-            if volume_24h < 1000000: rejection_reasons.append(f"Volume 24h Baixo (${volume_24h:,.0f})")
+            if volume_24h < 250000: rejection_reasons.append(f"Volume 24h Baixo (${volume_24h:,.0f})")
 
             age_str = attr.get('pool_created_at')
             if age_str:
                 age_dt = datetime.fromisoformat(age_str.replace('Z', '+00:00'))
                 age_hours = (datetime.now(timezone.utc) - age_dt).total_seconds() / 3600
-                if age_hours < 2.0:
-                    rejection_reasons.append(f"Muito Nova ({age_hours:.2f} horas)")
+                if age_hours < 0.5: rejection_reasons.append(f"Muito Nova ({age_hours:.2f} horas)")
             
+            # --- NOVO FILTRO DE ATIVIDADE NA ÚLTIMA HORA ---
             volume_1h = float(attr.get('volume_usd', {}).get('h1', 0))
             if volume_1h < 100000:
                 rejection_reasons.append(f"Volume 1h Baixo (${volume_1h:,.0f})")
-            
+
             if not rejection_reasons:
                 logger.info(f"✅ APROVADO (Fase 1): {symbol} | Vol 1h: ${volume_1h:,.0f}")
                 filtered_pairs[symbol] = address
@@ -390,34 +384,27 @@ async def find_best_coin_to_trade(candidate_pairs, penalized_pairs=set()):
         logger.warning("--- SELEÇÃO FINALIZADA --- Nenhuma moeda com oportunidade clara encontrada.")
     return best_coin_info
 
-async def check_pullback_strategy():
+async def check_velocity_strategy():
     global in_position, entry_price
     target_address = automation_state.get("current_target_pair_address")
     if not target_address or in_position: return
 
     pair_details = automation_state.get("current_target_pair_details")
-    data = await fetch_geckoterminal_ohlcv(target_address, parameters["timeframe"], limit=30)
-    if data is None or len(data) < 15: return
+    data = await fetch_geckoterminal_ohlcv(target_address, parameters["timeframe"], limit=2)
+    if data is None or len(data) < 2: return
 
-    data.ta.ema(length=5, append=True, col_names=('EMA_5',))
-    data.ta.ema(length=10, append=True, col_names=('EMA_10',))
-    data.dropna(inplace=True)
-    if len(data) < 2: return
+    last_closed_candle = data.iloc[0]
     
-    last_candle = data.iloc[-1]
-    
-    in_uptrend = last_candle['EMA_5'] > last_candle['EMA_10']
-    pullback_occured = last_candle['low'] <= last_candle['EMA_5']
-    is_green_candle = last_candle['close'] > last_candle['open']
+    price_change_pct = (last_closed_candle['close'] - last_closed_candle['open']) / last_closed_candle['open'] * 100 if last_closed_candle['open'] > 0 else 0
 
-    logger.info(f"Análise Compra ({pair_details['base_symbol']}): Tendência Alta (EMA5>10): {'✅' if in_uptrend else '❌'}, "
-                f"Pullback (Preço tocou EMA5): {'✅' if pullback_occured else '❌'}, "
-                f"Vela Verde: {'✅' if is_green_candle else '❌'}")
-    
-    if in_uptrend and pullback_occured and is_green_candle:
+    logger.info(f"Análise Compra ({pair_details['base_symbol']}): "
+                f"Variação Vela: {price_change_pct:+.2f}% (Meta: >2%)")
+
+    if price_change_pct > 2.0:
         price, _ = await fetch_dexscreener_real_time_price(target_address)
         if price:
-            await execute_buy_order(parameters["amount"], price, pair_details)
+            reason = f"Aceleração de Preço (+{price_change_pct:.2f}%)"
+            await execute_buy_order(parameters["amount"], price, pair_details, reason=reason)
 
 # --- Loop Principal Autônomo ---
 async def autonomous_loop():
@@ -467,7 +454,7 @@ async def autonomous_loop():
                         await send_telegram_message(f"🎯 **Novo Alvo:** {best_coin['symbol']}. Iniciando monitoramento...")
             
             if not in_position and automation_state.get("current_target_pair_address"):
-                await check_pullback_strategy()
+                await check_velocity_strategy()
                 await asyncio.sleep(30)
             elif in_position:
                 price, _ = await fetch_dexscreener_real_time_price(automation_state["current_target_pair_address"])
@@ -493,12 +480,12 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        f'Olá! Sou seu bot **{BOT_VERSION}**.\n\n'
+        'Olá! Sou seu bot **v20.1 (Filtro de Atividade)**.\n\n'
         '**Dinâmica Autônoma:**\n'
-        '1. Eu descubro (top 200) e filtro moedas por **atividade na última hora**.\n'
+        '1. Eu descubro os TOP 200 pares e aplico um **filtro de atividade na última hora**.\n'
         '2. A seleção usa um **Índice de Qualidade** para priorizar tendências saudáveis.\n'
-        '3. O slippage é **agressivo (5-6%)** e dinâmico.\n\n'
-        '**Estratégia:** Pullback na EMA 5.\n\n'
+        '3. Após fechar qualquer operação, eu imediatamente procuro uma nova oportunidade.\n\n'
+        '**Estratégia:** Velocidade Pura (+2% em 1 min).\n\n'
         '**Configure-me com `/set` e inicie com `/run`.**\n'
         '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%>`',
         parse_mode='Markdown'
@@ -535,7 +522,7 @@ async def run_bot(update, context):
         await update.effective_message.reply_text("O bot já está em execução."); return
     bot_running = True
     logger.info("Bot de trade autônomo iniciado.")
-    await update.effective_message.reply_text(f"🚀 Modo de caça {BOT_VERSION} iniciado!")
+    await update.effective_message.reply_text("🚀 Modo Caçador de Velocidade Pura (com Filtro de Atividade) iniciado!")
     if periodic_task is None or periodic_task.done():
         periodic_task = asyncio.create_task(autonomous_loop())
 
