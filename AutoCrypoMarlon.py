@@ -86,6 +86,43 @@ parameters = {
     "take_profit_percent": None,
 }
 
+# --- Funções para Taxa de Prioridade Dinâmica ---
+async def get_dynamic_priority_fee():
+    """Busca e retorna a taxa de prioridade dinânica recomendada (em micro-lamports)."""
+    # Use um RPC que suporte getRecentPrioritizationFees ou uma API como a da Helius
+    url = "https://mainnet.helius-rpc.com/" # Exemplo de RPC da Helius
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getRecentPrioritizationFees",
+                "params": [[]] # Array vazio para buscar a fee mais recente
+            }, timeout=10.0)
+            
+            response.raise_for_status()
+            fees_data = response.json().get('result', [])
+            
+            if not fees_data:
+                logger.warning("Não foi possível obter a taxa de prioridade. Usando padrão.")
+                return 1000 # Valor padrão em micro-lamports
+            
+            # Ordena e pega o percentil 99 para uma prioridade alta
+            fees = [item['prioritizationFee'] for item in fees_data]
+            fees.sort()
+            
+            if not fees:
+                return 1000
+                
+            p99_fee = fees[int(len(fees) * 0.99)]
+            
+            logger.info(f"Taxa de prioridade dinânica calculada: {p99_fee} micro-lamports/CU.")
+            return p99_fee
+
+    except Exception as e:
+        logger.error(f"Erro ao buscar taxa de prioridade: {e}. Usando valor padrão.")
+        return 1000 # Valor padrão em micro-lamports
+
 # --- Funções de Execução de Ordem ---
 async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, slippage_bps):
     logger.info(f"Iniciando swap de {amount} do token {input_mint_str} para {output_mint_str} com slippage de {slippage_bps} BPS")
@@ -98,7 +135,17 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
             quote_res.raise_for_status()
             quote_response = quote_res.json()
 
-            swap_payload = { "userPublicKey": str(payer.pubkey()), "quoteResponse": quote_response, "wrapAndUnwrapSol": True, "dynamicComputeUnitLimit": True }
+            # Adiciona a taxa de prioridade dinâmica
+            priority_fee = await get_dynamic_priority_fee()
+            
+            swap_payload = { 
+                "userPublicKey": str(payer.pubkey()), 
+                "quoteResponse": quote_response, 
+                "wrapAndUnwrapSol": True, 
+                "dynamicComputeUnitLimit": True,
+                "prioritizationFee": priority_fee
+            }
+            
             swap_url = "https://quote-api.jup.ag/v6/swap"
             swap_res = await client.post(swap_url, json=swap_payload, timeout=60.0)
             swap_res.raise_for_status()
