@@ -165,14 +165,6 @@ async def execute_sell_order(reason=""):
     
     pair_details = automation_state.get('current_target_pair_details', {})
     symbol = pair_details.get('base_symbol', 'TOKEN')
-    
-    # --- VERIFICAÇÃO DE SANIDADE ANTI-CRASH ---
-    if symbol == 'SOL' or pair_details.get('base_address') == 'So11111111111111111111111111111111111111112':
-        logger.error(f"ERRO DE LÓGICA GRAVE: O bot tentou vender o token SOL. Resetando o estado para evitar loop de erro.")
-        await send_telegram_message("⚠️ Erro de lógica detectado: Tentativa de venda do token SOL. Resetando o estado.")
-        in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0; automation_state["current_target_pair_address"] = None
-        return
-
     logger.info(f"EXECUTANDO ORDEM DE VENDA de {symbol}. Motivo: {reason}")
     try:
         token_mint_pubkey = Pubkey.from_string(pair_details['base_address'])
@@ -267,6 +259,7 @@ async def calculate_dynamic_slippage(pair_address):
     logger.info(f"Volatilidade ({volatility:.2f}%). Slippage definido para {slippage_bps/100:.2f}%.")
     return slippage_bps
 
+# --- FUNÇÃO DE DESCOBERTA ATUALIZADA ---
 async def discover_and_filter_pairs():
     logger.info("--- FASE 1: DESCOBERTA --- Buscando os top 200 pares no GeckoTerminal...")
     all_pools = []
@@ -315,12 +308,21 @@ async def discover_and_filter_pairs():
                 age_hours = (datetime.now(timezone.utc) - age_dt).total_seconds() / 3600
                 if age_hours < 0.5: rejection_reasons.append(f"Muito Nova ({age_hours:.2f} horas)")
             
+            # --- NOVO FILTRO DE ATIVIDADE NA ÚLTIMA HORA ---
+            volume_1h = float(attr.get('volume_usd', {}).get('h1', 0))
+            if volume_1h < 100000:
+                rejection_reasons.append(f"Volume 1h Baixo (${volume_1h:,.0f})")
+
             if not rejection_reasons:
+                logger.info(f"✅ APROVADO (Fase 1): {symbol} | Vol 1h: ${volume_1h:,.0f}")
                 filtered_pairs[symbol] = address
+            else:
+                logger.info(f"❌ DESCARTADO (Fase 1): {symbol} | Motivos: {', '.join(rejection_reasons)}")
+                
         except (ValueError, TypeError, KeyError, IndexError):
             continue
 
-    logger.info(f"Descoberta finalizada. {len(filtered_pairs)} pares passaram nos filtros.")
+    logger.info(f"Descoberta finalizada. {len(filtered_pairs)} pares passaram nos filtros iniciais.")
     return filtered_pairs
 
 async def analyze_and_score_coin(pair_address, symbol):
@@ -478,15 +480,14 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v22.1 (Anti-Crash e Notificações Robustas)**.\n\n'
+        'Olá! Sou seu bot **v20.1 (Filtro de Atividade)**.\n\n'
         '**Dinâmica Autônoma:**\n'
-        '1. Descubro moedas novas (>30 min) com filtros agressivos para "foguetes".\n'
-        '2. Lógica anti-crash e notificações mais robustas para evitar bloqueios.\n\n'
-        '**Estratégia (Velocidade Pura):**\n'
-        'Compro se o preço subir **+2% em 1 minuto**.\n\n'
-        '**Comandos:**\n'
-        '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%>`\n'
-        '`/run`, `/stop`, `/buy <valor>`, `/sell`',
+        '1. Eu descubro os TOP 200 pares e aplico um **filtro de atividade na última hora**.\n'
+        '2. A seleção usa um **Índice de Qualidade** para priorizar tendências saudáveis.\n'
+        '3. Após fechar qualquer operação, eu imediatamente procuro uma nova oportunidade.\n\n'
+        '**Estratégia:** Velocidade Pura (+2% em 1 min).\n\n'
+        '**Configure-me com `/set` e inicie com `/run`.**\n'
+        '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%>`',
         parse_mode='Markdown'
     )
 
@@ -521,7 +522,7 @@ async def run_bot(update, context):
         await update.effective_message.reply_text("O bot já está em execução."); return
     bot_running = True
     logger.info("Bot de trade autônomo iniciado.")
-    await update.effective_message.reply_text("🚀 Modo Caçador de Velocidade Pura iniciado!")
+    await update.effective_message.reply_text("🚀 Modo Caçador de Velocidade Pura (com Filtro de Atividade) iniciado!")
     if periodic_task is None or periodic_task.done():
         periodic_task = asyncio.create_task(autonomous_loop())
 
@@ -576,15 +577,16 @@ async def manual_sell(update, context):
     await update.effective_message.reply_text("Forçando venda manual da posição atual...")
     await execute_sell_order(reason="Venda Manual Forçada")
 
-# --- FUNÇÃO DE MENSAGEM ATUALIZADA ---
 async def send_telegram_message(message):
     if application:
         try:
             await application.bot.send_message(chat_id=CHAT_ID, text=message, parse_mode='Markdown')
         except telegram.error.RetryAfter as e:
-            logger.warning(f"Telegram flood control: aguardando {e.retry_after} segundos. A mensagem não foi enviada.")
+            logger.warning(f"Telegram flood control: aguardando {e.retry_after} segundos.")
+            await asyncio.sleep(e.retry_after)
+            await application.bot.send_message(chat_id=CHAT_ID, text=message, parse_mode='Markdown')
         except Exception as e:
-            logger.error(f"Erro desconhecido ao enviar mensagem para o Telegram: {e}")
+            logger.error(f"Erro ao enviar mensagem para o Telegram: {e}")
 
 def main():
     global application
