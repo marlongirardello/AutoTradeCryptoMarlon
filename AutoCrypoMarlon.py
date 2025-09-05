@@ -245,27 +245,18 @@ async def is_pair_quotable_on_jupiter(pair_details):
     except Exception:
         return False
 
-# --- FUNÇÃO DE SLIPPAGE DINÂMICO ATUALIZADA ---
 async def calculate_dynamic_slippage(pair_address):
     logger.info(f"Calculando slippage dinâmico para {pair_address}...")
     df = await fetch_geckoterminal_ohlcv(pair_address, "1m", limit=5)
     if df is None or df.empty or len(df) < 5:
-        logger.warning("Dados insuficientes para slippage dinâmico. Usando padrão (6%).")
-        return 600
-
+        logger.warning("Dados insuficientes. Usando slippage padrão (0.75%).")
+        return 75
     price_range = df['high'].max() - df['low'].min()
     volatility = (price_range / df['low'].min()) * 100 if df['low'].min() > 0 else 0
-
-    if volatility > 3.0:
-        slippage_bps = 700 # 7%
-        logger.info(f"Alta volatilidade detectada ({volatility:.2f}%). Usando slippage AGRESSIVO de 7.0%.")
-    elif volatility > 1.5:
-        slippage_bps = 600 # 6%
-        logger.info(f"Média volatilidade detectada ({volatility:.2f}%). Usando slippage PADRÃO de 6.0%.")
-    else:
-        slippage_bps = 500 # 5%
-        logger.info(f"Baixa volatilidade detectada ({volatility:.2f}%). Usando slippage ECONÔMICO de 5.0%.")
-    
+    if volatility > 3.0: slippage_bps = 150
+    elif volatility > 1.5: slippage_bps = 75
+    else: slippage_bps = 30
+    logger.info(f"Volatilidade ({volatility:.2f}%). Slippage definido para {slippage_bps/100:.2f}%.")
     return slippage_bps
 
 async def discover_and_filter_pairs():
@@ -305,17 +296,16 @@ async def discover_and_filter_pairs():
             if not is_sol_pair: rejection_reasons.append("Não é par contra SOL")
             
             liquidity = float(attr.get('reserve_in_usd', 0))
-            if liquidity < 200000: rejection_reasons.append(f"Liquidez Baixa (${liquidity:,.0f})")
+            if liquidity < 50000: rejection_reasons.append(f"Liquidez Baixa (${liquidity:,.0f})")
 
             volume_24h = float(attr.get('volume_usd', {}).get('h24', 0))
-            if volume_24h < 1000000: rejection_reasons.append(f"Volume 24h Baixo (${volume_24h:,.0f})")
+            if volume_24h < 250000: rejection_reasons.append(f"Volume 24h Baixo (${volume_24h:,.0f})")
 
             age_str = attr.get('pool_created_at')
             if age_str:
                 age_dt = datetime.fromisoformat(age_str.replace('Z', '+00:00'))
                 age_hours = (datetime.now(timezone.utc) - age_dt).total_seconds() / 3600
-                if age_hours < 2.0:
-                    rejection_reasons.append(f"Muito Nova ({age_hours:.2f} horas)")
+                if age_hours < 0.5: rejection_reasons.append(f"Muito Nova ({age_hours:.2f} horas)")
             
             if not rejection_reasons:
                 filtered_pairs[symbol] = address
@@ -384,35 +374,27 @@ async def find_best_coin_to_trade(candidate_pairs, penalized_pairs=set()):
         logger.warning("--- SELEÇÃO FINALIZADA --- Nenhuma moeda com oportunidade clara encontrada.")
     return best_coin_info
 
-# --- Estratégia ---
-async def check_pullback_strategy():
+async def check_velocity_strategy():
     global in_position, entry_price
     target_address = automation_state.get("current_target_pair_address")
     if not target_address or in_position: return
 
     pair_details = automation_state.get("current_target_pair_details")
-    data = await fetch_geckoterminal_ohlcv(target_address, parameters["timeframe"], limit=30)
-    if data is None or len(data) < 15: return
+    data = await fetch_geckoterminal_ohlcv(target_address, parameters["timeframe"], limit=2)
+    if data is None or len(data) < 2: return
 
-    data.ta.ema(length=5, append=True, col_names=('EMA_5',))
-    data.ta.ema(length=10, append=True, col_names=('EMA_10',))
-    data.dropna(inplace=True)
-    if len(data) < 2: return
+    last_closed_candle = data.iloc[0]
     
-    last_candle = data.iloc[-1]
-    
-    in_uptrend = last_candle['EMA_5'] > last_candle['EMA_10']
-    pullback_occured = last_candle['low'] <= last_candle['EMA_5']
-    is_green_candle = last_candle['close'] > last_candle['open']
+    price_change_pct = (last_closed_candle['close'] - last_closed_candle['open']) / last_closed_candle['open'] * 100 if last_closed_candle['open'] > 0 else 0
 
-    logger.info(f"Análise Compra ({pair_details['base_symbol']}): Tendência Alta (EMA5>10): {'✅' if in_uptrend else '❌'}, "
-                f"Pullback (Preço tocou EMA5): {'✅' if pullback_occured else '❌'}, "
-                f"Vela Verde: {'✅' if is_green_candle else '❌'}")
-    
-    if in_uptrend and pullback_occured and is_green_candle:
+    logger.info(f"Análise Compra ({pair_details['base_symbol']}): "
+                f"Variação Vela: {price_change_pct:+.2f}% (Meta: >2%)")
+
+    if price_change_pct > 2.0:
         price, _ = await fetch_dexscreener_real_time_price(target_address)
         if price:
-            await execute_buy_order(parameters["amount"], price, pair_details)
+            reason = f"Aceleração de Preço (+{price_change_pct:.2f}%)"
+            await execute_buy_order(parameters["amount"], price, pair_details, reason=reason)
 
 # --- Loop Principal Autônomo ---
 async def autonomous_loop():
@@ -440,165 +422,4 @@ async def autonomous_loop():
                 if automation_state["penalty_box"]:
                     logger.info(f"Gerenciando caixa de penalidade: {list(automation_state['penalty_box'].keys())}")
                     for addr in list(automation_state["penalty_box"].keys()):
-                        automation_state["penalty_box"][addr] -= 1
-                        if automation_state["penalty_box"][addr] <= 0:
-                            del automation_state["penalty_box"][addr]
-                            logger.info(f"Endereço {addr} removido da caixa de penalidade.")
-
-                discovered_pairs = await discover_and_filter_pairs()
-                automation_state["discovered_pairs"] = discovered_pairs
-                best_coin = await find_best_coin_to_trade(discovered_pairs, set(automation_state["penalty_box"].keys()))
-                automation_state["last_scan_timestamp"] = now
-                
-                if best_coin:
-                    if best_coin["pair_address"] != automation_state.get("current_target_pair_address"):
-                        if in_position: await execute_sell_order(reason=f"Trocando para {best_coin['symbol']}")
-                        automation_state.update(
-                            current_target_pair_address=best_coin["pair_address"],
-                            current_target_symbol=best_coin["symbol"],
-                            current_target_pair_details=best_coin["details"],
-                            target_selected_timestamp=now
-                        )
-                        await send_telegram_message(f"🎯 **Novo Alvo:** {best_coin['symbol']}. Iniciando monitoramento...")
-            
-            if not in_position and automation_state.get("current_target_pair_address"):
-                await check_pullback_strategy()
-                await asyncio.sleep(30)
-            elif in_position:
-                price, _ = await fetch_dexscreener_real_time_price(automation_state["current_target_pair_address"])
-                if price:
-                    profit = ((price - entry_price) / entry_price) * 100 if entry_price > 0 else 0
-                    logger.info(f"Posição Aberta ({automation_state['current_target_symbol']}): P/L: {profit:+.2f}%")
-                    take_profit_price = entry_price * (1 + parameters["take_profit_percent"] / 100)
-                    stop_loss_price = entry_price * (1 - parameters["stop_loss_percent"] / 100)
-                    if price >= take_profit_price: await execute_sell_order(f"Take Profit (+{parameters['take_profit_percent']}%)"); continue
-                    if price <= stop_loss_price: await execute_sell_order(f"Stop Loss (-{parameters['stop_loss_percent']}%)"); continue
-                    if time.time() - automation_state.get("position_opened_timestamp", 0) > 1800:
-                        reason = f"Timeout de 30 minutos (P/L: {profit:+.2f}%)"
-                        await execute_sell_order(reason); continue
-                await asyncio.sleep(15)
-            else:
-                await asyncio.sleep(60)
-
-        except asyncio.CancelledError:
-            logger.info("Loop autônomo cancelado."); break
-        except Exception as e:
-            logger.error(f"Erro crítico no loop autônomo: {e}", exc_info=True); await asyncio.sleep(60)
-
-# --- Comandos do Telegram ---
-async def start(update, context):
-    await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v19.3 (Slippage Agressivo)**.\n\n'
-        '**Dinâmica Autônoma:**\n'
-        'Eu descubro (top 200), seleciono e opero a melhor moeda com base na atividade dos últimos 15 minutos e na qualidade da sua tendência.\n\n'
-        '**Gerenciamento de Risco:**\n'
-        'Slippage dinâmico (5%-7%), timeouts de caça e de posição, e caixa de penalidade estão ativos.\n\n'
-        '**Comandos Principais e Manuais:**\n'
-        '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%>`\n'
-        '`/run`, `/stop`, `/buy <valor>`, `/sell`',
-        parse_mode='Markdown'
-    )
-
-async def set_params(update, context):
-    if bot_running:
-        await update.effective_message.reply_text("Pare o bot com /stop antes de alterar os parâmetros."); return
-    try:
-        amount, stop_loss, take_profit = float(context.args[0]), float(context.args[1]), float(context.args[2])
-        if stop_loss <= 0 or take_profit <= 0:
-            await update.effective_message.reply_text("⚠️ Stop Loss e Take Profit devem ser valores positivos."); return
-        parameters.update(amount=amount, stop_loss_percent=stop_loss, take_profit_percent=take_profit)
-        await update.effective_message.reply_text(
-            f"✅ *Parâmetros de Scalping definidos!*\n"
-            f"💰 *Valor por Ordem:* `{amount}` SOL\n"
-            f"🛑 *Stop Loss:* `-{stop_loss}%`\n"
-            f"🎯 *Take Profit:* `+{take_profit}%`\n\n"
-            "Agora use `/run` para iniciar.",
-            parse_mode='Markdown'
-        )
-    except (IndexError, ValueError):
-        await update.effective_message.reply_text("⚠️ *Formato incorreto.*\nUse: `/set <VALOR> <STOP> <PROFIT>`\nEx: `/set 0.1 1.5 2.5`", parse_mode='Markdown')
-
-async def run_bot(update, context):
-    global bot_running, periodic_task
-    if not all(p is not None for p in parameters.values()):
-        await update.effective_message.reply_text("Defina os parâmetros com /set primeiro."); return
-    if bot_running:
-        await update.effective_message.reply_text("O bot já está em execução."); return
-    bot_running = True
-    logger.info("Bot de trade autônomo iniciado.")
-    await update.effective_message.reply_text("🚀 Modo de caça autônoma iniciado!")
-    if periodic_task is None or periodic_task.done():
-        periodic_task = asyncio.create_task(autonomous_loop())
-
-async def stop_bot(update, context):
-    global bot_running, periodic_task
-    if not bot_running:
-        await update.effective_message.reply_text("O bot já está parado."); return
-    bot_running = False
-    if periodic_task:
-        periodic_task.cancel()
-        periodic_task = None
-    if in_position:
-        await execute_sell_order("Parada manual do bot")
-    automation_state.update(current_target_pair_address=None, current_target_symbol=None, last_scan_timestamp=0, position_opened_timestamp=0, target_selected_timestamp=0, penalty_box={})
-    logger.info("Bot de trade parado.")
-    await update.effective_message.reply_text("🛑 Bot parado. Todas as tarefas e posições foram finalizadas.")
-
-async def manual_buy(update, context):
-    if not bot_running:
-        await update.effective_message.reply_text("⚠️ O bot precisa de estar em execução. Use `/run` primeiro.")
-        return
-    if in_position:
-        await update.effective_message.reply_text("⚠️ Já existe uma posição aberta.")
-        return
-    if not automation_state.get("current_target_pair_address"):
-        await update.effective_message.reply_text("⚠️ O bot ainda não selecionou um alvo. Aguarde o ciclo de descoberta.")
-        return
-    try:
-        amount = float(context.args[0])
-        if amount <= 0:
-            await update.effective_message.reply_text("⚠️ O valor da compra deve ser positivo.")
-            return
-
-        pair_details = automation_state["current_target_pair_details"]
-        price, _ = await fetch_dexscreener_real_time_price(pair_details['pair_address'])
-        if price:
-            await update.effective_message.reply_text(f"Forçando compra manual de {amount} SOL em {pair_details['base_symbol']}...")
-            await execute_buy_order(amount, price, pair_details, manual=True)
-        else:
-            await update.effective_message.reply_text("⚠️ Não foi possível obter o preço atual para a compra.")
-            
-    except (IndexError, ValueError):
-        await update.effective_message.reply_text("⚠️ *Formato incorreto.* Use: `/buy <VALOR>`\nEx: `/buy 0.1`", parse_mode='Markdown')
-    except Exception as e:
-        logger.error(f"Erro no comando /buy: {e}")
-        await update.effective_message.reply_text(f"⚠️ Erro ao executar compra manual: {e}")
-        
-async def manual_sell(update, context):
-    if not in_position:
-        await update.effective_message.reply_text("⚠️ Nenhuma posição aberta para vender.")
-        return
-    await update.effective_message.reply_text("Forçando venda manual da posição atual...")
-    await execute_sell_order(reason="Venda Manual Forçada")
-
-async def send_telegram_message(message):
-    if application:
-        await application.bot.send_message(chat_id=CHAT_ID, text=message, parse_mode='Markdown')
-
-def main():
-    global application
-    keep_alive()
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
-
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("set", set_params))
-    application.add_handler(CommandHandler("run", run_bot))
-    application.add_handler(CommandHandler("stop", stop_bot))
-    application.add_handler(CommandHandler("buy", manual_buy))
-    application.add_handler(CommandHandler("sell", manual_sell))
-    
-    logger.info("Bot do Telegram iniciado e aguardando comandos...")
-    application.run_polling()
-
-if __name__ == '__main__':
-    main()
+                        automation_state["penalty_box"][addr] -=
