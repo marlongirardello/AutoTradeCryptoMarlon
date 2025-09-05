@@ -165,6 +165,14 @@ async def execute_sell_order(reason=""):
     
     pair_details = automation_state.get('current_target_pair_details', {})
     symbol = pair_details.get('base_symbol', 'TOKEN')
+    
+    # --- VERIFICAÇÃO DE SANIDADE ANTI-CRASH ---
+    if symbol == 'SOL' or pair_details.get('base_address') == 'So11111111111111111111111111111111111111112':
+        logger.error(f"ERRO DE LÓGICA GRAVE: O bot tentou vender o token SOL. Resetando o estado para evitar loop de erro.")
+        await send_telegram_message("⚠️ Erro de lógica detectado: Tentativa de venda do token SOL. Resetando o estado.")
+        in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0; automation_state["current_target_pair_address"] = None
+        return
+
     logger.info(f"EXECUTANDO ORDEM DE VENDA de {symbol}. Motivo: {reason}")
     try:
         token_mint_pubkey = Pubkey.from_string(pair_details['base_address'])
@@ -470,12 +478,12 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v21.2 (Velocidade Pura)**.\n\n'
+        'Olá! Sou seu bot **v22.1 (Anti-Crash e Notificações Robustas)**.\n\n'
         '**Dinâmica Autônoma:**\n'
         '1. Descubro moedas novas (>30 min) com filtros agressivos para "foguetes".\n'
-        '2. Seleciono o alvo com base na atividade dos últimos 15 minutos e na qualidade da sua tendência.\n\n'
-        '**Nova Estratégia (Velocidade Pura):**\n'
-        'Compro se o preço subir **+2% em 1 minuto**. Sem filtro de volume na entrada.\n\n'
+        '2. Lógica anti-crash e notificações mais robustas para evitar bloqueios.\n\n'
+        '**Estratégia (Velocidade Pura):**\n'
+        'Compro se o preço subir **+2% em 1 minuto**.\n\n'
         '**Comandos:**\n'
         '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%>`\n'
         '`/run`, `/stop`, `/buy <valor>`, `/sell`',
@@ -492,7 +500,7 @@ async def set_params(update, context):
         
         parameters.update(amount=amount, stop_loss_percent=stop_loss, take_profit_percent=take_profit)
         if "volume_multiplier" in parameters:
-            parameters["volume_multiplier"] = None # Garante que o parâmetro antigo seja limpo
+            parameters["volume_multiplier"] = None
 
         await update.effective_message.reply_text(
             f"✅ *Parâmetros definidos!*\n"
@@ -568,16 +576,15 @@ async def manual_sell(update, context):
     await update.effective_message.reply_text("Forçando venda manual da posição atual...")
     await execute_sell_order(reason="Venda Manual Forçada")
 
+# --- FUNÇÃO DE MENSAGEM ATUALIZADA ---
 async def send_telegram_message(message):
     if application:
         try:
             await application.bot.send_message(chat_id=CHAT_ID, text=message, parse_mode='Markdown')
         except telegram.error.RetryAfter as e:
-            logger.warning(f"Telegram flood control: aguardando {e.retry_after} segundos.")
-            await asyncio.sleep(e.retry_after)
-            await application.bot.send_message(chat_id=CHAT_ID, text=message, parse_mode='Markdown')
+            logger.warning(f"Telegram flood control: aguardando {e.retry_after} segundos. A mensagem não foi enviada.")
         except Exception as e:
-            logger.error(f"Erro ao enviar mensagem para o Telegram: {e}")
+            logger.error(f"Erro desconhecido ao enviar mensagem para o Telegram: {e}")
 
 def main():
     global application
