@@ -84,46 +84,9 @@ parameters = {
     "amount": None,
     "stop_loss_percent": None,
     "take_profit_percent": None,
+    "priority_fee": 5000  # Valor padrão de 5000 micro-lamports
 }
 
-# --- Funções para Taxa de Prioridade Dinâmica ---
-async def get_dynamic_priority_fee():
-    """Busca e retorna a taxa de prioridade dinânica recomendada (em micro-lamports), com um mínimo de 5000."""
-    url = RPC_URL
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.post(url, json={
-                "jsonrpc": "2.0",
-                "id": 1,
-                "method": "getRecentPrioritizationFees",
-                "params": [[]] 
-            }, timeout=10.0)
-            
-            response.raise_for_status()
-            fees_data = response.json().get('result', [])
-            
-            if not fees_data:
-                logger.warning("Não foi possível obter a taxa de prioridade. Usando padrão mínimo.")
-                return 5000 # Retorna um valor padrão de segurança
-            
-            fees = [item['prioritizationFee'] for item in fees_data]
-            fees.sort()
-            
-            if not fees:
-                return 7000
-                
-            p99_fee = fees[int(len(fees) * 0.99)]
-            
-            # Garante que a taxa de prioridade seja pelo menos 7000 micro-lamports
-            final_fee = max(p99_fee, 7000)
-            
-            logger.info(f"Taxa de prioridade dinâmica calculada: {p99_fee} micro-lamports/CU. Taxa final usada: {final_fee}")
-            return final_fee
-
-    except Exception as e:
-        logger.error(f"Erro ao buscar taxa de prioridade: {e}. Usando valor padrão mínimo.")
-        return 5000 # Retorna um valor padrão de segurança
-        
 # --- Funções de Execução de Ordem ---
 async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, slippage_bps):
     logger.info(f"Iniciando swap de {amount} do token {input_mint_str} para {output_mint_str} com slippage de {slippage_bps} BPS")
@@ -136,8 +99,8 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
             quote_res.raise_for_status()
             quote_response = quote_res.json()
 
-            # Adiciona a taxa de prioridade dinâmica
-            priority_fee = await get_dynamic_priority_fee()
+            # Usa a taxa de prioridade definida nos parâmetros
+            priority_fee = parameters.get("priority_fee")
             
             swap_payload = { 
                 "userPublicKey": str(payer.pubkey()), 
@@ -197,6 +160,7 @@ async def execute_buy_order(amount, price, pair_details, manual=False, reason="S
                        f"Entrada: {price:.10f} | Alvo: {price * (1 + parameters['take_profit_percent']/100):.10f} | "
                        f"Stop: {price * (1 - parameters['stop_loss_percent']/100):.10f}\n"
                        f"Slippage Usado: {slippage_bps/100:.2f}%\n"
+                       f"Taxa de Prioridade: {parameters.get('priority_fee')} micro-lamports\n"
                        f"https://solscan.io/tx/{tx_sig}")
         logger.info(log_message)
         await send_telegram_message(log_message)
@@ -229,7 +193,11 @@ async def execute_sell_order(reason=""):
         tx_sig = await execute_swap(pair_details['base_address'], pair_details['quote_address'], amount_to_sell, token_balance_data.decimals, slippage_bps)
         
         if tx_sig:
-            log_message = f"🛑 VENDA REALIZADA: {symbol}\nMotivo: {reason}\nSlippage Usado: {slippage_bps/100:.2f}%\nhttps://solscan.io/tx/{tx_sig}"
+            log_message = (f"🛑 VENDA REALIZADA: {symbol}\n"
+                           f"Motivo: {reason}\n"
+                           f"Slippage Usado: {slippage_bps/100:.2f}%\n"
+                           f"Taxa de Prioridade: {parameters.get('priority_fee')} micro-lamports\n"
+                           f"https://solscan.io/tx/{tx_sig}")
             logger.info(log_message)
             await send_telegram_message(log_message)
             in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0; automation_state["current_target_pair_address"] = None
@@ -543,11 +511,18 @@ async def set_params(update, context):
     if bot_running:
         await update.effective_message.reply_text("Pare o bot com /stop antes de alterar os parâmetros."); return
     try:
-        amount, stop_loss, take_profit = float(context.args[0]), float(context.args[1]), float(context.args[2])
+        # Pega os 3 ou 4 argumentos
+        args = context.args
+        amount, stop_loss, take_profit = float(args[0]), float(args[1]), float(args[2])
+        priority_fee = 5000 # Valor padrão
+
+        if len(args) > 3:
+            priority_fee = int(args[3])
+
         if stop_loss <= 0 or take_profit <= 0:
             await update.effective_message.reply_text("⚠️ Stop/Profit devem ser > 0."); return
         
-        parameters.update(amount=amount, stop_loss_percent=stop_loss, take_profit_percent=take_profit)
+        parameters.update(amount=amount, stop_loss_percent=stop_loss, take_profit_percent=take_profit, priority_fee=priority_fee)
         if "volume_multiplier" in parameters:
             parameters["volume_multiplier"] = None
 
@@ -555,12 +530,19 @@ async def set_params(update, context):
             f"✅ *Parâmetros definidos!*\n"
             f"💰 *Valor por Ordem:* `{amount}` SOL\n"
             f"🛑 *Stop Loss:* `-{stop_loss}%`\n"
-            f"🎯 *Take Profit:* `+{take_profit}%`\n\n"
+            f"🎯 *Take Profit:* `+{take_profit}%`\n"
+            f"⚡️ *Taxa de Prioridade:* `{priority_fee}` micro-lamports\n\n"
             "Agora use `/run` para iniciar.",
             parse_mode='Markdown'
         )
     except (IndexError, ValueError):
-        await update.effective_message.reply_text("⚠️ *Formato incorreto.*\nUse: `/set <VALOR> <STOP> <PROFIT>`\nEx: `/set 0.1 2.0 5.0`", parse_mode='Markdown')
+        await update.effective_message.reply_text(
+            "⚠️ *Formato incorreto.*\n"
+            "Use: `/set <VALOR> <STOP> <PROFIT> [TAXA_PRIORIDADE]`\n"
+            "Ex: `/set 0.1 2.0 5.0` (taxa padrão 5000)\n"
+            "Ex: `/set 0.1 2.0 5.0 15000` (taxa personalizada)\n", 
+            parse_mode='Markdown'
+        )
 
 async def run_bot(update, context):
     global bot_running, periodic_task
@@ -653,6 +635,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
-
