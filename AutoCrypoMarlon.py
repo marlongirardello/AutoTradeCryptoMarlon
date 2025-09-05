@@ -110,11 +110,11 @@ async def get_dynamic_priority_fee():
             fees.sort()
             
             if not fees:
-                return 5000
+                return 7000
                 
             p99_fee = fees[int(len(fees) * 0.99)]
             
-            # Garante que a taxa de prioridade seja pelo menos 5000 micro-lamports
+            # Garante que a taxa de prioridade seja pelo menos 7000 micro-lamports
             final_fee = max(p99_fee, 7000)
             
             logger.info(f"Taxa de prioridade dinâmica calculada: {p99_fee} micro-lamports/CU. Taxa final usada: {final_fee}")
@@ -653,5 +653,6 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
