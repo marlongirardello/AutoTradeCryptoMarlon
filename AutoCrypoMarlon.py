@@ -88,8 +88,7 @@ parameters = {
 
 # --- Funções para Taxa de Prioridade Dinâmica ---
 async def get_dynamic_priority_fee():
-    """Busca e retorna a taxa de prioridade dinânica recomendada (em micro-lamports)."""
-    # Use um RPC que suporte getRecentPrioritizationFees ou uma API como a da Helius
+    """Busca e retorna a taxa de prioridade dinânica recomendada (em micro-lamports), com um mínimo de 5000."""
     url = RPC_URL
     try:
         async with httpx.AsyncClient() as client:
@@ -97,32 +96,34 @@ async def get_dynamic_priority_fee():
                 "jsonrpc": "2.0",
                 "id": 1,
                 "method": "getRecentPrioritizationFees",
-                "params": [[]] # Array vazio para buscar a fee mais recente
+                "params": [[]] 
             }, timeout=10.0)
             
             response.raise_for_status()
             fees_data = response.json().get('result', [])
             
             if not fees_data:
-                logger.warning("Não foi possível obter a taxa de prioridade. Usando padrão.")
-                return 1000 # Valor padrão em micro-lamports
+                logger.warning("Não foi possível obter a taxa de prioridade. Usando padrão mínimo.")
+                return 5000 # Retorna um valor padrão de segurança
             
-            # Ordena e pega o percentil 99 para uma prioridade alta
             fees = [item['prioritizationFee'] for item in fees_data]
             fees.sort()
             
             if not fees:
-                return 1000
+                return 5000
                 
             p99_fee = fees[int(len(fees) * 0.99)]
             
-            logger.info(f"Taxa de prioridade dinânica calculada: {p99_fee} micro-lamports/CU.")
-            return p99_fee
+            # Garante que a taxa de prioridade seja pelo menos 5000 micro-lamports
+            final_fee = max(p99_fee, 7000)
+            
+            logger.info(f"Taxa de prioridade dinâmica calculada: {p99_fee} micro-lamports/CU. Taxa final usada: {final_fee}")
+            return final_fee
 
     except Exception as e:
-        logger.error(f"Erro ao buscar taxa de prioridade: {e}. Usando valor padrão.")
-        return 1000 # Valor padrão em micro-lamports
-
+        logger.error(f"Erro ao buscar taxa de prioridade: {e}. Usando valor padrão mínimo.")
+        return 5000 # Retorna um valor padrão de segurança
+        
 # --- Funções de Execução de Ordem ---
 async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, slippage_bps):
     logger.info(f"Iniciando swap de {amount} do token {input_mint_str} para {output_mint_str} com slippage de {slippage_bps} BPS")
@@ -652,4 +653,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
