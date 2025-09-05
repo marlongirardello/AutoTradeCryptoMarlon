@@ -90,7 +90,7 @@ parameters = {
 async def get_dynamic_priority_fee():
     """Busca e retorna a taxa de prioridade dinânica recomendada (em micro-lamports)."""
     # Use um RPC que suporte getRecentPrioritizationFees ou uma API como a da Helius
-    url = "https://mainnet.helius-rpc.com/" # Exemplo de RPC da Helius
+    url = RPC_URL
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(url, json={
@@ -652,3 +652,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
