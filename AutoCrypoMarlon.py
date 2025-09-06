@@ -65,7 +65,7 @@ in_position = False
 entry_price = 0.0
 periodic_task = None
 application = None
-sell_fail_count = 0  # Novo contador de falhas
+sell_fail_count = 0
 
 automation_state = {
     "current_target_pair_address": None,
@@ -85,7 +85,7 @@ parameters = {
     "amount": None,
     "stop_loss_percent": None,
     "take_profit_percent": None,
-    "priority_fee": 5000  # Valor padrão de 5000 micro-lamports
+    "priority_fee": 5000
 }
 
 # --- Funções de Execução de Ordem ---
@@ -155,7 +155,7 @@ async def execute_buy_order(amount, price, pair_details, manual=False, reason="S
         in_position = True
         entry_price = price
         automation_state["position_opened_timestamp"] = time.time()
-        sell_fail_count = 0  # Reseta o contador de falhas na compra bem-sucedida
+        sell_fail_count = 0
         log_message = (f"✅ COMPRA REALIZADA: {amount} SOL para {pair_details['base_symbol']}\n"
                        f"Motivo: {reason}\n"
                        f"Entrada: {price:.10f} | Alvo: {price * (1 + parameters['take_profit_percent']/100):.10f} | "
@@ -217,7 +217,7 @@ async def execute_sell_order(reason=""):
             logger.info(log_message)
             await send_telegram_message(log_message)
             in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0; automation_state["current_target_pair_address"] = None
-            sell_fail_count = 0  # Reseta o contador em caso de sucesso
+            sell_fail_count = 0
         else:
             logger.error(f"FALHA NA VENDA do token {symbol}. O bot permanecerá em posição e tentará vender novamente.")
             sell_fail_count += 1
@@ -511,12 +511,16 @@ async def autonomous_loop():
                     stop_loss_price = entry_price * (1 - parameters["stop_loss_percent"] / 100)
                     if price >= take_profit_price: await execute_sell_order(f"Take Profit (+{parameters['take_profit_percent']}%)"); continue
                     if price <= stop_loss_price: await execute_sell_order(f"Stop Loss (-{parameters['stop_loss_percent']}%)"); continue
-                    if time.time() - automation_state.get("position_opened_timestamp", 0) > 3600: # 60 minutos = 3600 segundos
+                    if time.time() - automation_state.get("position_opened_timestamp", 0) > 3600:
                         reason = f"Timeout de 60 minutos (P/L: {profit:+.2f}%)"
                         await execute_sell_order(reason); continue
                 await asyncio.sleep(15)
             else:
                 await asyncio.sleep(60)
+        except asyncio.CancelledError:
+            logger.info("Loop autônomo cancelado."); break
+        except Exception as e:
+            logger.error(f"Erro crítico no loop autônomo: {e}", exc_info=True); await asyncio.sleep(60)
 
 # --- Comandos do Telegram ---
 async def start(update, context):
@@ -536,10 +540,9 @@ async def set_params(update, context):
     if bot_running:
         await update.effective_message.reply_text("Pare o bot com /stop antes de alterar os parâmetros."); return
     try:
-        # Pega os 3 ou 4 argumentos
         args = context.args
         amount, stop_loss, take_profit = float(args[0]), float(args[1]), float(args[2])
-        priority_fee = 5000 # Valor padrão
+        priority_fee = 5000
 
         if len(args) > 3:
             priority_fee = int(args[3])
@@ -644,9 +647,7 @@ async def send_telegram_message(message):
             logger.error(f"Erro ao enviar mensagem para o Telegram: {e}")
 
 def main():
-    print("Versão 20.1 - OK")
     global application
-    # ... o resto do seu código
     keep_alive()
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
@@ -658,12 +659,7 @@ def main():
     application.add_handler(CommandHandler("sell", manual_sell))
     
     logger.info("Bot do Telegram iniciado e aguardando comandos...")
-    
-    try:
-        application.run_polling()
-    except Exception as e:
-        logger.error(f"Erro ao iniciar o bot do Telegram: {e}")
+    application.run_polling()
 
 if __name__ == '__main__':
     main()
-
