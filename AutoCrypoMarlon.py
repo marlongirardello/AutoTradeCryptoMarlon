@@ -131,11 +131,15 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
             
             confirmation = solana_client.confirm_transaction(tx_signature, commitment="confirmed")
             
-            # Verificação de tipo de dado e status de erro
+            # Verificação aprimorada para evitar o erro 'list' object has no attribute 'err'
             if confirmation and hasattr(confirmation, 'value') and confirmation.value and confirmation.value.err:
                 logger.error(f"Transação {tx_signature} falhou na blockchain: {confirmation.value.err}")
                 await send_telegram_message(f"⚠️ Transação {tx_signature} falhou na blockchain: {confirmation.value.err}"); return None
             
+            if not confirmation:
+                logger.error(f"Falha ao obter confirmação para a transação {tx_signature}.")
+                await send_telegram_message(f"⚠️ Falha ao obter confirmação para a transação {tx_signature}."); return None
+
             logger.info(f"Transação confirmada: https://solscan.io/tx/{tx_signature}")
             return str(tx_signature)
         except Exception as e:
