@@ -129,9 +129,10 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
             logger.info(f"Transação enviada: {tx_signature}")
             await asyncio.sleep(12)
             
-            # Nova lógica de validação: espera a confirmação e verifica o status da transação
             confirmation = solana_client.confirm_transaction(tx_signature, commitment="confirmed")
-            if confirmation.value.err:
+            
+            # Verificação de tipo de dado e status de erro
+            if confirmation and hasattr(confirmation, 'value') and confirmation.value and confirmation.value.err:
                 logger.error(f"Transação {tx_signature} falhou na blockchain: {confirmation.value.err}")
                 await send_telegram_message(f"⚠️ Transação {tx_signature} falhou na blockchain: {confirmation.value.err}"); return None
             
