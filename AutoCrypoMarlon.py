@@ -511,17 +511,12 @@ async def autonomous_loop():
                     stop_loss_price = entry_price * (1 - parameters["stop_loss_percent"] / 100)
                     if price >= take_profit_price: await execute_sell_order(f"Take Profit (+{parameters['take_profit_percent']}%)"); continue
                     if price <= stop_loss_price: await execute_sell_order(f"Stop Loss (-{parameters['stop_loss_percent']}%)"); continue
-                    if time.time() - automation_state.get("position_opened_timestamp", 0) > 1800:
-                        reason = f"Timeout de 30 minutos (P/L: {profit:+.2f}%)"
+                    if time.time() - automation_state.get("position_opened_timestamp", 0) > 3600: # 60 minutos = 3600 segundos
+                        reason = f"Timeout de 60 minutos (P/L: {profit:+.2f}%)"
                         await execute_sell_order(reason); continue
                 await asyncio.sleep(15)
             else:
                 await asyncio.sleep(60)
-
-        except asyncio.CancelledError:
-            logger.info("Loop autônomo cancelado."); break
-        except Exception as e:
-            logger.error(f"Erro crítico no loop autônomo: {e}", exc_info=True); await asyncio.sleep(60)
 
 # --- Comandos do Telegram ---
 async def start(update, context):
@@ -533,7 +528,7 @@ async def start(update, context):
         '3. Após fechar qualquer operação, eu imediatamente procuro uma nova oportunidade.\n\n'
         '**Estratégia:** Velocidade Pura (+2% em 1 min).\n\n'
         '**Configure-me com `/set` e inicie com `/run`.**\n'
-        '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%>`',
+        '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%> [TAXA_PRIORIDADE]`',
         parse_mode='Markdown'
     )
 
