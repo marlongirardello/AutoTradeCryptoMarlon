@@ -65,6 +65,7 @@ in_position = False
 entry_price = 0.0
 periodic_task = None
 application = None
+sell_fail_count = 0  # Novo contador de falhas
 
 automation_state = {
     "current_target_pair_address": None,
@@ -99,7 +100,6 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
             quote_res.raise_for_status()
             quote_response = quote_res.json()
 
-            # Usa a taxa de prioridade definida nos parâmetros
             priority_fee = parameters.get("priority_fee")
             
             swap_payload = { 
@@ -135,7 +135,7 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
             logger.error(f"Falha na transação: {e}"); await send_telegram_message(f"⚠️ Falha na transação: {e}"); return None
 
 async def execute_buy_order(amount, price, pair_details, manual=False, reason="Sinal da Estratégia"):
-    global in_position, entry_price
+    global in_position, entry_price, sell_fail_count
     if in_position: return
 
     if not manual:
@@ -155,6 +155,7 @@ async def execute_buy_order(amount, price, pair_details, manual=False, reason="S
         in_position = True
         entry_price = price
         automation_state["position_opened_timestamp"] = time.time()
+        sell_fail_count = 0  # Reseta o contador de falhas na compra bem-sucedida
         log_message = (f"✅ COMPRA REALIZADA: {amount} SOL para {pair_details['base_symbol']}\n"
                        f"Motivo: {reason}\n"
                        f"Entrada: {price:.10f} | Alvo: {price * (1 + parameters['take_profit_percent']/100):.10f} | "
@@ -172,7 +173,7 @@ async def execute_buy_order(amount, price, pair_details, manual=False, reason="S
             automation_state["current_target_pair_address"] = None
 
 async def execute_sell_order(reason=""):
-    global in_position, entry_price
+    global in_position, entry_price, sell_fail_count
     if not in_position: return
     
     pair_details = automation_state.get('current_target_pair_details', {})
@@ -181,12 +182,27 @@ async def execute_sell_order(reason=""):
     try:
         token_mint_pubkey = Pubkey.from_string(pair_details['base_address'])
         ata_address = get_associated_token_address(payer.pubkey(), token_mint_pubkey)
+        
         balance_response = solana_client.get_token_account_balance(ata_address)
-        token_balance_data = balance_response.value
+
+        if hasattr(balance_response, 'value'):
+            token_balance_data = balance_response.value
+        else:
+            logger.error(f"Erro ao obter saldo do token {symbol}: Resposta RPC inválida.")
+            sell_fail_count += 1
+            if sell_fail_count >= 10:
+                logger.error("ATINGIDO LIMITE DE FALHAS DE VENDA. RESETANDO POSIÇÃO.")
+                await send_telegram_message(f"⚠️ Limite de 10 falhas de venda para **{symbol}** atingido. Posição abandonada para evitar loop.")
+                in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0; automation_state["current_target_pair_address"] = None
+                sell_fail_count = 0
+            await send_telegram_message(f"⚠️ Erro ao obter saldo do token {symbol}. A venda falhou. Tentativa {sell_fail_count}/10. O bot permanecerá em posição.")
+            return
+
         amount_to_sell = token_balance_data.ui_amount
         if amount_to_sell is None or amount_to_sell == 0:
             logger.warning("Tentativa de venda com saldo zero, resetando posição.")
             in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0; automation_state["current_target_pair_address"] = None
+            sell_fail_count = 0
             return
 
         slippage_bps = await calculate_dynamic_slippage(pair_details['pair_address'])
@@ -201,12 +217,26 @@ async def execute_sell_order(reason=""):
             logger.info(log_message)
             await send_telegram_message(log_message)
             in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0; automation_state["current_target_pair_address"] = None
+            sell_fail_count = 0  # Reseta o contador em caso de sucesso
         else:
             logger.error(f"FALHA NA VENDA do token {symbol}. O bot permanecerá em posição e tentará vender novamente.")
-            await send_telegram_message(f"❌ FALHA NA VENDA do token {symbol}. O bot tentará novamente.")
+            sell_fail_count += 1
+            if sell_fail_count >= 10:
+                logger.error("ATINGIDO LIMITE DE FALHAS DE VENDA. RESETANDO POSIÇÃO.")
+                await send_telegram_message(f"⚠️ Limite de 10 falhas de venda para **{symbol}** atingido. Posição abandonada para evitar loop.")
+                in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0; automation_state["current_target_pair_address"] = None
+                sell_fail_count = 0
+            await send_telegram_message(f"❌ FALHA NA VENDA do token {symbol}. Tentativa {sell_fail_count}/10. O bot tentará novamente.")
+
     except Exception as e:
         logger.error(f"Erro crítico ao vender {symbol}: {e}")
-        await send_telegram_message(f"⚠️ Erro crítico ao vender {symbol}: {e}. O bot permanecerá em posição.")
+        sell_fail_count += 1
+        if sell_fail_count >= 10:
+            logger.error("ATINGIDO LIMITE DE FALHAS DE VENDA. RESETANDO POSIÇÃO.")
+            await send_telegram_message(f"⚠️ Limite de 10 falhas de venda para **{symbol}** atingido. Posição abandonada para evitar loop.")
+            in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0; automation_state["current_target_pair_address"] = None
+            sell_fail_count = 0
+        await send_telegram_message(f"⚠️ Erro crítico ao vender {symbol}: {e}. Tentativa {sell_fail_count}/10. O bot permanecerá em posição.")
 
 # --- Funções de Análise e Descoberta ---
 async def fetch_geckoterminal_ohlcv(pair_address, timeframe, limit=60):
