@@ -644,7 +644,9 @@ async def send_telegram_message(message):
             logger.error(f"Erro ao enviar mensagem para o Telegram: {e}")
 
 def main():
+    print("Versão 20.1 - OK")
     global application
+    # ... o resto do seu código
     keep_alive()
     application = Application.builder().token(TELEGRAM_TOKEN).build()
 
@@ -664,3 +666,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
