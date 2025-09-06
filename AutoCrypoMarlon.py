@@ -129,6 +129,7 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
             logger.info(f"Transação enviada: {tx_signature}")
             await asyncio.sleep(12)
             
+            # Nova lógica de validação: espera a confirmação e verifica o status da transação
             confirmation = solana_client.confirm_transaction(tx_signature, commitment="confirmed")
             
             # Verificação aprimorada para evitar o erro 'list' object has no attribute 'err'
@@ -136,7 +137,7 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
                 logger.error(f"Transação {tx_signature} falhou na blockchain: {confirmation.value.err}")
                 await send_telegram_message(f"⚠️ Transação {tx_signature} falhou na blockchain: {confirmation.value.err}"); return None
             
-            if not confirmation:
+            if not confirmation or not hasattr(confirmation, 'value') or not confirmation.value:
                 logger.error(f"Falha ao obter confirmação para a transação {tx_signature}.")
                 await send_telegram_message(f"⚠️ Falha ao obter confirmação para a transação {tx_signature}."); return None
 
@@ -218,7 +219,7 @@ async def execute_sell_order(reason=""):
     
     for i in range(100):
         try:
-            logger.info(f"EXECUTANDO ORDEM DE VENDA de {symbol}. Motivo: {reason}. Tentativa {i + 1}/100.")
+            logger.info(f"EXECUTANDO ORDEM DE VENDA de {symbol}. Motivação: {reason}. Tentativa {i + 1}/100.")
 
             token_mint_pubkey = Pubkey.from_string(pair_details['base_address'])
             ata_address = get_associated_token_address(payer.pubkey(), token_mint_pubkey)
@@ -241,7 +242,7 @@ async def execute_sell_order(reason=""):
             
             if tx_sig:
                 log_message = (f"🛑 VENDA REALIZADA: {symbol}\n"
-                               f"Motivo: {reason}\n"
+                               f"Motivação: {reason}\n"
                                f"Slippage Usado: {slippage_bps/100:.2f}%\n"
                                f"Taxa de Prioridade Final: {current_priority_fee} micro-lamports\n"
                                f"https://solscan.io/tx/{tx_sig}")
