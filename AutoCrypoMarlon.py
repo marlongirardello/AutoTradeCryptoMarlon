@@ -127,21 +127,26 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
             tx_signature = solana_client.send_raw_transaction(bytes(signed_tx), opts=tx_opts).value
             
             logger.info(f"Transação enviada: {tx_signature}")
-            await asyncio.sleep(20) # Aumentado o tempo de espera para 20 segundos
             
-            try:
-                confirmation = solana_client.confirm_transaction(tx_signature, commitment="confirmed")
-                if confirmation and hasattr(confirmation, 'value') and confirmation.value and confirmation.value.err:
-                    logger.error(f"Transação {tx_signature} falhou na blockchain: {confirmation.value.err}")
-                    await send_telegram_message(f"⚠️ Transação {tx_signature} falhou na blockchain: {confirmation.value.err}"); return None
-                
-                # Se a confirmação for bem-sucedida, o código continua. Se não, o erro é capturado pelo except.
-                logger.info(f"Transação confirmada: https://solscan.io/tx/{tx_signature}")
-                return str(tx_signature)
-            except Exception as e:
-                logger.error(f"Falha ao obter confirmação para a transação {tx_signature}: {e}")
-                await send_telegram_message(f"⚠️ Falha ao obter confirmação para a transação {tx_signature}: {e}"); return None
+            # Nova lógica de confirmação mais robusta
+            start_time = time.time()
+            timeout_seconds = 30 # Tempo limite total para confirmação
+            while time.time() - start_time < timeout_seconds:
+                try:
+                    confirmation = solana_client.confirm_transaction(tx_signature, commitment="confirmed")
+                    if confirmation and hasattr(confirmation, 'value') and confirmation.value and not confirmation.value.err:
+                        logger.info(f"Transação confirmada: https://solscan.io/tx/{tx_signature}")
+                        return str(tx_signature)
+                    elif confirmation and hasattr(confirmation, 'value') and confirmation.value and confirmation.value.err:
+                        logger.error(f"Transação {tx_signature} falhou na blockchain: {confirmation.value.err}")
+                        await send_telegram_message(f"⚠️ Transação {tx_signature} falhou na blockchain: {confirmation.value.err}"); return None
+                except Exception as e:
+                    logger.warning(f"Tentativa de confirmação falhou. Retentando em 2 segundos... Erro: {e}")
+                    await asyncio.sleep(2) # Espera 2 segundos antes de tentar novamente
 
+            logger.error(f"Tempo limite de confirmação de {timeout_seconds}s atingido para a transação {tx_signature}.")
+            await send_telegram_message(f"⚠️ Tempo limite de confirmação de {timeout_seconds}s atingido para a transação {tx_signature}."); return None
+        
         except Exception as e:
             logger.error(f"Falha na transação: {e}"); await send_telegram_message(f"⚠️ Falha na transação: {e}"); return None
 
@@ -161,16 +166,8 @@ async def execute_buy_order(amount, price, pair_details, manual=False, reason="S
 
     slippage_bps = await calculate_dynamic_slippage(pair_details['pair_address'])
     
-    token_mint_pubkey = Pubkey.from_string(pair_details['base_address'])
-    ata_address = get_associated_token_address(payer.pubkey(), token_mint_pubkey)
-    try:
-        ata_info = solana_client.get_account_info(ata_address)
-        if ata_info.value:
-            logger.info(f"ATA para {pair_details['base_symbol']} já existe. Prosseguindo com o swap.")
-        else:
-            logger.info(f"ATA para {pair_details['base_symbol']} não existe. A API da Jupiter criará a conta.")
-    except Exception as e:
-        logger.warning(f"Erro ao verificar ATA: {e}. A API da Jupiter lidará com isso.")
+    # Lógica de ATA removida, pois a API da Jupiter v6 lida com isso.
+    # O código agora é mais simples e confiável.
 
     for i in range(10):
         current_priority_fee = parameters.get("priority_fee") + (i * 2000)
