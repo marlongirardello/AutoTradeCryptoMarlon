@@ -129,17 +129,15 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
             logger.info(f"Transação enviada: {tx_signature}")
             await asyncio.sleep(12)
             
-            # Nova lógica de validação: espera a confirmação e verifica o status da transação
-            confirmation = solana_client.confirm_transaction(tx_signature, commitment="confirmed")
-            
-            # Verificação aprimorada para evitar o erro 'list' object has no attribute 'err'
-            if confirmation and hasattr(confirmation, 'value') and confirmation.value and confirmation.value.err:
-                logger.error(f"Transação {tx_signature} falhou na blockchain: {confirmation.value.err}")
-                await send_telegram_message(f"⚠️ Transação {tx_signature} falhou na blockchain: {confirmation.value.err}"); return None
-            
-            if not confirmation or not hasattr(confirmation, 'value') or not confirmation.value:
-                logger.error(f"Falha ao obter confirmação para a transação {tx_signature}.")
-                await send_telegram_message(f"⚠️ Falha ao obter confirmação para a transação {tx_signature}."); return None
+            # Novo bloco try-except para lidar com a confirmação da transação de forma mais segura
+            try:
+                confirmation = solana_client.confirm_transaction(tx_signature, commitment="confirmed")
+                if confirmation.value.err:
+                    logger.error(f"Transação {tx_signature} falhou na blockchain: {confirmation.value.err}")
+                    await send_telegram_message(f"⚠️ Transação {tx_signature} falhou na blockchain: {confirmation.value.err}"); return None
+            except Exception as e:
+                logger.error(f"Falha ao obter confirmação para a transação {tx_signature}: {e}")
+                await send_telegram_message(f"⚠️ Falha ao obter confirmação para a transação {tx_signature}: {e}"); return None
 
             logger.info(f"Transação confirmada: https://solscan.io/tx/{tx_signature}")
             return str(tx_signature)
