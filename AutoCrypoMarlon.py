@@ -656,7 +656,13 @@ def main():
     application.add_handler(CommandHandler("sell", manual_sell))
     
     logger.info("Bot do Telegram iniciado e aguardando comandos...")
-    application.run_polling()
+    
+    # Adicione um bloco try...except para lidar com possíveis erros
+    try:
+        application.run_polling()
+    except Exception as e:
+        logger.error(f"Erro ao iniciar o bot do Telegram: {e}")
 
 if __name__ == '__main__':
     main()
+
