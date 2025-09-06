@@ -150,8 +150,20 @@ async def execute_buy_order(amount, price, pair_details, manual=False, reason="S
 
     slippage_bps = await calculate_dynamic_slippage(pair_details['pair_address'])
     
-    for _ in range(10):
-        current_priority_fee = parameters.get("priority_fee") + (buy_fail_count * 2000)
+    # Nova verificação da conta de token associada (ATA)
+    token_mint_pubkey = Pubkey.from_string(pair_details['base_address'])
+    ata_address = get_associated_token_address(payer.pubkey(), token_mint_pubkey)
+    try:
+        ata_info = solana_client.get_account_info(ata_address)
+        if ata_info.value:
+            logger.info(f"ATA para {pair_details['base_symbol']} já existe. Prosseguindo com o swap.")
+        else:
+            logger.info(f"ATA para {pair_details['base_symbol']} não existe. A API da Jupiter criará a conta.")
+    except Exception as e:
+        logger.warning(f"Erro ao verificar ATA: {e}. A API da Jupiter lidará com isso.")
+
+    for i in range(10): # Ajustado para 10 tentativas
+        current_priority_fee = parameters.get("priority_fee") + (i * 2000)
         logger.info(f"EXECUTANDO ORDEM DE COMPRA de {amount} SOL para {pair_details['base_symbol']} ao preço de {price} com taxa de prioridade: {current_priority_fee}")
         
         tx_sig = await execute_swap(pair_details['quote_address'], pair_details['base_address'], amount, 9, slippage_bps, current_priority_fee)
@@ -174,10 +186,11 @@ async def execute_buy_order(amount, price, pair_details, manual=False, reason="S
             return
         else:
             buy_fail_count += 1
-            logger.error(f"FALHA NA EXECUÇÃO da compra para {pair_details['base_symbol']}. Tentativa {buy_fail_count}/10.")
-            await send_telegram_message(f"❌ FALHA NA EXECUÇÃO da compra para **{pair_details['base_symbol']}**. Tentativa {buy_fail_count}/10.")
-            await asyncio.sleep(1)
-
+            if buy_fail_count < 10:
+                logger.error(f"FALHA NA EXECUÇÃO da compra para {pair_details['base_symbol']}. Tentativa {buy_fail_count}/10. O bot tentará novamente.")
+                await send_telegram_message(f"❌ FALHA NA EXECUÇÃO da compra para **{pair_details['base_symbol']}**. Tentativa {buy_fail_count}/10. O bot tentará novamente.")
+                await asyncio.sleep(1)
+    
     logger.error("ATINGIDO LIMITE DE FALHAS DE COMPRA. ABANDONANDO E PENALIZANDO.")
     await send_telegram_message(f"❌ Limite de 10 falhas de compra para **{pair_details['base_symbol']}** atingido. Moeda será penalizada.")
     if automation_state.get("current_target_pair_address"):
@@ -535,12 +548,10 @@ async def autonomous_loop():
                     if price >= take_profit_price: await execute_sell_order(f"Take Profit (+{parameters['take_profit_percent']}%)"); continue
                     if price <= stop_loss_price: await execute_sell_order(f"Stop Loss (-{parameters['stop_loss_percent']}%)"); continue
                     
-                    # Checa o timeout de 20 minutos
                     if time.time() - automation_state.get("position_opened_timestamp", 0) > 1200:
                         reason = f"Timeout de 20 minutos (P/L: {profit:+.2f}%)"
                         await execute_sell_order(reason); continue
                     
-                    # Checa o timeout de 60 minutos (redundante, mas seguro)
                     if time.time() - automation_state.get("position_opened_timestamp", 0) > 3600:
                         reason = f"Timeout de 60 minutos (P/L: {profit:+.2f}%)"
                         await execute_sell_order(reason); continue
