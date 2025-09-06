@@ -127,20 +127,21 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
             tx_signature = solana_client.send_raw_transaction(bytes(signed_tx), opts=tx_opts).value
             
             logger.info(f"Transação enviada: {tx_signature}")
-            await asyncio.sleep(12)
+            await asyncio.sleep(20) # Aumentado o tempo de espera para 20 segundos
             
-            # Novo bloco try-except para lidar com a confirmação da transação de forma mais segura
             try:
                 confirmation = solana_client.confirm_transaction(tx_signature, commitment="confirmed")
-                if confirmation.value.err:
+                if confirmation and hasattr(confirmation, 'value') and confirmation.value and confirmation.value.err:
                     logger.error(f"Transação {tx_signature} falhou na blockchain: {confirmation.value.err}")
                     await send_telegram_message(f"⚠️ Transação {tx_signature} falhou na blockchain: {confirmation.value.err}"); return None
+                
+                # Se a confirmação for bem-sucedida, o código continua. Se não, o erro é capturado pelo except.
+                logger.info(f"Transação confirmada: https://solscan.io/tx/{tx_signature}")
+                return str(tx_signature)
             except Exception as e:
                 logger.error(f"Falha ao obter confirmação para a transação {tx_signature}: {e}")
                 await send_telegram_message(f"⚠️ Falha ao obter confirmação para a transação {tx_signature}: {e}"); return None
 
-            logger.info(f"Transação confirmada: https://solscan.io/tx/{tx_signature}")
-            return str(tx_signature)
         except Exception as e:
             logger.error(f"Falha na transação: {e}"); await send_telegram_message(f"⚠️ Falha na transação: {e}"); return None
 
@@ -671,7 +672,7 @@ async def manual_buy(update, context):
             await update.effective_message.reply_text("⚠️ Não foi possível obter o preço atual para a compra.")
             
     except (IndexError, ValueError):
-        await update.effective_message.reply_text("⚠️ *Formato incorreto.* Use: `/buy <VALOR>`\nEx: `/buy 0.1`", parse_mode='Markdown')
+        await update.effective_message.reply_text("⚠️ *Formato incorreto.*\nEx: `/buy 0.1`", parse_mode='Markdown')
     except Exception as e:
         logger.error(f"Erro no comando /buy: {e}")
         await update.effective_message.reply_text(f"⚠️ Erro ao executar compra manual: {e}")
