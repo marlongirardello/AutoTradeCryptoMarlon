@@ -128,7 +128,13 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
             
             logger.info(f"Transação enviada: {tx_signature}")
             await asyncio.sleep(12)
-            solana_client.confirm_transaction(tx_signature, commitment="confirmed")
+            
+            # Nova lógica de validação: espera a confirmação e verifica o status da transação
+            confirmation = solana_client.confirm_transaction(tx_signature, commitment="confirmed")
+            if confirmation.value.err:
+                logger.error(f"Transação {tx_signature} falhou na blockchain: {confirmation.value.err}")
+                await send_telegram_message(f"⚠️ Transação {tx_signature} falhou na blockchain: {confirmation.value.err}"); return None
+            
             logger.info(f"Transação confirmada: https://solscan.io/tx/{tx_signature}")
             return str(tx_signature)
         except Exception as e:
@@ -150,7 +156,6 @@ async def execute_buy_order(amount, price, pair_details, manual=False, reason="S
 
     slippage_bps = await calculate_dynamic_slippage(pair_details['pair_address'])
     
-    # Nova verificação da conta de token associada (ATA)
     token_mint_pubkey = Pubkey.from_string(pair_details['base_address'])
     ata_address = get_associated_token_address(payer.pubkey(), token_mint_pubkey)
     try:
@@ -162,7 +167,7 @@ async def execute_buy_order(amount, price, pair_details, manual=False, reason="S
     except Exception as e:
         logger.warning(f"Erro ao verificar ATA: {e}. A API da Jupiter lidará com isso.")
 
-    for i in range(10): # Ajustado para 10 tentativas
+    for i in range(10):
         current_priority_fee = parameters.get("priority_fee") + (i * 2000)
         logger.info(f"EXECUTANDO ORDEM DE COMPRA de {amount} SOL para {pair_details['base_symbol']} ao preço de {price} com taxa de prioridade: {current_priority_fee}")
         
@@ -206,35 +211,28 @@ async def execute_sell_order(reason=""):
     pair_details = automation_state.get('current_target_pair_details', {})
     symbol = pair_details.get('base_symbol', 'TOKEN')
     
-    for _ in range(100):
+    for i in range(100):
         try:
-            logger.info(f"EXECUTANDO ORDEM DE VENDA de {symbol}. Motivo: {reason}. Tentativa {sell_fail_count + 1}/100.")
+            logger.info(f"EXECUTANDO ORDEM DE VENDA de {symbol}. Motivo: {reason}. Tentativa {i + 1}/100.")
 
             token_mint_pubkey = Pubkey.from_string(pair_details['base_address'])
             ata_address = get_associated_token_address(payer.pubkey(), token_mint_pubkey)
             
             balance_response = solana_client.get_token_account_balance(ata_address)
 
-            if hasattr(balance_response, 'value'):
-                token_balance_data = balance_response.value
-            else:
-                logger.error(f"Erro ao obter saldo do token {symbol}: Resposta RPC inválida.")
-                sell_fail_count += 1
-                await send_telegram_message(f"⚠️ Erro ao obter saldo do token {symbol}. A venda falhou. Tentativa {sell_fail_count}/100.")
-                await asyncio.sleep(1)
-                continue
-
-            amount_to_sell = token_balance_data.ui_amount
-            if amount_to_sell is None or amount_to_sell == 0:
-                logger.warning("Tentativa de venda com saldo zero, resetando posição.")
+            if not hasattr(balance_response, 'value') or balance_response.value is None or balance_response.value.ui_amount == 0:
+                logger.warning("Tentativa de venda com saldo zero ou resposta RPC inválida, resetando posição.")
+                await send_telegram_message(f"⚠️ Saldo do token {symbol} é zero ou inválido. Posição abandonada.")
                 in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0; automation_state["current_target_pair_address"] = None
                 sell_fail_count = 0
                 return
 
-            slippage_bps = await calculate_dynamic_slippage(pair_details['pair_address'])
-            current_priority_fee = parameters.get("priority_fee") + (sell_fail_count * 1000)
+            amount_to_sell = balance_response.value.ui_amount
 
-            tx_sig = await execute_swap(pair_details['base_address'], pair_details['quote_address'], amount_to_sell, token_balance_data.decimals, slippage_bps, current_priority_fee)
+            slippage_bps = await calculate_dynamic_slippage(pair_details['pair_address'])
+            current_priority_fee = parameters.get("priority_fee") + (i * 1000)
+
+            tx_sig = await execute_swap(pair_details['base_address'], pair_details['quote_address'], amount_to_sell, balance_response.value.decimals, slippage_bps, current_priority_fee)
             
             if tx_sig:
                 log_message = (f"🛑 VENDA REALIZADA: {symbol}\n"
@@ -248,9 +246,9 @@ async def execute_sell_order(reason=""):
                 sell_fail_count = 0
                 return
             else:
-                logger.error(f"FALHA NA VENDA do token {symbol}. Tentativa {sell_fail_count + 1}/100.")
+                logger.error(f"FALHA NA VENDA do token {symbol}. Tentativa {i + 1}/100.")
                 sell_fail_count += 1
-                await send_telegram_message(f"❌ FALHA NA VENDA do token {symbol}. Tentativa {sell_fail_count}/100. O bot tentará novamente.")
+                await send_telegram_message(f"❌ FALHA NA VENDA do token {symbol}. Tentativa {i + 1}/100. O bot tentará novamente.")
                 await asyncio.sleep(1)
         
         except Exception as e:
