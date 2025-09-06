@@ -657,7 +657,6 @@ def main():
     
     logger.info("Bot do Telegram iniciado e aguardando comandos...")
     
-    # Adicione um bloco try...except para lidar com possíveis erros
     try:
         application.run_polling()
     except Exception as e:
@@ -665,4 +664,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
