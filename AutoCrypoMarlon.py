@@ -104,14 +104,20 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
             quote_res.raise_for_status()
             quote_response = quote_res.json()
 
-            priority_fee = parameters.get("priority_fee")
+            #priority_fee = parameters.get("priority_fee") # CÓDIGO ANTIGO
             
             swap_payload = { 
                 "userPublicKey": str(payer.pubkey()), 
                 "quoteResponse": quote_response, 
                 "wrapAndUnwrapSol": True, 
                 "dynamicComputeUnitLimit": True,
-                "prioritizationFee": priority_fee
+                # "prioritizationFee": priority_fee, # CÓDIGO ANTIGO
+                "prioritizationFeeLamports": {
+                    "priorityLevelWithMaxLamports": {
+                        "maxLamports": 10000000,
+                        "priorityLevel": "veryHigh"
+                    }
+                }
             }
             
             swap_url = "https://quote-api.jup.ag/v6/swap"
@@ -131,12 +137,17 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
             tx_signature = solana_client.send_raw_transaction(bytes(signed_tx), opts=tx_opts).value
             
             logger.info(f"Transação enviada: {tx_signature}")
-            await asyncio.sleep(12)
-            solana_client.confirm_transaction(tx_signature, commitment="confirmed")
-            logger.info(f"Transação confirmada: https://solscan.io/tx/{tx_signature}")
             
-            # --- LÓGICA ORIGINAL RESTAURADA ---
-            return str(tx_signature)
+            # --- VERIFICAÇÃO DE SUCESSO APRIMORADA ---
+            try:
+                solana_client.confirm_transaction(tx_signature, commitment="confirmed")
+                logger.info(f"Transação confirmada com sucesso: https://solscan.io/tx/{tx_signature}")
+                return str(tx_signature)
+            except Exception as confirm_e:
+                logger.error(f"Transação enviada, mas falhou ao ser confirmada na blockchain: {confirm_e}")
+                return None
+            # --- FIM DA VERIFICAÇÃO ---
+
 
         except Exception as e:
             logger.error(f"Falha na transação: {e}"); await send_telegram_message(f"⚠️ Falha na transação: {e}"); return None
