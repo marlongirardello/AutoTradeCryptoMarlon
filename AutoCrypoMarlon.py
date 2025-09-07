@@ -120,8 +120,8 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
             swap_response = swap_res.json()
             swap_tx_b64 = swap_response.get('swapTransaction')
             if not swap_tx_b64:
-                logger.error(f"Erro na API da Jupiter: {swap_response}"); return None, "Jupiter API Error"
-
+                logger.error(f"Erro na API da Jupiter: {swap_response}"); return None
+            
             raw_tx_bytes = b64decode(swap_tx_b64)
             swap_tx = VersionedTransaction.from_bytes(raw_tx_bytes)
             signature = payer.sign_message(to_bytes_versioned(swap_tx.message))
@@ -131,26 +131,15 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
             tx_signature = solana_client.send_raw_transaction(bytes(signed_tx), opts=tx_opts).value
             
             logger.info(f"Transação enviada: {tx_signature}")
+            await asyncio.sleep(12)
+            solana_client.confirm_transaction(tx_signature, commitment="confirmed")
+            logger.info(f"Transação confirmada: https://solscan.io/tx/{tx_signature}")
             
-            for _ in range(5):
-                await asyncio.sleep(10)
-                try:
-                    tx_status = solana_client.get_transaction(tx_signature, commitment="confirmed")
-                    if tx_status.value and tx_status.value.meta.err is None:
-                        logger.info(f"Transação confirmada e bem-sucedida: https://solscan.io/tx/{tx_signature}")
-                        return tx_signature, None
-                    elif tx_status.value and tx_status.value.meta.err:
-                        error_message = str(tx_status.value.meta.err)
-                        logger.error(f"Transação confirmada com erro: {error_message}")
-                        return tx_signature, error_message
-                except Exception as status_e:
-                    logger.warning(f"Aguardando confirmação... Erro temporário: {status_e}")
-            
-            logger.error("Transação não confirmada após várias tentativas ou falhou com erro desconhecido.")
-            return None, "Transaction not confirmed or failed"
+            # --- LÓGICA ORIGINAL RESTAURADA ---
+            return str(tx_signature)
 
         except Exception as e:
-            logger.error(f"Falha na transação: {e}"); await send_telegram_message(f"⚠️ Falha na transação: {e}"); return None, str(e)
+            logger.error(f"Falha na transação: {e}"); await send_telegram_message(f"⚠️ Falha na transação: {e}"); return None
 
 
 async def execute_buy_order(amount, price, pair_details, manual=False, reason="Sinal da Estratégia"):
@@ -169,9 +158,9 @@ async def execute_buy_order(amount, price, pair_details, manual=False, reason="S
     slippage_bps = await calculate_dynamic_slippage(pair_details['pair_address'])
     logger.info(f"EXECUTANDO ORDEM DE COMPRA de {amount} SOL para {pair_details['base_symbol']} ao preço de {price}")
     
-    tx_sig, tx_error = await execute_swap(pair_details['quote_address'], pair_details['base_address'], amount, 9, slippage_bps)
+    tx_sig = await execute_swap(pair_details['quote_address'], pair_details['base_address'], amount, 9, slippage_bps)
 
-    if tx_sig and not tx_error:
+    if tx_sig:
         in_position = True
         entry_price = price
         automation_state["position_opened_timestamp"] = time.time()
@@ -188,9 +177,7 @@ async def execute_buy_order(amount, price, pair_details, manual=False, reason="S
         await send_telegram_message(log_message)
     else:
         buy_fail_count += 1
-        if tx_error:
-            await send_telegram_message(f"❌ FALHA NA COMPRA para **{pair_details['base_symbol']}**. Motivo: `{tx_error}`. Tentativa {buy_fail_count}/10. O bot tentará novamente.")
-        
+        logger.error(f"FALHA NA EXECUÇÃO da compra para {pair_details['base_symbol']}. Tentativa {buy_fail_count}/10. O bot tentará novamente.")
         if buy_fail_count >= 10:
             logger.error(f"FALHA NA EXECUÇÃO da compra para {pair_details['base_symbol']}. Limite de {buy_fail_count} falhas atingido. Penalizando e procurando novo alvo.")
             await send_telegram_message(f"❌ FALHA NA EXECUÇÃO da compra para **{pair_details['base_symbol']}**. Limite de 10 falhas atingido. A moeda será penalizada.")
@@ -198,8 +185,6 @@ async def execute_buy_order(amount, price, pair_details, manual=False, reason="S
                 automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10
                 automation_state["current_target_pair_address"] = None
             buy_fail_count = 0
-        else:
-            logger.error(f"FALHA NA EXECUÇÃO da compra para {pair_details['base_symbol']}. Tentativa {buy_fail_count}/10. O bot tentará novamente.")
 
 
 async def execute_sell_order(reason=""):
@@ -242,9 +227,9 @@ async def execute_sell_order(reason=""):
             return
 
         slippage_bps = await calculate_dynamic_slippage(pair_details['pair_address'])
-        tx_sig, tx_error = await execute_swap(pair_details['base_address'], pair_details['quote_address'], amount_to_sell, token_balance_data.decimals, slippage_bps)
+        tx_sig = await execute_swap(pair_details['base_address'], pair_details['quote_address'], amount_to_sell, token_balance_data.decimals, slippage_bps)
         
-        if tx_sig and not tx_error:
+        if tx_sig:
             log_message = (f"🛑 VENDA REALIZADA: {symbol}\n"
                            f"Motivo: {reason}\n"
                            f"Slippage Usado: {slippage_bps/100:.2f}%\n"
@@ -265,11 +250,7 @@ async def execute_sell_order(reason=""):
             sell_fail_count = 0
             buy_fail_count = 0
         else:
-            if tx_sig and tx_error:
-                await send_telegram_message(f"❌ FALHA NA VENDA do token **{symbol}**. Motivo: `{tx_error}`. O bot permanecerá em posição. Tentativa {sell_fail_count + 1}/100. Transação: https://solscan.io/tx/{tx_sig}")
-            elif not tx_sig and tx_error:
-                 await send_telegram_message(f"❌ FALHA NA VENDA do token **{symbol}**. Motivo: `{tx_error}`. O bot permanecerá em posição. Tentativa {sell_fail_count + 1}/100.")
-            
+            logger.error(f"FALHA NA VENDA do token {symbol}. O bot permanecerá em posição e tentará vender novamente.")
             sell_fail_count += 1
             if sell_fail_count >= 100:
                 logger.error("ATINGIDO LIMITE DE FALHAS DE VENDA. RESETANDO POSIÇÃO.")
@@ -282,6 +263,7 @@ async def execute_sell_order(reason=""):
                     await send_telegram_message(f"⚠️ **{symbol}** foi penalizada por 10 ciclos após falhas de venda.")
                 
                 sell_fail_count = 0
+            await send_telegram_message(f"❌ FALHA NA VENDA do token {symbol}. Tentativa {sell_fail_count}/100. O bot tentará novamente.")
 
     except Exception as e:
         logger.error(f"Erro crítico ao vender {symbol}: {e}")
@@ -506,7 +488,6 @@ async def check_velocity_strategy():
     logger.info(f"Análise Compra ({pair_details['base_symbol']}): "
                 f"Variação Vela: {price_change_pct:+.2f}% (Meta: >2%)")
 
-    # Inicia a verificação de volatilidade apenas uma vez, quando a moeda é selecionada
     if not automation_state.get("checking_volatility"):
         pair_details = automation_state.get("current_target_pair_details")
         logger.info(f"Moeda {pair_details['base_symbol']} selecionada. Iniciando verificação de volatilidade por 3 minutos.")
@@ -563,10 +544,9 @@ async def autonomous_loop():
                         )
                         automation_state["checking_volatility"] = False
                         automation_state["volatility_check_start_time"] = 0
-                        automation_state["volatility_check_passed"] = False # Reseta a flag de verificação
+                        automation_state["volatility_check_passed"] = False
                         await send_telegram_message(f"🎯 **Novo Alvo:** {best_coin['symbol']}. Iniciando monitoramento...")
             
-            # Lógica para verificação de volatilidade e condição de compra
             if automation_state.get("current_target_pair_address") and not in_position:
                 if automation_state.get("checking_volatility"):
                     pair_details = automation_state.get("current_target_pair_details")
@@ -610,7 +590,7 @@ async def autonomous_loop():
                                 await execute_buy_order(parameters["amount"], price, pair_details, reason=reason)
                     
                     await asyncio.sleep(15)
-                else: # Inicia a verificação de volatilidade se ainda não foi feita
+                else:
                     await check_velocity_strategy()
                     await asyncio.sleep(30)
             elif in_position:
