@@ -30,7 +30,7 @@ app = Flask('')
 def home():
     return "Bot is alive!"
 def run_server():
-  app.run(host='0.0.0.0',port=8080)
+  app.run(host='00.0.0.0',port=8080)
 def keep_alive():
     t = Thread(target=run_server)
     t.start()
@@ -86,29 +86,38 @@ parameters = {
     "amount": None,
     "stop_loss_percent": None,
     "take_profit_percent": None,
-    "priority_fee": 6000000
+    "priority_fee_lamports": 2000000,
+    "priority_level": "veryHigh"
 }
 
 # --- Funções de Execução de Ordem ---
-async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, slippage_bps):
-    logger.info(f"Iniciando swap de {amount} do token {input_mint_str} para {output_mint_str} com slippage de {slippage_bps} BPS")
+async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals):
+    logger.info(f"Iniciando swap de {amount} do token {input_mint_str} para {output_mint_str} com slippage e limite computacional dinâmicos.")
     amount_wei = int(amount * (10**input_decimals))
     
     async with httpx.AsyncClient() as client:
         try:
-            quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={input_mint_str}&outputMint={output_mint_str}&amount={amount_wei}&slippageBps={slippage_bps}&maxAccounts=64"
+            # URL da cotação simplificada, sem o parâmetro dynamicSlippageBps
+            quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={input_mint_str}&outputMint={output_mint_str}&amount={amount_wei}&maxAccounts=64"
             quote_res = await client.get(quote_url, timeout=60.0)
             quote_res.raise_for_status()
             quote_response = quote_res.json()
 
-            priority_fee = parameters.get("priority_fee")
+            priority_fee_lamports = parameters.get("priority_fee_lamports")
+            priority_level = parameters.get("priority_level")
             
             swap_payload = { 
                 "userPublicKey": str(payer.pubkey()), 
                 "quoteResponse": quote_response, 
                 "wrapAndUnwrapSol": True, 
                 "dynamicComputeUnitLimit": True,
-                "prioritizationFee": priority_fee
+                "dynamicSlippage": True,
+                "prioritizationFeeLamports": {
+                    "priorityLevelWithMaxLamports": {
+                        "maxLamports": priority_fee_lamports,
+                        "priorityLevel": priority_level
+                    }
+                }
             }
             
             swap_url = "https://quote-api.jup.ag/v6/swap"
@@ -148,10 +157,9 @@ async def execute_buy_order(amount, price, pair_details, manual=False, reason="S
             automation_state["current_target_pair_address"] = None
             return
 
-    slippage_bps = await calculate_dynamic_slippage(pair_details['pair_address'])
     logger.info(f"EXECUTANDO ORDEM DE COMPRA de {amount} SOL para {pair_details['base_symbol']} ao preço de {price}")
     
-    tx_sig = await execute_swap(pair_details['quote_address'], pair_details['base_address'], amount, 9, slippage_bps)
+    tx_sig = await execute_swap(pair_details['quote_address'], pair_details['base_address'], amount, 9)
     if tx_sig:
         in_position = True
         entry_price = price
@@ -162,8 +170,7 @@ async def execute_buy_order(amount, price, pair_details, manual=False, reason="S
                        f"Motivo: {reason}\n"
                        f"Entrada: {price:.10f} | Alvo: {price * (1 + parameters['take_profit_percent']/100):.10f} | "
                        f"Stop: {price * (1 - parameters['stop_loss_percent']/100):.10f}\n"
-                       f"Slippage Usado: {slippage_bps/100:.2f}%\n"
-                       f"Taxa de Prioridade: {parameters.get('priority_fee')} micro-lamports\n"
+                       f"Slippage: Dinâmico | Taxa Máx. de Prioridade: {parameters.get('priority_fee_lamports')} lamports ({parameters.get('priority_level')})\n"
                        f"https://solscan.io/tx/{tx_sig}")
         logger.info(log_message)
         await send_telegram_message(log_message)
@@ -213,14 +220,12 @@ async def execute_sell_order(reason=""):
             sell_fail_count = 0
             return
 
-        slippage_bps = await calculate_dynamic_slippage(pair_details['pair_address'])
-        tx_sig = await execute_swap(pair_details['base_address'], pair_details['quote_address'], amount_to_sell, token_balance_data.decimals, slippage_bps)
+        tx_sig = await execute_swap(pair_details['base_address'], pair_details['quote_address'], amount_to_sell, token_balance_data.decimals)
         
         if tx_sig:
             log_message = (f"🛑 VENDA REALIZADA: {symbol}\n"
                            f"Motivo: {reason}\n"
-                           f"Slippage Usado: {slippage_bps/100:.2f}%\n"
-                           f"Taxa de Prioridade: {parameters.get('priority_fee')} micro-lamports\n"
+                           f"Slippage: Dinâmico | Taxa Máx. de Prioridade: {parameters.get('priority_fee_lamports')} lamports ({parameters.get('priority_level')})\n"
                            f"https://solscan.io/tx/{tx_sig}")
             logger.info(log_message)
             await send_telegram_message(log_message)
@@ -300,22 +305,9 @@ async def is_pair_quotable_on_jupiter(pair_details):
     except Exception:
         return False
 
+# Removido o cálculo dinâmico de slippage, já que a API da Jupiter fará isso
 async def calculate_dynamic_slippage(pair_address):
-    logger.info(f"Calculando slippage dinâmico para {pair_address}...")
-    df = await fetch_geckoterminal_ohlcv(pair_address, "1m", limit=5)
-    if df is None or df.empty or len(df) < 5:
-        logger.warning("Dados insuficientes. Usando slippage padrão (0.75%).")
-        return 75
-    price_range = df['high'].max() - df['low'].min()
-    volatility = (price_range / df['low'].min()) * 100 if df['low'].min() > 0 else 0
-    if volatility > 3.0: 
-        slippage_bps = 1000
-    elif volatility > 1.5: 
-        slippage_bps = 600
-    else: 
-        slippage_bps = 500
-    logger.info(f"Volatilidade ({volatility:.2f}%). Slippage definido para {slippage_bps/100:.2f}%.")
-    return slippage_bps
+    pass
 
 # --- FUNÇÃO DE DESCOBERTA ATUALIZADA ---
 async def discover_and_filter_pairs():
@@ -537,14 +529,14 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v20.4 (Reversão de Taxa de Prioridade)**.\n\n'
+        'Olá! Sou seu bot **v20.8 (Prioridade & Slippage dinâmicos, aninhados)**.\n\n'
         '**Dinâmica Autônoma:**\n'
         '1. Eu descubro os TOP 200 pares e aplico um **filtro de atividade na última hora**.\n'
         '2. A seleção usa um **Índice de Qualidade** para priorizar tendências saudáveis.\n'
         '3. Após fechar qualquer operação, eu imediatamente procuro uma nova oportunidade.\n\n'
         '**Estratégia:** Velocidade Pura (+2% em 1 min).\n\n'
         '**Configure-me com `/set` e inicie com `/run`.**\n'
-        '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%> [TAXA_PRIORIDADE]`',
+        '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%> [TAXA_MAX_LAMPORTS] [NIVEL_PRIORIDADE]`',
         parse_mode='Markdown'
     )
 
@@ -554,33 +546,37 @@ async def set_params(update, context):
     try:
         args = context.args
         amount, stop_loss, take_profit = float(args[0]), float(args[1]), float(args[2])
-        priority_fee = 6000000
+        priority_fee_lamports = 2000000 
+        priority_level = "veryHigh"
 
         if len(args) > 3:
-            priority_fee = int(args[3])
-
+            priority_fee_lamports = int(args[3])
+        if len(args) > 4:
+            priority_level = args[4]
+            
         if stop_loss <= 0 or take_profit <= 0:
-            await update.effective_effective_message.reply_text("⚠️ Stop/Profit devem ser > 0."); return
+            await update.effective_message.reply_text("⚠️ Stop/Profit devem ser > 0."); return
         
-        parameters.update(amount=amount, stop_loss_percent=stop_loss, take_profit_percent=take_profit, priority_fee=priority_fee)
-        if "volume_multiplier" in parameters:
-            parameters["volume_multiplier"] = None
+        parameters.update(amount=amount, stop_loss_percent=stop_loss, take_profit_percent=take_profit, 
+                          priority_fee_lamports=priority_fee_lamports, priority_level=priority_level)
 
         await update.effective_message.reply_text(
             f"✅ *Parâmetros definidos!*\n"
             f"💰 *Valor por Ordem:* `{amount}` SOL\n"
             f"🛑 *Stop Loss:* `-{stop_loss}%`\n"
             f"🎯 *Take Profit:* `+{take_profit}%`\n"
-            f"⚡️ *Taxa de Prioridade:* `{priority_fee}` micro-lamports\n\n"
+            f"⚡️ *Taxa Máx. de Prioridade:* `{priority_fee_lamports}` lamports\n"
+            f"⚡️ *Nível de Prioridade:* `{priority_level}`\n\n"
             "Agora use `/run` para iniciar.",
             parse_mode='Markdown'
         )
     except (IndexError, ValueError):
         await update.effective_message.reply_text(
             "⚠️ *Formato incorreto.*\n"
-            "Use: `/set <VALOR> <STOP> <PROFIT> [TAXA_PRIORIDADE]`\n"
-            "Ex: `/set 0.1 2.0 5.0` (taxa padrão 2000000)\n"
-            "Ex: `/set 0.1 2.0 5.0 15000` (taxa personalizada)\n", 
+            "Use: `/set <VALOR> <STOP> <PROFIT> [TAXA_MAX_LAMPORTS] [NIVEL_PRIORIDADE]`\n"
+            "Ex: `/set 0.1 2.0 5.0` (taxa padrão: 2M lamports, veryHigh)\n"
+            "Ex: `/set 0.1 2.0 5.0 10000000 veryHigh`\n"
+            "Opções de Nível: `veryLow`, `low`, `medium`, `high`, `veryHigh`, `max`\n", 
             parse_mode='Markdown'
         )
 
@@ -635,7 +631,8 @@ async def manual_buy(update, context):
             await update.effective_message.reply_text("⚠️ Não foi possível obter o preço atual para a compra.")
             
     except (IndexError, ValueError):
-        await update.effective_message.reply_text("⚠️ *Formato incorreto.* Use: `/buy <VALOR>`\nEx: `/buy 0.1`", parse_mode='Markdown')
+        await update.effective_message.reply_text("⚠️ *Formato incorreto.*\n"
+            "Use: `/buy <VALOR>`\nEx: `/buy 0.1`", parse_mode='Markdown')
     except Exception as e:
         logger.error(f"Erro no comando /buy: {e}")
         await update.effective_message.reply_text(f"⚠️ Erro ao executar compra manual: {e}")
