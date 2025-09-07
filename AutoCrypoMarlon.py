@@ -1,34 +1,4 @@
 # -*- coding: utf-8 -*-
-import subprocess
-import sys
-
-# --- Bloco de auto-instalação e atualização ---
-def ensure_dependencies():
-    required = [
-        "solana==0.30.2",
-        "solders==0.18.0",
-        "pandas",
-        "pandas-ta",
-        "httpx",
-        "python-dotenv",
-        "Flask",
-        "numpy"
-    ]
-    try:
-        # Tenta importar para ver se as versões estão corretas
-        import solana
-        import solders
-        if solana.__version__ != "0.30.2" or solders.__version__ != "0.18.0":
-            print("Versão incorreta de solana ou solders. Reinstalando...")
-            raise ImportError
-    except ImportError:
-        for pkg in required:
-            subprocess.check_call([sys.executable, "-m", "pip", "install", "--force-reinstall", pkg])
-        print("Dependências instaladas com sucesso.")
-
-ensure_dependencies()
-
-# A partir daqui, as bibliotecas estão garantidamente instaladas e nas versões corretas
 import telegram
 from telegram.ext import Application, CommandHandler
 import logging
@@ -82,8 +52,8 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 
 try:
+    solana_client = Client(RPC_URL)
     payer = Keypair.from_base58_string(PRIVATE_KEY_B58)
-    solana_client = Client(RPC_URL, max_supported_transaction_version=0)
     logger.info(f"Carteira carregada com sucesso. Endereço público: {payer.pubkey()}")
 except Exception as e:
     logger.error(f"Erro ao carregar a carteira Solana: {e}")
@@ -110,7 +80,8 @@ automation_state = {
     "last_price_change_pct": None, 
     "last_price_change_timestamp": 0,
     "checking_volatility": False,
-    "volatility_check_start_time": 0
+    "volatility_check_start_time": 0,
+    "volatility_check_passed": False
 }
 
 parameters = {
@@ -118,8 +89,7 @@ parameters = {
     "amount": None,
     "stop_loss_percent": None,
     "take_profit_percent": None,
-    "priority_fee_lamports": 2000000,
-    "priority_level": "veryHigh"
+    "priority_fee": 2000000
 }
 
 # --- Funções de Execução de Ordem ---
@@ -134,20 +104,14 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
             quote_res.raise_for_status()
             quote_response = quote_res.json()
 
-            priority_fee_lamports = parameters.get("priority_fee_lamports")
-            priority_level = parameters.get("priority_level")
+            priority_fee = parameters.get("priority_fee")
             
             swap_payload = { 
                 "userPublicKey": str(payer.pubkey()), 
                 "quoteResponse": quote_response, 
                 "wrapAndUnwrapSol": True, 
                 "dynamicComputeUnitLimit": True,
-                "prioritizationFeeLamports": {
-                    "priorityLevelWithMaxLamports": {
-                        "maxLamports": priority_fee_lamports,
-                        "priorityLevel": priority_level
-                    }
-                }
+                "prioritizationFee": priority_fee
             }
             
             swap_url = "https://quote-api.jup.ag/v6/swap"
@@ -218,7 +182,7 @@ async def execute_buy_order(amount, price, pair_details, manual=False, reason="S
                        f"Entrada: {price:.10f} | Alvo: {price * (1 + parameters['take_profit_percent']/100):.10f} | "
                        f"Stop: {price * (1 - parameters['stop_loss_percent']/100):.10f}\n"
                        f"Slippage Usado: {slippage_bps/100:.2f}%\n"
-                       f"Taxa Máx. de Prioridade: {parameters.get('priority_fee_lamports')} lamports ({parameters.get('priority_level')})\n"
+                       f"Taxa de Prioridade: {parameters.get('priority_fee')} micro-lamports\n"
                        f"https://solscan.io/tx/{tx_sig}")
         logger.info(log_message)
         await send_telegram_message(log_message)
@@ -284,7 +248,7 @@ async def execute_sell_order(reason=""):
             log_message = (f"🛑 VENDA REALIZADA: {symbol}\n"
                            f"Motivo: {reason}\n"
                            f"Slippage Usado: {slippage_bps/100:.2f}%\n"
-                           f"Taxa Máx. de Prioridade: {parameters.get('priority_fee_lamports')} lamports ({parameters.get('priority_level')})\n"
+                           f"Taxa de Prioridade: {parameters.get('priority_fee')} micro-lamports\n"
                            f"https://solscan.io/tx/{tx_sig}")
             logger.info(log_message)
             await send_telegram_message(log_message)
@@ -542,7 +506,6 @@ async def check_velocity_strategy():
     logger.info(f"Análise Compra ({pair_details['base_symbol']}): "
                 f"Variação Vela: {price_change_pct:+.2f}% (Meta: >2%)")
 
-    # Inicia a verificação de volatilidade imediatamente após a moeda ser selecionada
     if not automation_state.get("checking_volatility"):
         pair_details = automation_state.get("current_target_pair_details")
         logger.info(f"Moeda {pair_details['base_symbol']} selecionada. Iniciando verificação de volatilidade por 3 minutos.")
@@ -600,7 +563,6 @@ async def autonomous_loop():
                         automation_state["volatility_check_start_time"] = 0
                         await send_telegram_message(f"🎯 **Novo Alvo:** {best_coin['symbol']}. Iniciando monitoramento...")
             
-            # Lógica para verificação de volatilidade e condição de compra
             if automation_state.get("current_target_pair_address") and not in_position:
                 if automation_state.get("checking_volatility"):
                     pair_details = automation_state.get("current_target_pair_details")
@@ -620,14 +582,13 @@ async def autonomous_loop():
                             continue
 
                         if now - automation_state.get("volatility_check_start_time", 0) > 180: # 3 minutos
-                            # Final da verificação de 3 minutos
                             automation_state["checking_volatility"] = False
                             logger.info(f"Verificação de volatilidade de 3 minutos concluída para {pair_details['base_symbol']}. Moeda considerada segura.")
                             await send_telegram_message(f"✅ Volatilidade de **{pair_details['base_symbol']}** dentro do limite por 3 minutos. Agora, monitorando para sinal de compra (>2%).")
                     
                     await asyncio.sleep(15)
 
-                else: # Se a verificação já foi concluída, entra neste bloco para monitorar a variação > 2%
+                elif not in_position: # Se a verificação já foi concluída, entra neste bloco para monitorar a variação > 2%
                     pair_details = automation_state.get("current_target_pair_details")
                     data = await fetch_geckoterminal_ohlcv(pair_details['pair_address'], parameters["timeframe"], limit=1)
                     if data is not None and not data.empty:
@@ -668,15 +629,16 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v20.13 (Lógica de Volatilidade Aprimorada)**.\n\n'
+        'Olá! Sou seu bot **v20.14 (Verificação Robusta de Transação)**.\n\n'
         '**Dinâmica Autônoma:**\n'
         '1. Eu descubro os TOP 200 pares e aplico um **filtro de atividade na última hora**.\n'
         '2. A seleção usa um **Índice de Qualidade** para priorizar tendências saudáveis.\n'
-        '3. Agora, após selecionar uma moeda, verifico a volatilidade por 3 minutos. Se uma vela variar mais de 10%, a moeda é penalizada.\n'
-        '4. Se a moeda passar na verificação, eu continuo a monitorar a variação da vela até ela ficar acima de 2% para comprar, ou até o timeout de 15 minutos.\n\n'
+        '3. Após selecionar uma moeda, verifico a volatilidade por 3 minutos. Se uma vela variar mais de 10%, a moeda é penalizada.\n'
+        '4. Se a moeda passar na verificação, eu continuo a monitorar a variação da vela até ela ficar acima de 2% para comprar, ou até o timeout de 15 minutos.\n'
+        '5. Agora, o bot verifica rigorosamente o sucesso de cada transação no blockchain para evitar falsos positivos.\n\n'
         '**Estratégia:** Velocidade Pura (+2% em 1 min).\n\n'
         '**Configure-me com `/set` e inicie com `/run`.**\n'
-        '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%> [TAXA_MAX_LAMPORTS] [NIVEL_PRIORIDADE]`',
+        '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%> [TAXA_PRIORIDADE]`',
         parse_mode='Markdown'
     )
 
@@ -686,37 +648,33 @@ async def set_params(update, context):
     try:
         args = context.args
         amount, stop_loss, take_profit = float(args[0]), float(args[1]), float(args[2])
-        priority_fee_lamports = 2000000 
-        priority_level = "veryHigh"
+        priority_fee = 2000000
 
         if len(args) > 3:
-            priority_fee_lamports = int(args[3])
-        if len(args) > 4:
-            priority_level = args[4]
-            
+            priority_fee = int(args[3])
+
         if stop_loss <= 0 or take_profit <= 0:
             await update.effective_message.reply_text("⚠️ Stop/Profit devem ser > 0."); return
         
-        parameters.update(amount=amount, stop_loss_percent=stop_loss, take_profit_percent=take_profit, 
-                          priority_fee_lamports=priority_fee_lamports, priority_level=priority_level)
+        parameters.update(amount=amount, stop_loss_percent=stop_loss, take_profit_percent=take_profit, priority_fee=priority_fee)
+        if "volume_multiplier" in parameters:
+            parameters["volume_multiplier"] = None
 
         await update.effective_message.reply_text(
             f"✅ *Parâmetros definidos!*\n"
             f"💰 *Valor por Ordem:* `{amount}` SOL\n"
             f"🛑 *Stop Loss:* `-{stop_loss}%`\n"
             f"🎯 *Take Profit:* `+{take_profit}%`\n"
-            f"⚡️ *Taxa Máx. de Prioridade:* `{priority_fee_lamports}` lamports\n"
-            f"⚡️ *Nível de Prioridade:* `{priority_level}`\n\n"
+            f"⚡️ *Taxa de Prioridade:* `{priority_fee}` micro-lamports\n\n"
             "Agora use `/run` para iniciar.",
             parse_mode='Markdown'
         )
     except (IndexError, ValueError):
         await update.effective_message.reply_text(
             "⚠️ *Formato incorreto.*\n"
-            "Use: `/set <VALOR> <STOP> <PROFIT> [TAXA_MAX_LAMPORTS] [NIVEL_PRIORIDADE]`\n"
-            "Ex: `/set 0.1 2.0 5.0` (taxa padrão: 2M lamports, veryHigh)\n"
-            "Ex: `/set 0.1 2.0 5.0 10000000 veryHigh`\n"
-            "Opções de Nível: `veryLow`, `low`, `medium`, `high`, `veryHigh`, `max`\n", 
+            "Use: `/set <VALOR> <STOP> <PROFIT> [TAXA_PRIORIDADE]`\n"
+            "Ex: `/set 0.1 2.0 5.0` (taxa padrão 2000000)\n"
+            "Ex: `/set 0.1 2.0 5.0 15000` (taxa personalizada)\n", 
             parse_mode='Markdown'
         )
 
