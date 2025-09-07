@@ -506,6 +506,7 @@ async def check_velocity_strategy():
     logger.info(f"Análise Compra ({pair_details['base_symbol']}): "
                 f"Variação Vela: {price_change_pct:+.2f}% (Meta: >2%)")
 
+    # Inicia a verificação de volatilidade apenas uma vez, quando a moeda é selecionada
     if not automation_state.get("checking_volatility"):
         pair_details = automation_state.get("current_target_pair_details")
         logger.info(f"Moeda {pair_details['base_symbol']} selecionada. Iniciando verificação de volatilidade por 3 minutos.")
@@ -530,6 +531,7 @@ async def autonomous_loop():
                 automation_state["penalty_box"][penalized_address] = 10
                 automation_state["current_target_pair_address"] = None
                 automation_state["checking_volatility"] = False
+                automation_state["volatility_check_passed"] = False
                 force_rescan = True
 
             if now - automation_state.get("last_scan_timestamp", 0) > 7200:
@@ -561,8 +563,10 @@ async def autonomous_loop():
                         )
                         automation_state["checking_volatility"] = False
                         automation_state["volatility_check_start_time"] = 0
+                        automation_state["volatility_check_passed"] = False # Reseta a flag de verificação
                         await send_telegram_message(f"🎯 **Novo Alvo:** {best_coin['symbol']}. Iniciando monitoramento...")
             
+            # Lógica para verificação de volatilidade e condição de compra
             if automation_state.get("current_target_pair_address") and not in_position:
                 if automation_state.get("checking_volatility"):
                     pair_details = automation_state.get("current_target_pair_details")
@@ -578,17 +582,19 @@ async def autonomous_loop():
                             automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10
                             automation_state["current_target_pair_address"] = None
                             automation_state["checking_volatility"] = False
+                            automation_state["volatility_check_passed"] = False
                             await asyncio.sleep(60)
                             continue
 
-                        if now - automation_state.get("volatility_check_start_time", 0) > 180: # 3 minutos
+                        if now - automation_state.get("volatility_check_start_time", 0) > 180:
                             automation_state["checking_volatility"] = False
+                            automation_state["volatility_check_passed"] = True
                             logger.info(f"Verificação de volatilidade de 3 minutos concluída para {pair_details['base_symbol']}. Moeda considerada segura.")
                             await send_telegram_message(f"✅ Volatilidade de **{pair_details['base_symbol']}** dentro do limite por 3 minutos. Agora, monitorando para sinal de compra (>2%).")
                     
                     await asyncio.sleep(15)
 
-                elif not in_position: # Se a verificação já foi concluída, entra neste bloco para monitorar a variação > 2%
+                elif automation_state.get("volatility_check_passed"):
                     pair_details = automation_state.get("current_target_pair_details")
                     data = await fetch_geckoterminal_ohlcv(pair_details['pair_address'], parameters["timeframe"], limit=1)
                     if data is not None and not data.empty:
@@ -604,6 +610,9 @@ async def autonomous_loop():
                                 await execute_buy_order(parameters["amount"], price, pair_details, reason=reason)
                     
                     await asyncio.sleep(15)
+                else: # Inicia a verificação de volatilidade se ainda não foi feita
+                    await check_velocity_strategy()
+                    await asyncio.sleep(30)
             elif in_position:
                 price, _ = await fetch_dexscreener_real_time_price(automation_state["current_target_pair_address"])
                 if price:
@@ -629,7 +638,7 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v20.14 (Verificação Robusta de Transação)**.\n\n'
+        'Olá! Sou seu bot **v20.15 (Lógica de Verificação Aprimorada)**.\n\n'
         '**Dinâmica Autônoma:**\n'
         '1. Eu descubro os TOP 200 pares e aplico um **filtro de atividade na última hora**.\n'
         '2. A seleção usa um **Índice de Qualidade** para priorizar tendências saudáveis.\n'
