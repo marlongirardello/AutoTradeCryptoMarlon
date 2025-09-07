@@ -314,7 +314,7 @@ async def calculate_dynamic_slippage(pair_address):
     price_range = df['high'].max() - df['low'].min()
     volatility = (price_range / df['low'].min()) * 100 if df['low'].min() > 0 else 0
     if volatility > 3.0: 
-        slippage_bps = 1500
+        slippage_bps = 1000  # 10% de slippage
     elif volatility > 1.5: 
         slippage_bps = 600
     else: 
@@ -542,7 +542,7 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v20.2 (Filtro de Atividade e Taxa aprimorada)**.\n\n'
+        'Olá! Sou seu bot **v20.3 (Slippage ajustado e Taxa aprimorada)**.\n\n'
         '**Dinâmica Autônoma:**\n'
         '1. Eu descubro os TOP 200 pares e aplico um **filtro de atividade na última hora**.\n'
         '2. A seleção usa um **Índice de Qualidade** para priorizar tendências saudáveis.\n'
