@@ -25,4 +25,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Comando para executar a aplicação, garantindo a atualização do solana na execução
-CMD ["sh", "-c", "pip install solana==0.30.2 --force-reinstall && python AutoCrypoMarlon.py"]
+CMD ["python", "AutoCrypoMarlon.py""]
