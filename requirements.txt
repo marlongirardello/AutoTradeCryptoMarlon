@@ -3,5 +3,7 @@ pandas
 pandas-ta
 httpx
 python-dotenv
+solders==0.18.0
+solana==0.30.2
 numpy
 Flask
