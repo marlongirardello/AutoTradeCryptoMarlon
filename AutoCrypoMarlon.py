@@ -1,4 +1,34 @@
 # -*- coding: utf-8 -*-
+import subprocess
+import sys
+
+# --- Bloco de auto-instalação e atualização ---
+def ensure_dependencies():
+    required = [
+        "solana==0.30.2",
+        "solders==0.18.0",
+        "pandas",
+        "pandas-ta",
+        "httpx",
+        "python-dotenv",
+        "Flask",
+        "numpy"
+    ]
+    try:
+        # Tenta importar para ver se as versões estão corretas
+        import solana
+        import solders
+        if solana.__version__ != "0.30.2" or solders.__version__ != "0.18.0":
+            print("Versão incorreta de solana ou solders. Reinstalando...")
+            raise ImportError
+    except ImportError:
+        for pkg in required:
+            subprocess.check_call([sys.executable, "-m", "pip", "install", "--force-reinstall", pkg])
+        print("Dependências instaladas com sucesso.")
+
+ensure_dependencies()
+
+# A partir daqui, as bibliotecas estão garantidamente instaladas e nas versões corretas
 import telegram
 from telegram.ext import Application, CommandHandler
 import logging
@@ -53,7 +83,6 @@ logger = logging.getLogger(__name__)
 
 try:
     payer = Keypair.from_base58_string(PRIVATE_KEY_B58)
-    # --- NOVO PARÂMETRO ADICIONADO AQUI ---
     solana_client = Client(RPC_URL, max_supported_transaction_version=0)
     logger.info(f"Carteira carregada com sucesso. Endereço público: {payer.pubkey()}")
 except Exception as e:
@@ -139,9 +168,8 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
             
             logger.info(f"Transação enviada: {tx_signature}")
             
-            # --- NOVA LÓGICA DE VERIFICAÇÃO ---
             for _ in range(5):
-                await asyncio.sleep(10) # Aguarda a transação ser processada
+                await asyncio.sleep(10)
                 try:
                     tx_status = solana_client.get_transaction(tx_signature, commitment="confirmed")
                     if tx_status.value and tx_status.value.meta.err is None:
@@ -302,10 +330,7 @@ async def execute_sell_order(reason=""):
             if automation_state.get('current_target_pair_address'):
                 automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10
                 automation_state["current_target_pair_address"] = None
-                await send_telegram_message(f"⚠️ **{symbol}** foi penalizada por 10 ciclos após falhas de venda.")
-            
-            sell_fail_count = 0
-        await send_telegram_message(f"⚠️ Erro crítico ao vender {symbol}: {e}. Tentativa {sell_fail_count}/100. O bot permanecerá em posição.")
+                await send_telegram_message(f"⚠️ Erro crítico ao vender {symbol}: {e}. Tentativa {sell_fail_count}/100. O bot permanecerá em posição.")
 
 
 # --- Funções de Análise e Descoberta ---
@@ -506,6 +531,17 @@ async def check_velocity_strategy():
     target_address = automation_state.get("current_target_pair_address")
     if not target_address or in_position or automation_state.get("checking_volatility"): return
 
+    pair_details = automation_state.get("current_target_pair_details")
+    data = await fetch_geckoterminal_ohlcv(target_address, parameters["timeframe"], limit=2)
+    if data is None or len(data) < 2: return
+
+    last_closed_candle = data.iloc[0]
+    
+    price_change_pct = (last_closed_candle['close'] - last_closed_candle['open']) / last_closed_candle['open'] * 100 if last_closed_candle['open'] > 0 else 0
+
+    logger.info(f"Análise Compra ({pair_details['base_symbol']}): "
+                f"Variação Vela: {price_change_pct:+.2f}% (Meta: >2%)")
+
     # Inicia a verificação de volatilidade imediatamente após a moeda ser selecionada
     if not automation_state.get("checking_volatility"):
         pair_details = automation_state.get("current_target_pair_details")
@@ -583,8 +619,8 @@ async def autonomous_loop():
                             await asyncio.sleep(60)
                             continue
 
-                        if now - automation_state.get("volatility_check_start_time", 0) > 180:
-                            # Passou na verificação de 3 minutos, agora só espera a variação > 2%
+                        if now - automation_state.get("volatility_check_start_time", 0) > 180: # 3 minutos
+                            # Final da verificação de 3 minutos
                             automation_state["checking_volatility"] = False
                             logger.info(f"Verificação de volatilidade de 3 minutos concluída para {pair_details['base_symbol']}. Moeda considerada segura.")
                             await send_telegram_message(f"✅ Volatilidade de **{pair_details['base_symbol']}** dentro do limite por 3 minutos. Agora, monitorando para sinal de compra (>2%).")
@@ -605,7 +641,7 @@ async def autonomous_loop():
                             if price:
                                 reason = "Sinal da Estratégia retomado"
                                 await execute_buy_order(parameters["amount"], price, pair_details, reason=reason)
-            
+                    
                     await asyncio.sleep(15)
             elif in_position:
                 price, _ = await fetch_dexscreener_real_time_price(automation_state["current_target_pair_address"])
@@ -632,7 +668,7 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v20.12 (Lógica de Volatilidade Aprimorada)**.\n\n'
+        'Olá! Sou seu bot **v20.13 (Lógica de Volatilidade Aprimorada)**.\n\n'
         '**Dinâmica Autônoma:**\n'
         '1. Eu descubro os TOP 200 pares e aplico um **filtro de atividade na última hora**.\n'
         '2. A seleção usa um **Índice de Qualidade** para priorizar tendências saudáveis.\n'
