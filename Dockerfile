@@ -1,5 +1,5 @@
 # Usar uma imagem base oficial e completa do Python para garantir todas as ferramentas de compilação
-FROM python:3.10-bullseye
+FROM python:3.12
 
 # Definir o diretório de trabalho dentro do contentor
 WORKDIR /app
