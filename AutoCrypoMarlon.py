@@ -30,7 +30,7 @@ app = Flask('')
 def home():
     return "Bot is alive!"
 def run_server():
-  app.run(host='00.0.0.0',port=8080)
+  app.run(host='0.0.0.0',port=8080)
 def keep_alive():
     t = Thread(target=run_server)
     t.start()
@@ -78,7 +78,9 @@ automation_state = {
     "penalty_box": {},
     "discovered_pairs": {},
     "last_price_change_pct": None, 
-    "last_price_change_timestamp": 0 
+    "last_price_change_timestamp": 0,
+    "checking_volatility": False,
+    "volatility_check_start_time": 0
 }
 
 parameters = {
@@ -97,8 +99,7 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals):
     
     async with httpx.AsyncClient() as client:
         try:
-            # URL da cotação simplificada, sem o parâmetro dynamicSlippageBps
-            quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={input_mint_str}&outputMint={output_mint_str}&amount={amount_wei}&maxAccounts=64"
+            quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={input_mint_str}&outputMint={output_mint_str}&amount={amount_wei}&dynamicSlippageBps=true&maxAccounts=64"
             quote_res = await client.get(quote_url, timeout=60.0)
             quote_res.raise_for_status()
             quote_response = quote_res.json()
@@ -111,7 +112,6 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals):
                 "quoteResponse": quote_response, 
                 "wrapAndUnwrapSol": True, 
                 "dynamicComputeUnitLimit": True,
-                "dynamicSlippage": True,
                 "prioritizationFeeLamports": {
                     "priorityLevelWithMaxLamports": {
                         "maxLamports": priority_fee_lamports,
@@ -208,7 +208,14 @@ async def execute_sell_order(reason=""):
             if sell_fail_count >= 100:
                 logger.error("ATINGIDO LIMITE DE FALHAS DE VENDA. RESETANDO POSIÇÃO.")
                 await send_telegram_message(f"⚠️ Limite de 100 falhas de venda para **{symbol}** atingido. Posição abandonada para evitar loop.")
-                in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0; automation_state["current_target_pair_address"] = None
+                in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0
+                
+                # Penaliza a moeda em caso de falha de venda persistente
+                if automation_state.get('current_target_pair_address'):
+                    automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10
+                    automation_state["current_target_pair_address"] = None
+                    await send_telegram_message(f"⚠️ **{symbol}** foi penalizada por 10 ciclos após falhas de venda.")
+                
                 sell_fail_count = 0
             await send_telegram_message(f"⚠️ Erro ao obter saldo do token {symbol}. A venda falhou. Tentativa {sell_fail_count}/100. O bot permanecerá em posição.")
             return
@@ -229,7 +236,16 @@ async def execute_sell_order(reason=""):
                            f"https://solscan.io/tx/{tx_sig}")
             logger.info(log_message)
             await send_telegram_message(log_message)
-            in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0; automation_state["current_target_pair_address"] = None
+            in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0
+            
+            if "Stop Loss" in reason or "Timeout" in reason:
+                if automation_state.get('current_target_pair_address'):
+                    automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10
+                    automation_state["current_target_pair_address"] = None
+                    await send_telegram_message(f"⚠️ **{symbol}** foi penalizada por 10 ciclos após a venda por stop/timeout.")
+            else:
+                automation_state["current_target_pair_address"] = None
+            
             sell_fail_count = 0
             buy_fail_count = 0
         else:
@@ -238,7 +254,13 @@ async def execute_sell_order(reason=""):
             if sell_fail_count >= 100:
                 logger.error("ATINGIDO LIMITE DE FALHAS DE VENDA. RESETANDO POSIÇÃO.")
                 await send_telegram_message(f"⚠️ Limite de 100 falhas de venda para **{symbol}** atingido. Posição abandonada para evitar loop.")
-                in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0; automation_state["current_target_pair_address"] = None
+                in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0
+                
+                if automation_state.get('current_target_pair_address'):
+                    automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10
+                    automation_state["current_target_pair_address"] = None
+                    await send_telegram_message(f"⚠️ **{symbol}** foi penalizada por 10 ciclos após falhas de venda.")
+                
                 sell_fail_count = 0
             await send_telegram_message(f"❌ FALHA NA VENDA do token {symbol}. Tentativa {sell_fail_count}/100. O bot tentará novamente.")
 
@@ -248,9 +270,16 @@ async def execute_sell_order(reason=""):
         if sell_fail_count >= 100:
             logger.error("ATINGIDO LIMITE DE FALHAS DE VENDA. RESETANDO POSIÇÃO.")
             await send_telegram_message(f"⚠️ Limite de 100 falhas de venda para **{symbol}** atingido. Posição abandonada para evitar loop.")
-            in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0; automation_state["current_target_pair_address"] = None
+            in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0
+            
+            if automation_state.get('current_target_pair_address'):
+                automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10
+                automation_state["current_target_pair_address"] = None
+                await send_telegram_message(f"⚠️ **{symbol}** foi penalizada por 10 ciclos após falhas de venda.")
+            
             sell_fail_count = 0
         await send_telegram_message(f"⚠️ Erro crítico ao vender {symbol}: {e}. Tentativa {sell_fail_count}/100. O bot permanecerá em posição.")
+
 
 # --- Funções de Análise e Descoberta ---
 async def fetch_geckoterminal_ohlcv(pair_address, timeframe, limit=60):
@@ -305,9 +334,20 @@ async def is_pair_quotable_on_jupiter(pair_details):
     except Exception:
         return False
 
-# Removido o cálculo dinâmico de slippage, já que a API da Jupiter fará isso
 async def calculate_dynamic_slippage(pair_address):
-    pass
+    logger.info(f"Calculando slippage dinâmico para {pair_address} com base na volatilidade...")
+    df = await fetch_geckoterminal_ohlcv(pair_address, "1m", limit=5)
+    if df is None or df.empty or len(df) < 5:
+        logger.warning("Dados insuficientes. Usando slippage padrão (5.0%).")
+        return 500
+    price_range = df['high'].max() - df['low'].min()
+    volatility = (price_range / df['low'].min()) * 100 if df['low'].min() > 0 else 0
+    if volatility > 10.0:
+        slippage_bps = 1000 # 10%
+    else:
+        slippage_bps = 500  # 5%
+    logger.info(f"Volatilidade ({volatility:.2f}%). Slippage definido para {slippage_bps/100:.2f}%.")
+    return slippage_bps
 
 # --- FUNÇÃO DE DESCOBERTA ATUALIZADA ---
 async def discover_and_filter_pairs():
@@ -437,7 +477,7 @@ async def find_best_coin_to_trade(candidate_pairs, penalized_pairs=set()):
 async def check_velocity_strategy():
     global in_position, entry_price
     target_address = automation_state.get("current_target_pair_address")
-    if not target_address or in_position: return
+    if not target_address or in_position or automation_state.get("checking_volatility"): return
 
     pair_details = automation_state.get("current_target_pair_details")
     data = await fetch_geckoterminal_ohlcv(target_address, parameters["timeframe"], limit=2)
@@ -450,11 +490,12 @@ async def check_velocity_strategy():
     logger.info(f"Análise Compra ({pair_details['base_symbol']}): "
                 f"Variação Vela: {price_change_pct:+.2f}% (Meta: >2%)")
 
-    if price_change_pct > 2.0:
-        price, _ = await fetch_dexscreener_real_time_price(target_address)
-        if price:
-            reason = f"Aceleração de Preço (+{price_change_pct:.2f}%)"
-            await execute_buy_order(parameters["amount"], price, pair_details, reason=reason)
+    # Inicia a verificação de volatilidade imediatamente, independentemente da variação da vela
+    if not automation_state.get("checking_volatility"):
+        logger.info(f"Moeda {pair_details['base_symbol']} selecionada. Iniciando verificação de volatilidade por 3 minutos.")
+        automation_state["checking_volatility"] = True
+        automation_state["volatility_check_start_time"] = time.time()
+        await send_telegram_message(f"🔔 Moeda alvo **{pair_details['base_symbol']}** selecionada. Verificando volatilidade por 3 minutos antes de entrar.")
 
 # --- Loop Principal Autônomo ---
 async def autonomous_loop():
@@ -472,6 +513,7 @@ async def autonomous_loop():
                 await send_telegram_message(f"⌛️ Timeout de caça para **{penalized_symbol}**. Procurando um novo alvo...")
                 automation_state["penalty_box"][penalized_address] = 10
                 automation_state["current_target_pair_address"] = None
+                automation_state["checking_volatility"] = False
                 force_rescan = True
 
             if now - automation_state.get("last_scan_timestamp", 0) > 7200:
@@ -501,11 +543,60 @@ async def autonomous_loop():
                             current_target_pair_details=best_coin["details"],
                             target_selected_timestamp=now
                         )
+                        automation_state["checking_volatility"] = False
+                        automation_state["volatility_check_start_time"] = 0
                         await send_telegram_message(f"🎯 **Novo Alvo:** {best_coin['symbol']}. Iniciando monitoramento...")
             
-            if not in_position and automation_state.get("current_target_pair_address"):
-                await check_velocity_strategy()
-                await asyncio.sleep(30)
+            # Lógica para verificar a volatilidade e condição de compra
+            if automation_state.get("current_target_pair_address") and not in_position:
+                if automation_state.get("checking_volatility"):
+                    pair_details = automation_state.get("current_target_pair_details")
+                    data = await fetch_geckoterminal_ohlcv(pair_details['pair_address'], parameters["timeframe"], limit=1)
+                    
+                    if data is not None and not data.empty:
+                        last_closed_candle = data.iloc[0]
+                        price_change_pct = (last_closed_candle['close'] - last_closed_candle['open']) / last_closed_candle['open'] * 100 if last_closed_candle['open'] > 0 else 0
+                        
+                        if abs(price_change_pct) > 10.0:
+                            logger.warning(f"Volatilidade extrema detectada para {pair_details['base_symbol']}: {price_change_pct:.2f}%. Penalizando moeda.")
+                            await send_telegram_message(f"⚠️ Volatilidade extrema (+/- 10%) detectada para **{pair_details['base_symbol']}**. A moeda será penalizada e um novo alvo será buscado.")
+                            automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10
+                            automation_state["current_target_pair_address"] = None
+                            automation_state["checking_volatility"] = False
+                            await asyncio.sleep(60)
+                            continue
+
+                        # Se a verificação de 3 minutos passou ou ainda está em andamento, verifica a condição de compra
+                        if now - automation_state.get("volatility_check_start_time", 0) > 180:
+                             automation_state["checking_volatility"] = False
+                        
+                        if price_change_pct > 2.0 and not in_position:
+                            if automation_state.get("checking_volatility"):
+                                logger.info(f"Variação da vela para {pair_details['base_symbol']} ainda está acima de 2% durante a verificação. Procedendo com a compra.")
+                                await send_telegram_message(f"✅ Variação da vela para **{pair_details['base_symbol']}** ainda está positiva durante a verificação de volatilidade. Executando ordem de compra...")
+                                price, _ = await fetch_dexscreener_real_time_price(pair_details['pair_address'])
+                                if price:
+                                    reason = "Sinal da Estratégia após verificação de volatilidade"
+                                    await execute_buy_order(parameters["amount"], price, pair_details, reason=reason)
+                                automation_state["checking_volatility"] = False
+                            elif now - automation_state.get("volatility_check_start_time", 0) > 180:
+                                logger.info(f"Verificação de volatilidade de 3 minutos concluída para {pair_details['base_symbol']}. Condição de entrada ainda válida. Procedendo com a compra.")
+                                await send_telegram_message(f"✅ Volatilidade de **{pair_details['base_symbol']}** dentro do limite por 3 minutos E a variação da vela ainda está positiva. Executando ordem de compra...")
+                                price, _ = await fetch_dexscreener_real_time_price(pair_details['pair_address'])
+                                if price:
+                                    reason = "Sinal da Estratégia após verificação de volatilidade"
+                                    await execute_buy_order(parameters["amount"], price, pair_details, reason=reason)
+                                automation_state["checking_volatility"] = False
+                        elif now - automation_state.get("volatility_check_start_time", 0) > 180:
+                            logger.info(f"Variação da vela para {pair_details['base_symbol']} caiu abaixo de 2% após 3 minutos. Continuar monitorando até timeout...")
+                            await send_telegram_message(f"❌ Variação da vela para **{pair_details['base_symbol']}** caiu abaixo de 2% após verificação. Continuarei a monitorar até o timeout ou até um novo sinal.")
+                            automation_state["checking_volatility"] = False
+                    
+                    await asyncio.sleep(15)
+
+                else: # Se não estiver verificando a volatilidade, checa a estratégia para iniciar a verificação
+                    await check_velocity_strategy()
+                    await asyncio.sleep(30)
             elif in_position:
                 price, _ = await fetch_dexscreener_real_time_price(automation_state["current_target_pair_address"])
                 if price:
@@ -513,6 +604,7 @@ async def autonomous_loop():
                     logger.info(f"Posição Aberta ({automation_state['current_target_symbol']}): P/L: {profit:+.2f}%")
                     take_profit_price = entry_price * (1 + parameters["take_profit_percent"] / 100)
                     stop_loss_price = entry_price * (1 - parameters["stop_loss_percent"] / 100)
+                    
                     if price >= take_profit_price: await execute_sell_order(f"Take Profit (+{parameters['take_profit_percent']}%)"); continue
                     if price <= stop_loss_price: await execute_sell_order(f"Stop Loss (-{parameters['stop_loss_percent']}%)"); continue
                     if time.time() - automation_state.get("position_opened_timestamp", 0) > 3600:
@@ -529,11 +621,11 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v20.8 (Prioridade & Slippage dinâmicos, aninhados)**.\n\n'
+        'Olá! Sou seu bot **v20.10 (Lógica de Volatilidade Aprimorada)**.\n\n'
         '**Dinâmica Autônoma:**\n'
         '1. Eu descubro os TOP 200 pares e aplico um **filtro de atividade na última hora**.\n'
         '2. A seleção usa um **Índice de Qualidade** para priorizar tendências saudáveis.\n'
-        '3. Após fechar qualquer operação, eu imediatamente procuro uma nova oportunidade.\n\n'
+        '3. Agora, antes de comprar, verifico a volatilidade por 3 minutos. Se a variação de uma vela exceder 10%, a moeda é penalizada.\n\n'
         '**Estratégia:** Velocidade Pura (+2% em 1 min).\n\n'
         '**Configure-me com `/set` e inicie com `/run`.**\n'
         '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%> [TAXA_MAX_LAMPORTS] [NIVEL_PRIORIDADE]`',
@@ -602,7 +694,7 @@ async def stop_bot(update, context):
         periodic_task = None
     if in_position:
         await execute_sell_order("Parada manual do bot")
-    automation_state.update(current_target_pair_address=None, current_target_symbol=None, last_scan_timestamp=0, position_opened_timestamp=0, target_selected_timestamp=0, penalty_box={})
+    automation_state.update(current_target_pair_address=None, current_target_symbol=None, last_scan_timestamp=0, position_opened_timestamp=0, target_selected_timestamp=0, penalty_box={}, checking_volatility=False, volatility_check_start_time=0)
     logger.info("Bot de trade parado.")
     await update.effective_message.reply_text("🛑 Bot parado. Todas as tarefas e posições foram finalizadas.")
 
