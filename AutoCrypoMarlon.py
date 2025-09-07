@@ -53,7 +53,8 @@ logger = logging.getLogger(__name__)
 
 try:
     payer = Keypair.from_base58_string(PRIVATE_KEY_B58)
-    solana_client = Client(RPC_URL)
+    # --- NOVO PARÂMETRO ADICIONADO AQUI ---
+    solana_client = Client(RPC_URL, max_supported_transaction_version=0)
     logger.info(f"Carteira carregada com sucesso. Endereço público: {payer.pubkey()}")
 except Exception as e:
     logger.error(f"Erro ao carregar a carteira Solana: {e}")
@@ -126,7 +127,7 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
             swap_response = swap_res.json()
             swap_tx_b64 = swap_response.get('swapTransaction')
             if not swap_tx_b64:
-                logger.error(f"Erro na API da Jupiter: {swap_response}"); return None
+                logger.error(f"Erro na API da Jupiter: {swap_response}"); return None, "Jupiter API Error"
 
             raw_tx_bytes = b64decode(swap_tx_b64)
             swap_tx = VersionedTransaction.from_bytes(raw_tx_bytes)
