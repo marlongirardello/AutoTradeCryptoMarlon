@@ -11,6 +11,9 @@ RUN apt-get update && apt-get install -y build-essential curl pkg-config libssl-
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ENV PATH="/root/.cargo/bin:${PATH}"
 
+# Limpar o cache do pip antes de instalar as dependências
+RUN rm -rf /root/.cache/pip
+
 # Copiar o ficheiro de requisitos para o contentor
 COPY requirements.txt .
 
