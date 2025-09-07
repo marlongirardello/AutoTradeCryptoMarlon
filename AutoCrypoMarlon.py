@@ -66,6 +66,7 @@ entry_price = 0.0
 periodic_task = None
 application = None
 sell_fail_count = 0
+buy_fail_count = 0
 
 automation_state = {
     "current_target_pair_address": None,
@@ -85,7 +86,8 @@ parameters = {
     "amount": None,
     "stop_loss_percent": None,
     "take_profit_percent": None,
-    "priority_fee": 5000
+    "priority_fee_lamports": 5000000,
+    "priority_level": "veryHigh"
 }
 
 # --- Funções de Execução de Ordem ---
@@ -100,7 +102,8 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
             quote_res.raise_for_status()
             quote_response = quote_res.json()
 
-            priority_fee = parameters.get("priority_fee")
+            priority_fee_lamports = parameters.get("priority_fee_lamports")
+            priority_level = parameters.get("priority_level")
             
             swap_payload = { 
                 "userPublicKey": str(payer.pubkey()), 
@@ -108,9 +111,9 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
                 "wrapAndUnwrapSol": True, 
                 "dynamicComputeUnitLimit": True,
                 "prioritizationFeeLamports": {
-                    "maxLamports": 50000000,
-                    "priorityLevel": "veryHigh"
-                }"
+                    "maxLamports": priority_fee_lamports,
+                    "priorityLevel": priority_level
+                }
             }
             
             swap_url = "https://quote-api.jup.ag/v6/swap"
@@ -138,7 +141,7 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
             logger.error(f"Falha na transação: {e}"); await send_telegram_message(f"⚠️ Falha na transação: {e}"); return None
 
 async def execute_buy_order(amount, price, pair_details, manual=False, reason="Sinal da Estratégia"):
-    global in_position, entry_price, sell_fail_count
+    global in_position, entry_price, sell_fail_count, buy_fail_count
     if in_position: return
 
     if not manual:
@@ -159,24 +162,31 @@ async def execute_buy_order(amount, price, pair_details, manual=False, reason="S
         entry_price = price
         automation_state["position_opened_timestamp"] = time.time()
         sell_fail_count = 0
+        buy_fail_count = 0 # Reset buy fail count on success
         log_message = (f"✅ COMPRA REALIZADA: {amount} SOL para {pair_details['base_symbol']}\n"
                        f"Motivo: {reason}\n"
                        f"Entrada: {price:.10f} | Alvo: {price * (1 + parameters['take_profit_percent']/100):.10f} | "
                        f"Stop: {price * (1 - parameters['stop_loss_percent']/100):.10f}\n"
                        f"Slippage Usado: {slippage_bps/100:.2f}%\n"
-                       f"Taxa de Prioridade: {parameters.get('priority_fee')} micro-lamports\n"
+                       f"Taxa de Prioridade: {parameters.get('priority_fee_lamports')} lamports ({parameters.get('priority_level')})\n"
                        f"https://solscan.io/tx/{tx_sig}")
         logger.info(log_message)
         await send_telegram_message(log_message)
     else:
-        logger.error(f"FALHA NA EXECUÇÃO da compra para {pair_details['base_symbol']}. Penalizando e procurando novo alvo.")
-        await send_telegram_message(f"❌ FALHA NA EXECUÇÃO da compra para **{pair_details['base_symbol']}**. A moeda será penalizada.")
-        if automation_state.get("current_target_pair_address"):
-            automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10
-            automation_state["current_target_pair_address"] = None
+        buy_fail_count += 1
+        if buy_fail_count >= 10:
+            logger.error(f"FALHA NA EXECUÇÃO da compra para {pair_details['base_symbol']}. Limite de {buy_fail_count} falhas atingido. Penalizando e procurando novo alvo.")
+            await send_telegram_message(f"❌ FALHA NA EXECUÇÃO da compra para **{pair_details['base_symbol']}**. Limite de 10 falhas atingido. A moeda será penalizada.")
+            if automation_state.get("current_target_pair_address"):
+                automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10
+                automation_state["current_target_pair_address"] = None
+            buy_fail_count = 0 # Reset buy fail count
+        else:
+            logger.error(f"FALHA NA EXECUÇÃO da compra para {pair_details['base_symbol']}. Tentativa {buy_fail_count}/10. O bot tentará novamente.")
+            await send_telegram_message(f"⚠️ FALHA NA COMPRA do token {pair_details['base_symbol']}. Tentativa {buy_fail_count}/10. O bot tentará novamente.")
 
 async def execute_sell_order(reason=""):
-    global in_position, entry_price, sell_fail_count
+    global in_position, entry_price, sell_fail_count, buy_fail_count
     if not in_position: return
     
     pair_details = automation_state.get('current_target_pair_details', {})
@@ -193,12 +203,12 @@ async def execute_sell_order(reason=""):
         else:
             logger.error(f"Erro ao obter saldo do token {symbol}: Resposta RPC inválida.")
             sell_fail_count += 1
-            if sell_fail_count >= 10:
+            if sell_fail_count >= 100:
                 logger.error("ATINGIDO LIMITE DE FALHAS DE VENDA. RESETANDO POSIÇÃO.")
-                await send_telegram_message(f"⚠️ Limite de 10 falhas de venda para **{symbol}** atingido. Posição abandonada para evitar loop.")
+                await send_telegram_message(f"⚠️ Limite de 100 falhas de venda para **{symbol}** atingido. Posição abandonada para evitar loop.")
                 in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0; automation_state["current_target_pair_address"] = None
                 sell_fail_count = 0
-            await send_telegram_message(f"⚠️ Erro ao obter saldo do token {symbol}. A venda falhou. Tentativa {sell_fail_count}/10. O bot permanecerá em posição.")
+            await send_telegram_message(f"⚠️ Erro ao obter saldo do token {symbol}. A venda falhou. Tentativa {sell_fail_count}/100. O bot permanecerá em posição.")
             return
 
         amount_to_sell = token_balance_data.ui_amount
@@ -215,31 +225,32 @@ async def execute_sell_order(reason=""):
             log_message = (f"🛑 VENDA REALIZADA: {symbol}\n"
                            f"Motivo: {reason}\n"
                            f"Slippage Usado: {slippage_bps/100:.2f}%\n"
-                           f"Taxa de Prioridade: {parameters.get('priority_fee')} micro-lamports\n"
+                           f"Taxa de Prioridade: {parameters.get('priority_fee_lamports')} lamports ({parameters.get('priority_level')})\n"
                            f"https://solscan.io/tx/{tx_sig}")
             logger.info(log_message)
             await send_telegram_message(log_message)
             in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0; automation_state["current_target_pair_address"] = None
             sell_fail_count = 0
+            buy_fail_count = 0
         else:
             logger.error(f"FALHA NA VENDA do token {symbol}. O bot permanecerá em posição e tentará vender novamente.")
             sell_fail_count += 1
-            if sell_fail_count >= 10:
+            if sell_fail_count >= 100:
                 logger.error("ATINGIDO LIMITE DE FALHAS DE VENDA. RESETANDO POSIÇÃO.")
-                await send_telegram_message(f"⚠️ Limite de 10 falhas de venda para **{symbol}** atingido. Posição abandonada para evitar loop.")
+                await send_telegram_message(f"⚠️ Limite de 100 falhas de venda para **{symbol}** atingido. Posição abandonada para evitar loop.")
                 in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0; automation_state["current_target_pair_address"] = None
                 sell_fail_count = 0
-            await send_telegram_message(f"❌ FALHA NA VENDA do token {symbol}. Tentativa {sell_fail_count}/10. O bot tentará novamente.")
+            await send_telegram_message(f"❌ FALHA NA VENDA do token {symbol}. Tentativa {sell_fail_count}/100. O bot tentará novamente.")
 
     except Exception as e:
         logger.error(f"Erro crítico ao vender {symbol}: {e}")
         sell_fail_count += 1
-        if sell_fail_count >= 10:
+        if sell_fail_count >= 100:
             logger.error("ATINGIDO LIMITE DE FALHAS DE VENDA. RESETANDO POSIÇÃO.")
-            await send_telegram_message(f"⚠️ Limite de 10 falhas de venda para **{symbol}** atingido. Posição abandonada para evitar loop.")
+            await send_telegram_message(f"⚠️ Limite de 100 falhas de venda para **{symbol}** atingido. Posição abandonada para evitar loop.")
             in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0; automation_state["current_target_pair_address"] = None
             sell_fail_count = 0
-        await send_telegram_message(f"⚠️ Erro crítico ao vender {symbol}: {e}. Tentativa {sell_fail_count}/10. O bot permanecerá em posição.")
+        await send_telegram_message(f"⚠️ Erro crítico ao vender {symbol}: {e}. Tentativa {sell_fail_count}/100. O bot permanecerá em posição.")
 
 # --- Funções de Análise e Descoberta ---
 async def fetch_geckoterminal_ohlcv(pair_address, timeframe, limit=60):
@@ -528,14 +539,14 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v20.1 (Filtro de Atividade)**.\n\n'
+        'Olá! Sou seu bot **v20.2 (Filtro de Atividade e Taxa aprimorada)**.\n\n'
         '**Dinâmica Autônoma:**\n'
         '1. Eu descubro os TOP 200 pares e aplico um **filtro de atividade na última hora**.\n'
         '2. A seleção usa um **Índice de Qualidade** para priorizar tendências saudáveis.\n'
         '3. Após fechar qualquer operação, eu imediatamente procuro uma nova oportunidade.\n\n'
         '**Estratégia:** Velocidade Pura (+2% em 1 min).\n\n'
         '**Configure-me com `/set` e inicie com `/run`.**\n'
-        '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%> [TAXA_PRIORIDADE]`',
+        '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%> [TAXA_PRIORIDADE_LAMPORTS] [NIVEL_PRIORIDADE]`',
         parse_mode='Markdown'
     )
 
@@ -545,33 +556,37 @@ async def set_params(update, context):
     try:
         args = context.args
         amount, stop_loss, take_profit = float(args[0]), float(args[1]), float(args[2])
-        priority_fee = 5000
+        priority_fee_lamports = 5000000 # Valor padrão em lamports
+        priority_level = "veryHigh" # Nível padrão
 
         if len(args) > 3:
-            priority_fee = int(args[3])
-
+            priority_fee_lamports = int(args[3])
+        if len(args) > 4:
+            priority_level = args[4]
+            
         if stop_loss <= 0 or take_profit <= 0:
             await update.effective_message.reply_text("⚠️ Stop/Profit devem ser > 0."); return
         
-        parameters.update(amount=amount, stop_loss_percent=stop_loss, take_profit_percent=take_profit, priority_fee=priority_fee)
-        if "volume_multiplier" in parameters:
-            parameters["volume_multiplier"] = None
+        parameters.update(amount=amount, stop_loss_percent=stop_loss, take_profit_percent=take_profit, 
+                          priority_fee_lamports=priority_fee_lamports, priority_level=priority_level)
 
         await update.effective_message.reply_text(
             f"✅ *Parâmetros definidos!*\n"
             f"💰 *Valor por Ordem:* `{amount}` SOL\n"
             f"🛑 *Stop Loss:* `-{stop_loss}%`\n"
             f"🎯 *Take Profit:* `+{take_profit}%`\n"
-            f"⚡️ *Taxa de Prioridade:* `{priority_fee}` micro-lamports\n\n"
+            f"⚡️ *Taxa de Prioridade:* `{priority_fee_lamports}` lamports\n"
+            f"⚡️ *Nível de Prioridade:* `{priority_level}`\n\n"
             "Agora use `/run` para iniciar.",
             parse_mode='Markdown'
         )
     except (IndexError, ValueError):
         await update.effective_message.reply_text(
             "⚠️ *Formato incorreto.*\n"
-            "Use: `/set <VALOR> <STOP> <PROFIT> [TAXA_PRIORIDADE]`\n"
-            "Ex: `/set 0.1 2.0 5.0` (taxa padrão 5000)\n"
-            "Ex: `/set 0.1 2.0 5.0 15000` (taxa personalizada)\n", 
+            "Use: `/set <VALOR> <STOP> <PROFIT> [TAXA_PRIORIDADE_LAMPORTS] [NIVEL_PRIORIDADE]`\n"
+            "Ex: `/set 0.1 2.0 5.0` (taxa padrão: 5M lamports, veryHigh)\n"
+            "Ex: `/set 0.1 2.0 5.0 10000000 veryHigh`\n"
+            "Opções de Nível: `veryLow`, `low`, `medium`, `high`, `veryHigh`, `max`\n", 
             parse_mode='Markdown'
         )
 
@@ -666,4 +681,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
