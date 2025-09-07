@@ -107,7 +107,10 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
                 "quoteResponse": quote_response, 
                 "wrapAndUnwrapSol": True, 
                 "dynamicComputeUnitLimit": True,
-                "prioritizationFee": priority_fee
+                "prioritizationFeeLamports": {
+                    "maxLamports": 50000000,
+                    "priorityLevel": "veryHigh"
+                }"
             }
             
             swap_url = "https://quote-api.jup.ag/v6/swap"
@@ -663,3 +666,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
