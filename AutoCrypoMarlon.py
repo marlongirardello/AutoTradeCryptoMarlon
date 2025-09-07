@@ -86,8 +86,7 @@ parameters = {
     "amount": None,
     "stop_loss_percent": None,
     "take_profit_percent": None,
-    "priority_fee_lamports": 5000000,
-    "priority_level": "veryHigh"
+    "priority_fee": 6000000
 }
 
 # --- Funções de Execução de Ordem ---
@@ -102,18 +101,14 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
             quote_res.raise_for_status()
             quote_response = quote_res.json()
 
-            priority_fee_lamports = parameters.get("priority_fee_lamports")
-            priority_level = parameters.get("priority_level")
+            priority_fee = parameters.get("priority_fee")
             
             swap_payload = { 
                 "userPublicKey": str(payer.pubkey()), 
                 "quoteResponse": quote_response, 
                 "wrapAndUnwrapSol": True, 
                 "dynamicComputeUnitLimit": True,
-                "prioritizationFeeLamports": {
-                    "maxLamports": priority_fee_lamports,
-                    "priorityLevel": priority_level
-                }
+                "prioritizationFee": priority_fee
             }
             
             swap_url = "https://quote-api.jup.ag/v6/swap"
@@ -168,7 +163,7 @@ async def execute_buy_order(amount, price, pair_details, manual=False, reason="S
                        f"Entrada: {price:.10f} | Alvo: {price * (1 + parameters['take_profit_percent']/100):.10f} | "
                        f"Stop: {price * (1 - parameters['stop_loss_percent']/100):.10f}\n"
                        f"Slippage Usado: {slippage_bps/100:.2f}%\n"
-                       f"Taxa de Prioridade: {parameters.get('priority_fee_lamports')} lamports ({parameters.get('priority_level')})\n"
+                       f"Taxa de Prioridade: {parameters.get('priority_fee')} micro-lamports\n"
                        f"https://solscan.io/tx/{tx_sig}")
         logger.info(log_message)
         await send_telegram_message(log_message)
@@ -225,7 +220,7 @@ async def execute_sell_order(reason=""):
             log_message = (f"🛑 VENDA REALIZADA: {symbol}\n"
                            f"Motivo: {reason}\n"
                            f"Slippage Usado: {slippage_bps/100:.2f}%\n"
-                           f"Taxa de Prioridade: {parameters.get('priority_fee_lamports')} lamports ({parameters.get('priority_level')})\n"
+                           f"Taxa de Prioridade: {parameters.get('priority_fee')} micro-lamports\n"
                            f"https://solscan.io/tx/{tx_sig}")
             logger.info(log_message)
             await send_telegram_message(log_message)
@@ -314,7 +309,7 @@ async def calculate_dynamic_slippage(pair_address):
     price_range = df['high'].max() - df['low'].min()
     volatility = (price_range / df['low'].min()) * 100 if df['low'].min() > 0 else 0
     if volatility > 3.0: 
-        slippage_bps = 1000  # 10% de slippage
+        slippage_bps = 1000
     elif volatility > 1.5: 
         slippage_bps = 600
     else: 
@@ -542,14 +537,14 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v20.3 (Slippage ajustado e Taxa aprimorada)**.\n\n'
+        'Olá! Sou seu bot **v20.4 (Reversão de Taxa de Prioridade)**.\n\n'
         '**Dinâmica Autônoma:**\n'
         '1. Eu descubro os TOP 200 pares e aplico um **filtro de atividade na última hora**.\n'
         '2. A seleção usa um **Índice de Qualidade** para priorizar tendências saudáveis.\n'
         '3. Após fechar qualquer operação, eu imediatamente procuro uma nova oportunidade.\n\n'
         '**Estratégia:** Velocidade Pura (+2% em 1 min).\n\n'
         '**Configure-me com `/set` e inicie com `/run`.**\n'
-        '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%> [TAXA_PRIORIDADE_LAMPORTS] [NIVEL_PRIORIDADE]`',
+        '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%> [TAXA_PRIORIDADE]`',
         parse_mode='Markdown'
     )
 
@@ -559,37 +554,33 @@ async def set_params(update, context):
     try:
         args = context.args
         amount, stop_loss, take_profit = float(args[0]), float(args[1]), float(args[2])
-        priority_fee_lamports = 5000000
-        priority_level = "veryHigh"
+        priority_fee = 6000000
 
         if len(args) > 3:
-            priority_fee_lamports = int(args[3])
-        if len(args) > 4:
-            priority_level = args[4]
-            
+            priority_fee = int(args[3])
+
         if stop_loss <= 0 or take_profit <= 0:
-            await update.effective_message.reply_text("⚠️ Stop/Profit devem ser > 0."); return
+            await update.effective_effective_message.reply_text("⚠️ Stop/Profit devem ser > 0."); return
         
-        parameters.update(amount=amount, stop_loss_percent=stop_loss, take_profit_percent=take_profit, 
-                          priority_fee_lamports=priority_fee_lamports, priority_level=priority_level)
+        parameters.update(amount=amount, stop_loss_percent=stop_loss, take_profit_percent=take_profit, priority_fee=priority_fee)
+        if "volume_multiplier" in parameters:
+            parameters["volume_multiplier"] = None
 
         await update.effective_message.reply_text(
             f"✅ *Parâmetros definidos!*\n"
             f"💰 *Valor por Ordem:* `{amount}` SOL\n"
             f"🛑 *Stop Loss:* `-{stop_loss}%`\n"
             f"🎯 *Take Profit:* `+{take_profit}%`\n"
-            f"⚡️ *Taxa de Prioridade:* `{priority_fee_lamports}` lamports\n"
-            f"⚡️ *Nível de Prioridade:* `{priority_level}`\n\n"
+            f"⚡️ *Taxa de Prioridade:* `{priority_fee}` micro-lamports\n\n"
             "Agora use `/run` para iniciar.",
             parse_mode='Markdown'
         )
     except (IndexError, ValueError):
         await update.effective_message.reply_text(
             "⚠️ *Formato incorreto.*\n"
-            "Use: `/set <VALOR> <STOP> <PROFIT> [TAXA_PRIORIDADE_LAMPORTS] [NIVEL_PRIORIDADE]`\n"
-            "Ex: `/set 0.1 2.0 5.0` (taxa padrão: 5M lamports, veryHigh)\n"
-            "Ex: `/set 0.1 2.0 5.0 10000000 veryHigh`\n"
-            "Opções de Nível: `veryLow`, `low`, `medium`, `high`, `veryHigh`, `max`\n", 
+            "Use: `/set <VALOR> <STOP> <PROFIT> [TAXA_PRIORIDADE]`\n"
+            "Ex: `/set 0.1 2.0 5.0` (taxa padrão 2000000)\n"
+            "Ex: `/set 0.1 2.0 5.0 15000` (taxa personalizada)\n", 
             parse_mode='Markdown'
         )
 
