@@ -1,4 +1,4 @@
-# Usar uma imagem base oficial e completa do Python para garantir todas as ferramentas de compilação
+# Usar uma imagem base oficial e completa do Python
 FROM python:3.12-slim
 
 # Definir o diretório de trabalho dentro do contentor
@@ -24,5 +24,5 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copiar o resto do código da aplicação para o contentor
 COPY . .
 
-# Comando para executar a aplicação
-CMD ["python", "AutoCrypoMarlon.py"]
+# Comando para executar a aplicação, garantindo a atualização do solana na execução
+CMD ["sh", "-c", "pip install solana==0.30.2 --force-reinstall && python AutoCrypoMarlon.py"]
