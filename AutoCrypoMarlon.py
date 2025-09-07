@@ -93,13 +93,13 @@ parameters = {
 }
 
 # --- Funções de Execução de Ordem ---
-async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals):
-    logger.info(f"Iniciando swap de {amount} do token {input_mint_str} para {output_mint_str} com slippage e limite computacional dinâmicos.")
+async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, slippage_bps):
+    logger.info(f"Iniciando swap de {amount} do token {input_mint_str} para {output_mint_str} com slippage de {slippage_bps} BPS e limite computacional dinâmico.")
     amount_wei = int(amount * (10**input_decimals))
     
     async with httpx.AsyncClient() as client:
         try:
-            quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={input_mint_str}&outputMint={output_mint_str}&amount={amount_wei}&dynamicSlippageBps=true&maxAccounts=64"
+            quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={input_mint_str}&outputMint={output_mint_str}&amount={amount_wei}&slippageBps={slippage_bps}&maxAccounts=64"
             quote_res = await client.get(quote_url, timeout=60.0)
             quote_res.raise_for_status()
             quote_response = quote_res.json()
@@ -137,12 +137,28 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals):
             tx_signature = solana_client.send_raw_transaction(bytes(signed_tx), opts=tx_opts).value
             
             logger.info(f"Transação enviada: {tx_signature}")
-            await asyncio.sleep(12)
-            solana_client.confirm_transaction(tx_signature, commitment="confirmed")
-            logger.info(f"Transação confirmada: https://solscan.io/tx/{tx_signature}")
-            return str(tx_signature)
+            
+            # --- NOVA LÓGICA DE VERIFICAÇÃO ---
+            for _ in range(5):
+                await asyncio.sleep(10) # Aguarda a transação ser processada
+                try:
+                    tx_status = solana_client.get_transaction(tx_signature, commitment="confirmed")
+                    if tx_status.value and tx_status.value.meta.err is None:
+                        logger.info(f"Transação confirmada e bem-sucedida: https://solscan.io/tx/{tx_signature}")
+                        return tx_signature, None
+                    elif tx_status.value and tx_status.value.meta.err:
+                        error_message = str(tx_status.value.meta.err)
+                        logger.error(f"Transação confirmada com erro: {error_message}")
+                        return tx_signature, error_message
+                except Exception as status_e:
+                    logger.warning(f"Aguardando confirmação... Erro temporário: {status_e}")
+            
+            logger.error("Transação não confirmada após várias tentativas ou falhou com erro desconhecido.")
+            return None, "Transaction not confirmed or failed"
+
         except Exception as e:
-            logger.error(f"Falha na transação: {e}"); await send_telegram_message(f"⚠️ Falha na transação: {e}"); return None
+            logger.error(f"Falha na transação: {e}"); await send_telegram_message(f"⚠️ Falha na transação: {e}"); return None, str(e)
+
 
 async def execute_buy_order(amount, price, pair_details, manual=False, reason="Sinal da Estratégia"):
     global in_position, entry_price, sell_fail_count, buy_fail_count
@@ -157,10 +173,12 @@ async def execute_buy_order(amount, price, pair_details, manual=False, reason="S
             automation_state["current_target_pair_address"] = None
             return
 
+    slippage_bps = await calculate_dynamic_slippage(pair_details['pair_address'])
     logger.info(f"EXECUTANDO ORDEM DE COMPRA de {amount} SOL para {pair_details['base_symbol']} ao preço de {price}")
     
-    tx_sig = await execute_swap(pair_details['quote_address'], pair_details['base_address'], amount, 9)
-    if tx_sig:
+    tx_sig, tx_error = await execute_swap(pair_details['quote_address'], pair_details['base_address'], amount, 9, slippage_bps)
+
+    if tx_sig and not tx_error:
         in_position = True
         entry_price = price
         automation_state["position_opened_timestamp"] = time.time()
@@ -170,12 +188,16 @@ async def execute_buy_order(amount, price, pair_details, manual=False, reason="S
                        f"Motivo: {reason}\n"
                        f"Entrada: {price:.10f} | Alvo: {price * (1 + parameters['take_profit_percent']/100):.10f} | "
                        f"Stop: {price * (1 - parameters['stop_loss_percent']/100):.10f}\n"
-                       f"Slippage: Dinâmico | Taxa Máx. de Prioridade: {parameters.get('priority_fee_lamports')} lamports ({parameters.get('priority_level')})\n"
+                       f"Slippage Usado: {slippage_bps/100:.2f}%\n"
+                       f"Taxa Máx. de Prioridade: {parameters.get('priority_fee_lamports')} lamports ({parameters.get('priority_level')})\n"
                        f"https://solscan.io/tx/{tx_sig}")
         logger.info(log_message)
         await send_telegram_message(log_message)
     else:
         buy_fail_count += 1
+        if tx_error:
+            await send_telegram_message(f"❌ FALHA NA COMPRA para **{pair_details['base_symbol']}**. Motivo: `{tx_error}`. Tentativa {buy_fail_count}/10. O bot tentará novamente.")
+        
         if buy_fail_count >= 10:
             logger.error(f"FALHA NA EXECUÇÃO da compra para {pair_details['base_symbol']}. Limite de {buy_fail_count} falhas atingido. Penalizando e procurando novo alvo.")
             await send_telegram_message(f"❌ FALHA NA EXECUÇÃO da compra para **{pair_details['base_symbol']}**. Limite de 10 falhas atingido. A moeda será penalizada.")
@@ -185,7 +207,7 @@ async def execute_buy_order(amount, price, pair_details, manual=False, reason="S
             buy_fail_count = 0
         else:
             logger.error(f"FALHA NA EXECUÇÃO da compra para {pair_details['base_symbol']}. Tentativa {buy_fail_count}/10. O bot tentará novamente.")
-            await send_telegram_message(f"⚠️ FALHA NA COMPRA do token {pair_details['base_symbol']}. Tentativa {buy_fail_count}/10. O bot tentará novamente.")
+
 
 async def execute_sell_order(reason=""):
     global in_position, entry_price, sell_fail_count, buy_fail_count
@@ -210,7 +232,6 @@ async def execute_sell_order(reason=""):
                 await send_telegram_message(f"⚠️ Limite de 100 falhas de venda para **{symbol}** atingido. Posição abandonada para evitar loop.")
                 in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0
                 
-                # Penaliza a moeda em caso de falha de venda persistente
                 if automation_state.get('current_target_pair_address'):
                     automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10
                     automation_state["current_target_pair_address"] = None
@@ -227,12 +248,14 @@ async def execute_sell_order(reason=""):
             sell_fail_count = 0
             return
 
-        tx_sig = await execute_swap(pair_details['base_address'], pair_details['quote_address'], amount_to_sell, token_balance_data.decimals)
+        slippage_bps = await calculate_dynamic_slippage(pair_details['pair_address'])
+        tx_sig, tx_error = await execute_swap(pair_details['base_address'], pair_details['quote_address'], amount_to_sell, token_balance_data.decimals, slippage_bps)
         
-        if tx_sig:
+        if tx_sig and not tx_error:
             log_message = (f"🛑 VENDA REALIZADA: {symbol}\n"
                            f"Motivo: {reason}\n"
-                           f"Slippage: Dinâmico | Taxa Máx. de Prioridade: {parameters.get('priority_fee_lamports')} lamports ({parameters.get('priority_level')})\n"
+                           f"Slippage Usado: {slippage_bps/100:.2f}%\n"
+                           f"Taxa Máx. de Prioridade: {parameters.get('priority_fee_lamports')} lamports ({parameters.get('priority_level')})\n"
                            f"https://solscan.io/tx/{tx_sig}")
             logger.info(log_message)
             await send_telegram_message(log_message)
@@ -249,7 +272,11 @@ async def execute_sell_order(reason=""):
             sell_fail_count = 0
             buy_fail_count = 0
         else:
-            logger.error(f"FALHA NA VENDA do token {symbol}. O bot permanecerá em posição e tentará vender novamente.")
+            if tx_sig and tx_error:
+                await send_telegram_message(f"❌ FALHA NA VENDA do token **{symbol}**. Motivo: `{tx_error}`. O bot permanecerá em posição. Tentativa {sell_fail_count + 1}/100. Transação: https://solscan.io/tx/{tx_sig}")
+            elif not tx_sig and tx_error:
+                 await send_telegram_message(f"❌ FALHA NA VENDA do token **{symbol}**. Motivo: `{tx_error}`. O bot permanecerá em posição. Tentativa {sell_fail_count + 1}/100.")
+            
             sell_fail_count += 1
             if sell_fail_count >= 100:
                 logger.error("ATINGIDO LIMITE DE FALHAS DE VENDA. RESETANDO POSIÇÃO.")
@@ -262,7 +289,6 @@ async def execute_sell_order(reason=""):
                     await send_telegram_message(f"⚠️ **{symbol}** foi penalizada por 10 ciclos após falhas de venda.")
                 
                 sell_fail_count = 0
-            await send_telegram_message(f"❌ FALHA NA VENDA do token {symbol}. Tentativa {sell_fail_count}/100. O bot tentará novamente.")
 
     except Exception as e:
         logger.error(f"Erro crítico ao vender {symbol}: {e}")
@@ -479,19 +505,9 @@ async def check_velocity_strategy():
     target_address = automation_state.get("current_target_pair_address")
     if not target_address or in_position or automation_state.get("checking_volatility"): return
 
-    pair_details = automation_state.get("current_target_pair_details")
-    data = await fetch_geckoterminal_ohlcv(target_address, parameters["timeframe"], limit=2)
-    if data is None or len(data) < 2: return
-
-    last_closed_candle = data.iloc[0]
-    
-    price_change_pct = (last_closed_candle['close'] - last_closed_candle['open']) / last_closed_candle['open'] * 100 if last_closed_candle['open'] > 0 else 0
-
-    logger.info(f"Análise Compra ({pair_details['base_symbol']}): "
-                f"Variação Vela: {price_change_pct:+.2f}% (Meta: >2%)")
-
-    # Inicia a verificação de volatilidade imediatamente, independentemente da variação da vela
+    # Inicia a verificação de volatilidade imediatamente após a moeda ser selecionada
     if not automation_state.get("checking_volatility"):
+        pair_details = automation_state.get("current_target_pair_details")
         logger.info(f"Moeda {pair_details['base_symbol']} selecionada. Iniciando verificação de volatilidade por 3 minutos.")
         automation_state["checking_volatility"] = True
         automation_state["volatility_check_start_time"] = time.time()
@@ -547,7 +563,7 @@ async def autonomous_loop():
                         automation_state["volatility_check_start_time"] = 0
                         await send_telegram_message(f"🎯 **Novo Alvo:** {best_coin['symbol']}. Iniciando monitoramento...")
             
-            # Lógica para verificar a volatilidade e condição de compra
+            # Lógica para verificação de volatilidade e condição de compra
             if automation_state.get("current_target_pair_address") and not in_position:
                 if automation_state.get("checking_volatility"):
                     pair_details = automation_state.get("current_target_pair_details")
@@ -566,37 +582,30 @@ async def autonomous_loop():
                             await asyncio.sleep(60)
                             continue
 
-                        # Se a verificação de 3 minutos passou ou ainda está em andamento, verifica a condição de compra
                         if now - automation_state.get("volatility_check_start_time", 0) > 180:
-                             automation_state["checking_volatility"] = False
-                        
-                        if price_change_pct > 2.0 and not in_position:
-                            if automation_state.get("checking_volatility"):
-                                logger.info(f"Variação da vela para {pair_details['base_symbol']} ainda está acima de 2% durante a verificação. Procedendo com a compra.")
-                                await send_telegram_message(f"✅ Variação da vela para **{pair_details['base_symbol']}** ainda está positiva durante a verificação de volatilidade. Executando ordem de compra...")
-                                price, _ = await fetch_dexscreener_real_time_price(pair_details['pair_address'])
-                                if price:
-                                    reason = "Sinal da Estratégia após verificação de volatilidade"
-                                    await execute_buy_order(parameters["amount"], price, pair_details, reason=reason)
-                                automation_state["checking_volatility"] = False
-                            elif now - automation_state.get("volatility_check_start_time", 0) > 180:
-                                logger.info(f"Verificação de volatilidade de 3 minutos concluída para {pair_details['base_symbol']}. Condição de entrada ainda válida. Procedendo com a compra.")
-                                await send_telegram_message(f"✅ Volatilidade de **{pair_details['base_symbol']}** dentro do limite por 3 minutos E a variação da vela ainda está positiva. Executando ordem de compra...")
-                                price, _ = await fetch_dexscreener_real_time_price(pair_details['pair_address'])
-                                if price:
-                                    reason = "Sinal da Estratégia após verificação de volatilidade"
-                                    await execute_buy_order(parameters["amount"], price, pair_details, reason=reason)
-                                automation_state["checking_volatility"] = False
-                        elif now - automation_state.get("volatility_check_start_time", 0) > 180:
-                            logger.info(f"Variação da vela para {pair_details['base_symbol']} caiu abaixo de 2% após 3 minutos. Continuar monitorando até timeout...")
-                            await send_telegram_message(f"❌ Variação da vela para **{pair_details['base_symbol']}** caiu abaixo de 2% após verificação. Continuarei a monitorar até o timeout ou até um novo sinal.")
+                            # Passou na verificação de 3 minutos, agora só espera a variação > 2%
                             automation_state["checking_volatility"] = False
+                            logger.info(f"Verificação de volatilidade de 3 minutos concluída para {pair_details['base_symbol']}. Moeda considerada segura.")
+                            await send_telegram_message(f"✅ Volatilidade de **{pair_details['base_symbol']}** dentro do limite por 3 minutos. Agora, monitorando para sinal de compra (>2%).")
                     
                     await asyncio.sleep(15)
 
-                else: # Se não estiver verificando a volatilidade, checa a estratégia para iniciar a verificação
-                    await check_velocity_strategy()
-                    await asyncio.sleep(30)
+                else: # Se a verificação já foi concluída, entra neste bloco para monitorar a variação > 2%
+                    pair_details = automation_state.get("current_target_pair_details")
+                    data = await fetch_geckoterminal_ohlcv(pair_details['pair_address'], parameters["timeframe"], limit=1)
+                    if data is not None and not data.empty:
+                        last_closed_candle = data.iloc[0]
+                        price_change_pct = (last_closed_candle['close'] - last_closed_candle['open']) / last_closed_candle['open'] * 100 if last_closed_candle['open'] > 0 else 0
+                        
+                        if price_change_pct > 2.0:
+                            logger.info(f"Variação da vela para {pair_details['base_symbol']} voltou a ser maior que 2%. Procedendo com a compra.")
+                            await send_telegram_message(f"✅ Variação da vela para **{pair_details['base_symbol']}** voltou a subir! Executando ordem de compra...")
+                            price, _ = await fetch_dexscreener_real_time_price(pair_details['pair_address'])
+                            if price:
+                                reason = "Sinal da Estratégia retomado"
+                                await execute_buy_order(parameters["amount"], price, pair_details, reason=reason)
+            
+                    await asyncio.sleep(15)
             elif in_position:
                 price, _ = await fetch_dexscreener_real_time_price(automation_state["current_target_pair_address"])
                 if price:
@@ -612,7 +621,8 @@ async def autonomous_loop():
                         await execute_sell_order(reason); continue
                 await asyncio.sleep(15)
             else:
-                await asyncio.sleep(60)
+                await check_velocity_strategy()
+                await asyncio.sleep(30)
         except asyncio.CancelledError:
             logger.info("Loop autônomo cancelado."); break
         except Exception as e:
@@ -621,11 +631,12 @@ async def autonomous_loop():
 # --- Comandos do Telegram ---
 async def start(update, context):
     await update.effective_message.reply_text(
-        'Olá! Sou seu bot **v20.10 (Lógica de Volatilidade Aprimorada)**.\n\n'
+        'Olá! Sou seu bot **v20.12 (Lógica de Volatilidade Aprimorada)**.\n\n'
         '**Dinâmica Autônoma:**\n'
         '1. Eu descubro os TOP 200 pares e aplico um **filtro de atividade na última hora**.\n'
         '2. A seleção usa um **Índice de Qualidade** para priorizar tendências saudáveis.\n'
-        '3. Agora, antes de comprar, verifico a volatilidade por 3 minutos. Se a variação de uma vela exceder 10%, a moeda é penalizada.\n\n'
+        '3. Agora, após selecionar uma moeda, verifico a volatilidade por 3 minutos. Se uma vela variar mais de 10%, a moeda é penalizada.\n'
+        '4. Se a moeda passar na verificação, eu continuo a monitorar a variação da vela até ela ficar acima de 2% para comprar, ou até o timeout de 15 minutos.\n\n'
         '**Estratégia:** Velocidade Pura (+2% em 1 min).\n\n'
         '**Configure-me com `/set` e inicie com `/run`.**\n'
         '`/set <VALOR> <STOP_LOSS_%> <TAKE_PROFIT_%> [TAXA_MAX_LAMPORTS] [NIVEL_PRIORIDADE]`',
