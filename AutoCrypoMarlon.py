@@ -162,7 +162,7 @@ async def execute_buy_order(amount, price, pair_details, manual=False, reason="S
         entry_price = price
         automation_state["position_opened_timestamp"] = time.time()
         sell_fail_count = 0
-        buy_fail_count = 0 # Reset buy fail count on success
+        buy_fail_count = 0
         log_message = (f"✅ COMPRA REALIZADA: {amount} SOL para {pair_details['base_symbol']}\n"
                        f"Motivo: {reason}\n"
                        f"Entrada: {price:.10f} | Alvo: {price * (1 + parameters['take_profit_percent']/100):.10f} | "
@@ -180,7 +180,7 @@ async def execute_buy_order(amount, price, pair_details, manual=False, reason="S
             if automation_state.get("current_target_pair_address"):
                 automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10
                 automation_state["current_target_pair_address"] = None
-            buy_fail_count = 0 # Reset buy fail count
+            buy_fail_count = 0
         else:
             logger.error(f"FALHA NA EXECUÇÃO da compra para {pair_details['base_symbol']}. Tentativa {buy_fail_count}/10. O bot tentará novamente.")
             await send_telegram_message(f"⚠️ FALHA NA COMPRA do token {pair_details['base_symbol']}. Tentativa {buy_fail_count}/10. O bot tentará novamente.")
@@ -313,9 +313,12 @@ async def calculate_dynamic_slippage(pair_address):
         return 75
     price_range = df['high'].max() - df['low'].min()
     volatility = (price_range / df['low'].min()) * 100 if df['low'].min() > 0 else 0
-    if volatility > 3.0: slippage_bps = 1000
-    elif volatility > 1.5: slippage_bps = 600
-    else: slippage_bps = 500
+    if volatility > 3.0: 
+        slippage_bps = 1500
+    elif volatility > 1.5: 
+        slippage_bps = 600
+    else: 
+        slippage_bps = 500
     logger.info(f"Volatilidade ({volatility:.2f}%). Slippage definido para {slippage_bps/100:.2f}%.")
     return slippage_bps
 
@@ -556,8 +559,8 @@ async def set_params(update, context):
     try:
         args = context.args
         amount, stop_loss, take_profit = float(args[0]), float(args[1]), float(args[2])
-        priority_fee_lamports = 5000000 # Valor padrão em lamports
-        priority_level = "veryHigh" # Nível padrão
+        priority_fee_lamports = 5000000
+        priority_level = "veryHigh"
 
         if len(args) > 3:
             priority_fee_lamports = int(args[3])
@@ -681,4 +684,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
