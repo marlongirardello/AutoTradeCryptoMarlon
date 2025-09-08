@@ -617,7 +617,7 @@ async def autonomous_loop():
                     if price >= take_profit_price: await execute_sell_order(f"Take Profit (+{parameters['take_profit_percent']}%)"); continue
                     if price <= stop_loss_price: await execute_sell_order(f"Stop Loss (-{parameters['stop_loss_percent']}%)"); continue
                     if time.time() - automation_state.get("position_opened_timestamp", 0) > 1800:
-                        reason = f"Timeout de 60 minutos (P/L: {profit:+.2f}%)"
+                        reason = f"Timeout de 30 minutos (P/L: {profit:+.2f}%)"
                         await execute_sell_order(reason); continue
                 await asyncio.sleep(15)
             else:
@@ -772,4 +772,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
