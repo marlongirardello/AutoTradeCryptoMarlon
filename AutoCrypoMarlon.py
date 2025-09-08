@@ -352,7 +352,7 @@ async def calculate_dynamic_slippage(pair_address):
     price_range = df['high'].max() - df['low'].min()
     volatility = (price_range / df['low'].min()) * 100 if df['low'].min() > 0 else 0
     if volatility > 10.0:
-        slippage_bps = 1000 # 10%
+        slippage_bps = 600 # 10%
     else:
         slippage_bps = 500  # 5%
     logger.info(f"Volatilidade ({volatility:.2f}%). Slippage definido para {slippage_bps/100:.2f}%.")
@@ -616,7 +616,7 @@ async def autonomous_loop():
                     
                     if price >= take_profit_price: await execute_sell_order(f"Take Profit (+{parameters['take_profit_percent']}%)"); continue
                     if price <= stop_loss_price: await execute_sell_order(f"Stop Loss (-{parameters['stop_loss_percent']}%)"); continue
-                    if time.time() - automation_state.get("position_opened_timestamp", 0) > 3600:
+                    if time.time() - automation_state.get("position_opened_timestamp", 0) > 1800:
                         reason = f"Timeout de 60 minutos (P/L: {profit:+.2f}%)"
                         await execute_sell_order(reason); continue
                 await asyncio.sleep(15)
@@ -772,3 +772,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
