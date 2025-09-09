@@ -133,7 +133,7 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
             signature = payer.sign_message(to_bytes_versioned(swap_tx.message))
             signed_tx = VersionedTransaction.populate(swap_tx.message, [signature])
 
-            tx_opts = TxOpts(skip_preflight=True, preflight_commitment="processed")
+            tx_opts = TxOpts(skip_preflight=True, preflight_commitment="processed", max_supported_version=0)
             tx_signature = solana_client.send_raw_transaction(bytes(signed_tx), opts=tx_opts).value
             
             logger.info(f"Transação enviada: {tx_signature}")
@@ -793,6 +793,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
