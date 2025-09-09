@@ -616,7 +616,7 @@ async def autonomous_loop():
                 else:
                     await check_velocity_strategy()
                     await asyncio.sleep(30)
-            elif in_position:
+            if in_position:
                 price, _ = await fetch_dexscreener_real_time_price(automation_state["current_target_pair_address"])
                 if price:
                     profit = ((price - entry_price) / entry_price) * 100 if entry_price > 0 else 0
@@ -782,6 +782,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
