@@ -166,6 +166,20 @@ async def execute_buy_order(amount, price, pair_details, manual=False, reason="S
             automation_state["current_target_pair_address"] = None
             return
 
+        # --- NOVA VERIFICAÇÃO DE VOLATILIDADE ANTES DA COMPRA ---
+        df = await fetch_geckoterminal_ohlcv(pair_details['pair_address'], "1m", limit=2)
+        if df is not None and not df.empty:
+            price_range = df['high'].max() - df['low'].min()
+            volatility = (price_range / df['low'].min()) * 100 if df['low'].min() > 0 else 0
+    
+            if volatility > 30.0:
+                logger.error(f"FALHA NA COMPRA: Volatilidade de {volatility:.2f}% excedeu o limite de 30%. Penalizando e procurando novo alvo.")
+                await send_telegram_message(f"❌ Compra para **{pair_details['base_symbol']}** abortada. Volatilidade extrema detectada. A moeda será penalizada.")
+                automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10
+                automation_state["current_target_pair_address"] = None
+                return
+        # --- FIM DA NOVA VERIFICAÇÃO ---
+
     slippage_bps = await calculate_dynamic_slippage(pair_details['pair_address'])
     logger.info(f"EXECUTANDO ORDEM DE COMPRA de {amount} SOL para {pair_details['base_symbol']} ao preço de {price}")
     
@@ -408,7 +422,7 @@ async def discover_and_filter_pairs():
             if age_str:
                 age_dt = datetime.fromisoformat(age_str.replace('Z', '+00:00'))
                 age_hours = (datetime.now(timezone.utc) - age_dt).total_seconds() / 3600
-                if age_hours < 0.5 or age_hours > 1.9: rejection_reasons.append(f"Idade Fora da Faixa Ideal ({age_hours:.2f} horas)")
+                if age_hours < 0.5 or age_hours > 1.75: rejection_reasons.append(f"Idade Fora da Faixa Ideal ({age_hours:.2f} horas)")
             
             # --- NOVO FILTRO DE ATIVIDADE NA ÚLTIMA HORA ---
             volume_1h = float(attr.get('volume_usd', {}).get('h1', 0))
@@ -489,7 +503,7 @@ async def find_best_coin_to_trade(candidate_pairs, penalized_pairs=set()):
 async def check_velocity_strategy():
     global in_position, entry_price
     target_address = automation_state.get("current_target_pair_address")
-    if not target_address or in_position or automation_state.get("checking_volatility"): return
+    if not target_address or in_position: return
 
     pair_details = automation_state.get("current_target_pair_details")
     data = await fetch_geckoterminal_ohlcv(target_address, parameters["timeframe"], limit=2)
@@ -502,12 +516,13 @@ async def check_velocity_strategy():
     logger.info(f"Análise Compra ({pair_details['base_symbol']}): "
                 f"Variação Vela: {price_change_pct:+.2f}% (Meta: >2%)")
 
-    if not automation_state.get("checking_volatility"):
-        pair_details = automation_state.get("current_target_pair_details")
-        logger.info(f"Moeda {pair_details['base_symbol']} selecionada. Iniciando verificação de volatilidade por 3 minutos.")
-        automation_state["checking_volatility"] = True
-        automation_state["volatility_check_start_time"] = time.time()
-        await send_telegram_message(f"🔔 Moeda alvo **{pair_details['base_symbol']}** selecionada. Verificando volatilidade por 3 minutos antes de entrar.")
+    if price_change_pct > 2.0:
+        logger.info(f"Variação da vela para {pair_details['base_symbol']} voltou a ser maior que 2%. Procedendo com a compra.")
+        await send_telegram_message(f"✅ Variação da vela para **{pair_details['base_symbol']}** voltou a subir! Executando ordem de compra...")
+        price, _ = await fetch_dexscreener_real_time_price(pair_details['pair_address'])
+        if price:
+            reason = "Sinal da Estratégia retomado"
+            await execute_buy_order(parameters["amount"], price, pair_details, reason=reason)
 
 # --- Loop Principal Autônomo ---
 async def autonomous_loop():
@@ -562,31 +577,23 @@ async def autonomous_loop():
                         await send_telegram_message(f"🎯 **Novo Alvo:** {best_coin['symbol']}. Iniciando monitoramento...")
             
             if automation_state.get("current_target_pair_address") and not in_position:
-                if automation_state.get("checking_volatility"):
-                    pair_details = automation_state.get("current_target_pair_details")
-                    data = await fetch_geckoterminal_ohlcv(pair_details['pair_address'], parameters["timeframe"], limit=1)
+                pair_details = automation_state.get("current_target_pair_details")
+                data = await fetch_geckoterminal_ohlcv(pair_details['pair_address'], parameters["timeframe"], limit=1)
+                if data is not None and not data.empty:
+                    last_closed_candle = data.iloc[0]
+                    price_change_pct = (last_closed_candle['close'] - last_closed_candle['open']) / last_closed_candle['open'] * 100 if last_closed_candle['open'] > 0 else 0
                     
-                    if data is not None and not data.empty:
-                        last_closed_candle = data.iloc[0]
-                        price_change_pct = (last_closed_candle['close'] - last_closed_candle['open']) / last_closed_candle['open'] * 100 if last_closed_candle['open'] > 0 else 0
-                        
-                        if abs(price_change_pct) > 10.0:
-                            logger.warning(f"Volatilidade extrema detectada para {pair_details['base_symbol']}: {price_change_pct:.2f}%. Penalizando moeda.")
-                            await send_telegram_message(f"⚠️ Volatilidade extrema (+/- 10%) detectada para **{pair_details['base_symbol']}**. A moeda será penalizada e um novo alvo será buscado.")
-                            automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 2
-                            automation_state["current_target_pair_address"] = None
-                            automation_state["checking_volatility"] = False
-                            automation_state["volatility_check_passed"] = False
-                            await asyncio.sleep(60)
-                            continue
-
-                        if now - automation_state.get("volatility_check_start_time", 0) > 180:
-                            automation_state["checking_volatility"] = False
-                            automation_state["volatility_check_passed"] = True
-                            logger.info(f"Verificação de volatilidade de 3 minutos concluída para {pair_details['base_symbol']}. Moeda considerada segura.")
-                            await send_telegram_message(f"✅ Volatilidade de **{pair_details['base_symbol']}** dentro do limite por 3 minutos. Agora, monitorando para sinal de compra (>2%).")
+                    logger.info(f"Monitorando {pair_details['base_symbol']}: Variação da Vela: {price_change_pct:+.2f}%")
                     
-                    await asyncio.sleep(15)
+                    if price_change_pct > 2.0:
+                        logger.info(f"Variação da vela para {pair_details['base_symbol']} voltou a ser maior que 2%. Procedendo com a compra.")
+                        await send_telegram_message(f"✅ Variação da vela para **{pair_details['base_symbol']}** voltou a subir! Executando ordem de compra...")
+                        price, _ = await fetch_dexscreener_real_time_price(pair_details['pair_address'])
+                        if price:
+                            reason = "Sinal da Estratégia retomado"
+                            await execute_buy_order(parameters["amount"], price, pair_details, reason=reason)
+                
+                await asyncio.sleep(15)
 
                 elif automation_state.get("volatility_check_passed"):
                     pair_details = automation_state.get("current_target_pair_details")
@@ -775,6 +782,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
