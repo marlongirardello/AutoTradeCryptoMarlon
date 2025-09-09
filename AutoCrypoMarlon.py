@@ -408,7 +408,7 @@ async def discover_and_filter_pairs():
             if age_str:
                 age_dt = datetime.fromisoformat(age_str.replace('Z', '+00:00'))
                 age_hours = (datetime.now(timezone.utc) - age_dt).total_seconds() / 3600
-                if age_hours < 0.5 or age_hours > 2.1: rejection_reasons.append(f"Idade Fora da Faixa Ideal ({age_hours:.2f} horas)")
+                if age_hours < 0.5 or age_hours > 1.9: rejection_reasons.append(f"Idade Fora da Faixa Ideal ({age_hours:.2f} horas)")
             
             # --- NOVO FILTRO DE ATIVIDADE NA ÚLTIMA HORA ---
             volume_1h = float(attr.get('volume_usd', {}).get('h1', 0))
@@ -775,6 +775,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
