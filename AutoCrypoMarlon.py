@@ -241,8 +241,11 @@ async def execute_sell_order(reason=""):
         tx_sig = await execute_swap(pair_details['base_address'], pair_details['quote_address'], amount_to_sell, token_balance_data.decimals, slippage_bps)
         
         if tx_sig:
+            current_price, _ = await fetch_dexscreener_real_time_price(automation_state["current_target_pair_address"])
+            profit = ((current_price - entry_price) / entry_price) * 100 if entry_price > 0 else 0
             log_message = (f"🛑 VENDA REALIZADA: {symbol}\n"
                            f"Motivo: {reason}\n"
+                           f"**P/L:** {profit:+.2f}%\n"
                            f"Slippage Usado: {slippage_bps/100:.2f}%\n"
                            f"Taxa de Prioridade: {parameters.get('priority_fee')} micro-lamports\n"
                            f"https://solscan.io/tx/{tx_sig}")
@@ -772,6 +775,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
