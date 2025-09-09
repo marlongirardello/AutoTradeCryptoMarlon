@@ -533,10 +533,10 @@ async def autonomous_loop():
             now = time.time()
             force_rescan = False
             
-            if not in_position and automation_state.get("current_target_pair_address") and (now - automation_state.get("target_selected_timestamp", 0) > 900):
+            if not in_position and automation_state.get("current_target_pair_address") and (now - automation_state.get("target_selected_timestamp", 0) > 600):
                 penalized_symbol = automation_state["current_target_symbol"]
                 penalized_address = automation_state["current_target_pair_address"]
-                logger.warning(f"TIMEOUT DE CAÇA: 15 min sem entrada para {penalized_symbol}. Abandonando e penalizando.")
+                logger.warning(f"TIMEOUT DE CAÇA: 10 min sem entrada para {penalized_symbol}. Abandonando e penalizando.")
                 await send_telegram_message(f"⌛️ Timeout de caça para **{penalized_symbol}**. Procurando um novo alvo...")
                 automation_state["penalty_box"][penalized_address] = 2
                 automation_state["current_target_pair_address"] = None
@@ -626,8 +626,8 @@ async def autonomous_loop():
                     
                     if price >= take_profit_price: await execute_sell_order(f"Take Profit (+{parameters['take_profit_percent']}%)"); continue
                     if price <= stop_loss_price: await execute_sell_order(f"Stop Loss (-{parameters['stop_loss_percent']}%)"); continue
-                    if time.time() - automation_state.get("position_opened_timestamp", 0) > 1800:
-                        reason = f"Timeout de 30 minutos (P/L: {profit:+.2f}%)"
+                    if time.time() - automation_state.get("position_opened_timestamp", 0) > 900:
+                        reason = f"Timeout de 15 minutos (P/L: {profit:+.2f}%)"
                         await execute_sell_order(reason); continue
                 await asyncio.sleep(15)
             else:
@@ -782,6 +782,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
