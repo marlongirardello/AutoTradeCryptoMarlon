@@ -162,7 +162,7 @@ async def execute_buy_order(amount, price, pair_details, manual=False, reason="S
         if not await is_pair_quotable_on_jupiter(pair_details):
             logger.error(f"FALHA NA COMPRA: Par {pair_details['base_symbol']} deixou de ser negociável na Jupiter. Penalizando e procurando novo alvo.")
             await send_telegram_message(f"❌ Compra para **{pair_details['base_symbol']}** abortada. Moeda não mais negociável na Jupiter.")
-            automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10
+            automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 2
             automation_state["current_target_pair_address"] = None
             return
 
@@ -193,7 +193,7 @@ async def execute_buy_order(amount, price, pair_details, manual=False, reason="S
             logger.error(f"FALHA NA EXECUÇÃO da compra para {pair_details['base_symbol']}. Limite de {buy_fail_count} falhas atingido. Penalizando e procurando novo alvo.")
             await send_telegram_message(f"❌ FALHA NA EXECUÇÃO da compra para **{pair_details['base_symbol']}**. Limite de 10 falhas atingido. A moeda será penalizada.")
             if automation_state.get("current_target_pair_address"):
-                automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10
+                automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 2
                 automation_state["current_target_pair_address"] = None
             buy_fail_count = 0
 
@@ -222,7 +222,7 @@ async def execute_sell_order(reason=""):
                 in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0
                 
                 if automation_state.get('current_target_pair_address'):
-                    automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10
+                    automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 2
                     automation_state["current_target_pair_address"] = None
                     await send_telegram_message(f"⚠️ **{symbol}** foi penalizada por 10 ciclos após falhas de venda.")
                 
@@ -252,7 +252,7 @@ async def execute_sell_order(reason=""):
             
             if "Stop Loss" in reason or "Timeout" in reason:
                 if automation_state.get('current_target_pair_address'):
-                    automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10
+                    automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 2
                     automation_state["current_target_pair_address"] = None
                     await send_telegram_message(f"⚠️ **{symbol}** foi penalizada por 10 ciclos após a venda por stop/timeout.")
             else:
@@ -269,7 +269,7 @@ async def execute_sell_order(reason=""):
                 in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0
                 
                 if automation_state.get('current_target_pair_address'):
-                    automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10
+                    automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 2
                     automation_state["current_target_pair_address"] = None
                     await send_telegram_message(f"⚠️ **{symbol}** foi penalizada por 10 ciclos após falhas de venda.")
                 
@@ -285,7 +285,7 @@ async def execute_sell_order(reason=""):
             in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0
             
             if automation_state.get('current_target_pair_address'):
-                automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10
+                automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 2
                 automation_state["current_target_pair_address"] = None
                 await send_telegram_message(f"⚠️ Erro crítico ao vender {symbol}: {e}. Tentativa {sell_fail_count}/100. O bot permanecerá em posição.")
 
@@ -520,7 +520,7 @@ async def autonomous_loop():
                 penalized_address = automation_state["current_target_pair_address"]
                 logger.warning(f"TIMEOUT DE CAÇA: 15 min sem entrada para {penalized_symbol}. Abandonando e penalizando.")
                 await send_telegram_message(f"⌛️ Timeout de caça para **{penalized_symbol}**. Procurando um novo alvo...")
-                automation_state["penalty_box"][penalized_address] = 10
+                automation_state["penalty_box"][penalized_address] = 2
                 automation_state["current_target_pair_address"] = None
                 automation_state["checking_volatility"] = False
                 automation_state["volatility_check_passed"] = False
@@ -570,7 +570,7 @@ async def autonomous_loop():
                         if abs(price_change_pct) > 10.0:
                             logger.warning(f"Volatilidade extrema detectada para {pair_details['base_symbol']}: {price_change_pct:.2f}%. Penalizando moeda.")
                             await send_telegram_message(f"⚠️ Volatilidade extrema (+/- 10%) detectada para **{pair_details['base_symbol']}**. A moeda será penalizada e um novo alvo será buscado.")
-                            automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10
+                            automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 2
                             automation_state["current_target_pair_address"] = None
                             automation_state["checking_volatility"] = False
                             automation_state["volatility_check_passed"] = False
@@ -772,6 +772,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
