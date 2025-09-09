@@ -16,6 +16,7 @@ COPY requirements.txt .
 
 # Atualizar o pip e instalar as bibliotecas Python
 RUN pip install --upgrade pip
+RUN pip install solana==0.30.2 --no-cache-dir
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copiar o resto do código da aplicação para o contentor
