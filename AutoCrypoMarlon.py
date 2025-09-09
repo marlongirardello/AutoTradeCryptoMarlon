@@ -138,15 +138,26 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
             
             logger.info(f"Transação enviada: {tx_signature}")
             
-            # --- VERIFICAÇÃO DE SUCESSO APRIMORADA ---
             try:
+                # Espera a confirmação da transação
                 solana_client.confirm_transaction(tx_signature, commitment="confirmed")
-                logger.info(f"Transação confirmada com sucesso: https://solscan.io/tx/{tx_signature}")
-                return str(tx_signature)
+
+                # Obtém o status da transação para verificar se o programa executou com sucesso
+                response = solana_client.get_transaction(tx_signature, "jsonParsed", commitment="confirmed")
+                
+                # Verifica se a transação foi bem-sucedida (não tem um erro no metadado)
+                if response.value and response.value.transaction.meta.err is None:
+                    logger.info(f"Transação confirmada com sucesso: https://solscan.io/tx/{tx_signature}")
+                    return str(tx_signature)
+                else:
+                    error_message = response.value.transaction.meta.log_messages if response.value and response.value.transaction.meta.log_messages else "Erro de programa desconhecido."
+                    logger.error(f"Transação foi confirmada, mas o programa de swap falhou: {error_message}")
+                    await send_telegram_message(f"⚠️ Transação confirmada, mas **falhou na execução**. Erro: {error_message}")
+                    return None
+
             except Exception as confirm_e:
                 logger.error(f"Transação enviada, mas falhou ao ser confirmada na blockchain: {confirm_e}")
                 return None
-            # --- FIM DA VERIFICAÇÃO ---
 
 
         except Exception as e:
@@ -782,6 +793,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
