@@ -595,7 +595,7 @@ async def autonomous_loop():
                 
                 await asyncio.sleep(15)
 
-                elif automation_state.get("volatility_check_passed"):
+                if automation_state.get("volatility_check_passed"):
                     pair_details = automation_state.get("current_target_pair_details")
                     data = await fetch_geckoterminal_ohlcv(pair_details['pair_address'], parameters["timeframe"], limit=1)
                     if data is not None and not data.empty:
@@ -782,6 +782,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
