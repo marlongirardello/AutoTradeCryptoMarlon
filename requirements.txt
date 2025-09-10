@@ -3,7 +3,7 @@ pandas
 pandas-ta
 httpx
 python-dotenv
-solders>=0.19.0  # Altere esta linha
-solana==0.30.2
+solders>=0.26.0  # Mantenha esta linha
+solana>=0.33.0  # Altere para a versão mais recente e compatível
 numpy
 Flask
