@@ -13,9 +13,8 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 # Copia o arquivo de requisitos para o contêiner
 COPY requirements.txt .
 
-# Força a instalação das dependências, removendo o cache para evitar versões antigas
-# O comando --upgrade garante que a versão mais recente e compatível será instalada
-# O comando --no-cache-dir evita que o pip use versões antigas em cache
+# Força a reinstalação das dependências e limpa o cache. Isso deve resolver o problema de conflito de versões
+RUN pip cache purge
 RUN pip install --no-cache-dir --upgrade -r requirements.txt
 
 # Copia o código da aplicação
