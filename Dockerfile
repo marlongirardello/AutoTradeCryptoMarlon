@@ -1,27 +1,25 @@
-# Usar uma imagem base oficial e completa do Python para garantir todas as ferramentas de compilação
+# Usa uma imagem base Python 3.12, que é a que você está usando
 FROM python:3.12
 
-# Definir o diretório de trabalho dentro do contentor
+# Define o diretório de trabalho dentro do contêiner
 WORKDIR /app
 
-# Instalar as ferramentas de compilação essenciais do sistema
+# Instala o curl para o rustup e outras dependências
 RUN apt-get update && apt-get install -y build-essential curl pkg-config libssl-dev
 
-# Instalar a linguagem Rust (necessária para as bibliotecas da Solana)
+# Instala o Rust, necessário para algumas bibliotecas Solana
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-ENV PATH="/root/.cargo/bin:${PATH}"
 
-# Copiar o ficheiro de requisitos para o contentor
+# Copia o arquivo de requisitos para o contêiner
 COPY requirements.txt .
 
-# Atualizar o pip e instalar as bibliotecas Python
-RUN pip install --upgrade pip
-# Desinstala a versão de solana antiga (se houver) e força a instalação da versão correta
-RUN pip install --force-reinstall solana==0.30.2 --no-deps
-RUN pip install --no-cache-dir -r requirements.txt
+# Força a instalação das dependências, removendo o cache para evitar versões antigas
+# O comando --upgrade garante que a versão mais recente e compatível será instalada
+# O comando --no-cache-dir evita que o pip use versões antigas em cache
+RUN pip install --no-cache-dir --upgrade -r requirements.txt
 
-# Copiar o resto do código da aplicação para o contentor
+# Copia o código da aplicação
 COPY . .
 
-# Comando para executar a aplicação
+# Comando para rodar a aplicação
 CMD ["python", "AutoCrypoMarlon.py"]
