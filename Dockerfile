@@ -1,17 +1,14 @@
 # Usa uma imagem base Python 3.12
 FROM python:3.12
 
-# Instala dependências do sistema
-RUN apt-get update && apt-get install -y build-essential curl pkg-config libssl-dev
-
 # Define o diretório de trabalho
 WORKDIR /app
 
+# Instala o curl para o rustup e outras dependências
+RUN apt-get update && apt-get install -y build-essential curl pkg-config libssl-dev
+
 # Instala o Rust, necessário para algumas bibliotecas Solana
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-
-# Adiciona o diretório de binários do Rust ao PATH para que o pip possa encontrá-lo
-ENV PATH="/root/.cargo/bin:${PATH}"
 
 # Copia o arquivo de requisitos
 COPY requirements.txt .
@@ -20,10 +17,9 @@ COPY requirements.txt .
 RUN python -m venv venv
 ENV PATH="/app/venv/bin:$PATH"
 
-# Força a reinstalação de solana e solders para garantir as versões mais recentes
-RUN pip install --no-cache-dir --upgrade solana solders
-
-# Instala todas as dependências do requirements.txt
+# Instala todas as dependências do requirements.txt dentro do ambiente virtual.
+# Não há necessidade de instalar solana e solders separadamente, pois o
+# requirements.txt já especifica a versão correta, e o pip resolverá a dependência.
 RUN pip install --no-cache-dir --upgrade -r requirements.txt
 
 # Copia o código da aplicação
