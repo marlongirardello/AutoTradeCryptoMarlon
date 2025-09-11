@@ -13,17 +13,11 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 # Copia o arquivo de requisitos
 COPY requirements.txt .
 
-# Cria e ativa um ambiente virtual para isolar as dependências
-RUN python -m venv venv
-ENV PATH="/app/venv/bin:$PATH"
+# Cria um ambiente virtual, ativa e instala as dependências em um único comando
+RUN python -m venv venv && . venv/bin/activate && pip install --no-cache-dir --upgrade -r requirements.txt
 
-# Instala todas as dependências do requirements.txt dentro do ambiente virtual.
-# Não há necessidade de instalar solana e solders separadamente, pois o
-# requirements.txt já especifica a versão correta, e o pip resolverá a dependência.
-RUN pip install --no-cache-dir --upgrade -r requirements.txt
-
-# Copia o código da aplicação
+# Copia o resto do código
 COPY . .
 
 # Comando para rodar a aplicação no ambiente virtual
-CMD ["python", "AutoCrypoMarlon.py"]
+CMD ["/app/venv/bin/python", "AutoCrypoMarlon.py"]
