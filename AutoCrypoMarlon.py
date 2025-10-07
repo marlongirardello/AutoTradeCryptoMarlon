@@ -19,6 +19,21 @@ from spl.token.instructions import get_associated_token_address
 from telegram.ext import Application, CommandHandler
 import telegram
 
+from flask import Flask
+from threading import Thread
+
+# --- CÓDIGO DO SERVIDOR WEB ---
+app = Flask('')
+@app.route('/')
+def home():
+    return "Bot is alive!"
+def run_server():
+  app.run(host='0.0.0.0',port=8080)
+def keep_alive():
+    t = Thread(target=run_server)
+    t.start()
+# --- FIM DO CÓDIGO DO SERVIDOR ---
+
 # ---------------- Configuração ----------------
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("sniper_bot")
@@ -805,5 +820,6 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
