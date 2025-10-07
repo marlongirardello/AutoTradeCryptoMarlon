@@ -24,10 +24,11 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 logger = logging.getLogger("sniper_bot")
 
 # Variáveis de ambiente (Koyeb)
-RPC_URL = os.environ.get("RPC_URL")
-PRIVATE_KEY_B58 = os.environ.get("PRIVATE_KEY_B58")
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-CHAT_ID = os.environ.get("CHAT_ID")
+# --- Configurações Iniciais ---
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+PRIVATE_KEY_B58 = os.getenv("PRIVATE_KEY_BASE58")
+RPC_URL = os.getenv("RPC_URL")
 
 if not all([RPC_URL, PRIVATE_KEY_B58, TELEGRAM_TOKEN, CHAT_ID]):
     logger.error("Erro: variáveis de ambiente RPC_URL, PRIVATE_KEY_B58, TELEGRAM_TOKEN e CHAT_ID são obrigatórias.")
@@ -803,3 +804,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
