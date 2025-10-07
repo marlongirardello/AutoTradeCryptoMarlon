@@ -792,6 +792,7 @@ async def manual_sell(update, context):
 # ---------------- Main ----------------
 def main():
     global application
+    keep_alive()
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("set", set_params))
@@ -804,4 +805,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
