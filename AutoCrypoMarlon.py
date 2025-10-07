@@ -28,7 +28,7 @@ app = Flask('')
 def home():
     return "Bot is alive!"
 def run_server():
-  app.run(host='0.0.0.0',port=8080)
+  app.run(host='0.0.0.0',port=8000)
 def keep_alive():
     t = Thread(target=run_server)
     t.start()
@@ -820,6 +820,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
