@@ -392,11 +392,11 @@ async def find_best_coin_to_trade(filtered_pairs: dict, ignored_pairs: set):
     if best_symbol:
         logger.info(f"🏆 Melhor par encontrado: {best_symbol} (Score={best_score:.2f})")
         await send_telegram_message(f"🏆 Melhor par encontrado: <b>{best_symbol}</b>\nScore: {best_score:.2f}")
-        return {"symbol": best_symbol, "address": best_address, "score": best_score}
+        return {"symbol": best_symbol, "pair_address": best_address, "score": best_score}
 
     logger.info("Nenhum par atingiu pontuação mínima.")
     return None
-
+    
 # ---------------- Ordem: BUY / SELL (usando seu código) ----------------
 async def execute_buy_order(amount, price, pair_details, manual=False, reason="Sinal da Estratégia"):
     global in_position, entry_price, sell_fail_count, buy_fail_count
@@ -801,6 +801,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
