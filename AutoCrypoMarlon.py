@@ -261,85 +261,108 @@ async def is_pair_quotable_on_jupiter(pair_details):
 # ---------------- Descoberta e Filtragem (implementado conforme solicitado) ----------------
 async def discover_and_filter_pairs():
     """
-    Descobre pares no GeckoTerminal (páginas sequenciais) e aplica filtros:
+    Descobre pares no GeckoTerminal e aplica filtros:
     - Vida entre 15 min (900s) e 60 min (3600s)
     - Liquidez >= 40_000 USD
     - Volume 1h >= 100_000 USD
+    - Pares contra SOL
     - Não entrou antes (took_profit_pairs)
     Retorna dict {symbol: pair_address}
     """
     filtered_pairs = {}
     all_pools = []
+    discard_reasons = Counter()
+    total_checked = 0
+
+    logger.info("🚀 Iniciando varredura de pares no GeckoTerminal (Solana)...")
+
     async with httpx.AsyncClient() as client:
-        for page in range(1, 11):  # até 200+ pares (10 páginas)
+        for page in range(1, 31):  # até 2000 pares (10 páginas)
             try:
                 url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools?page={page}&include=base_token,quote_token"
-                res = await client.get(url, timeout=20.0)
+                res = await client.get(url, timeout=25.0)
                 res.raise_for_status()
                 data = res.json().get('data', [])
                 if not data:
+                    logger.info(f"🛑 Página {page} sem resultados, encerrando busca.")
                     break
                 all_pools.extend(data)
-                await asyncio.sleep(0.2)
+                logger.info(f"📄 Página {page}: {len(data)} pares carregados.")
+                await asyncio.sleep(0.3)
             except Exception as e:
-                logger.error(f"Erro ao buscar página {page} do GeckoTerminal: {e}")
-                break
+                logger.error(f"⚠️ Erro ao buscar página {page}: {e}")
+                await asyncio.sleep(2)
 
-    logger.info(f"Total pares buscados: {len(all_pools)}. Aplicando filtros...")
+    logger.info(f"🔍 Total de pares coletados: {len(all_pools)}. Aplicando filtros...")
+
     for pool in all_pools:
         try:
             attr = pool.get('attributes', {})
             relationships = pool.get('relationships', {})
             symbol = attr.get('name', 'N/A').split(' / ')[0]
             address = pool.get('id', 'N/A')
-            if address.startswith("solana_"): address = address.split('_')[1]
+            if address.startswith("solana_"):
+                address = address.split('_')[1]
+            total_checked += 1
 
-            # vida da pool
+            # --- Calcular idade ---
             age_str = attr.get('pool_created_at') or attr.get('created_at') or attr.get('createdAt')
-            age_seconds = None
-            if age_str:
-                try:
-                    age_dt = pd.to_datetime(age_str).tz_convert('UTC')
-                    age_seconds = (pd.Timestamp.now(tz='UTC') - age_dt).total_seconds()
-                except Exception:
-                    try:
-                        # fallback parse iso
-                        age_dt = pd.to_datetime(age_str)
-                        age_seconds = (pd.Timestamp.now(tz='UTC') - age_dt).total_seconds()
-                    except Exception:
-                        age_seconds = None
-
-            # filtra vida
+            try:
+                age_dt = pd.to_datetime(age_str).tz_convert('UTC')
+            except Exception:
+                age_dt = pd.to_datetime(age_str, utc=True)
+            age_seconds = (pd.Timestamp.now(tz='UTC') - age_dt).total_seconds() if age_dt else None
             if age_seconds is None or age_seconds < 900 or age_seconds > 3600:
+                discard_reasons["idade fora do intervalo"] += 1
                 continue
 
-            # liquidez
+            # --- Liquidez ---
             liquidity = float(attr.get('reserve_in_usd', attr.get('liquidity_usd', 0) or 0))
-            if liquidity < 40000:
+            if liquidity < 40_000:
+                discard_reasons["liquidez baixa"] += 1
                 continue
 
-            # volume 1h
-            volume_1h = float(attr.get('volume_usd', {}).get('h1', 0) or 0)
-            if volume_1h < 100000:
+            # --- Volume 1h ---
+            vol_1h_data = attr.get('volume_usd', {})
+            if isinstance(vol_1h_data, dict):
+                volume_1h = float(vol_1h_data.get('h1', 0))
+            else:
+                volume_1h = float(vol_1h_data or 0)
+            if volume_1h < 100_000:
+                discard_reasons["volume baixo"] += 1
                 continue
 
-            # somente pares contra SOL (preferência) - opcional
+            # --- Pares contra SOL ---
             quote_token_id = relationships.get('quote_token', {}).get('data', {}).get('id')
-            if quote_token_id != 'So11111111111111111111111111111111111111112' and not attr.get('name','').endswith(' / SOL'):
-                # aceitar só pares contra SOL (reduz ruído)
+            if quote_token_id != 'So11111111111111111111111111111111111111112' and not attr.get('name', '').endswith(' / SOL'):
+                discard_reasons["não é par SOL"] += 1
                 continue
 
-            # não reentrar se já take profit
+            # --- Evita reentrar ---
             if address in automation_state['took_profit_pairs']:
+                discard_reasons["já operado"] += 1
                 continue
 
-            logger.info(f"✅ APROVADO: {symbol} | Liquidez ${liquidity:,.0f} | Vol1h ${volume_1h:,.0f}")
+            # --- Aprovado ---
+            logger.info(f"✅ {symbol} aprovado | LQ ${liquidity:,.0f} | VOL1h ${volume_1h:,.0f} | Idade {age_seconds/60:.1f} min")
             filtered_pairs[symbol] = address
 
-        except Exception:
+        except Exception as e:
+            logger.error(f"Erro ao processar pool: {e}")
+            discard_reasons["erro parsing"] += 1
             continue
 
-    logger.info(f"Descoberta finalizada. {len(filtered_pairs)} pares passaram nos filtros iniciais.")
+    resumo = (
+        f"📊 *Scanner Finalizado*\n"
+        f"Total analisado: `{total_checked}`\n"
+        f"Aprovados: `{len(filtered_pairs)}`\n\n"
+        f"Motivos de descarte:\n" +
+        "\n".join([f"- {k}: {v}" for k, v in discard_reasons.items()])
+    )
+
+    logger.info(f"✅ Descoberta finalizada. {len(filtered_pairs)} pares aprovados.")
+    await send_telegram_message(resumo)
+
     return filtered_pairs
 
 # ---------------- Scoring / análise ----------------
@@ -820,6 +843,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
