@@ -260,6 +260,24 @@ async def is_pair_quotable_on_jupiter(pair_details):
         return False
 
 # ---------------- Descoberta e Filtragem (implementado conforme solicitado) ----------------
+async def get_new_pools(page=1):
+    """Busca uma página de novas pools da API GeckoTerminal."""
+    url = f"https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page={page}&include=base_token,quote_token"
+    headers = {'Accept': 'application/json'}
+    async with httpx.AsyncClient() as client:
+        try:
+            resp = await client.get(url, headers=headers, timeout=10.0)
+            resp.raise_for_status() # Lança um erro para respostas 4xx/5xx
+            data = resp.json()
+            return data.get('data', [])
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Erro de status da API ao buscar pools: {e.response.status_code} - {e.response.text}")
+        except httpx.RequestError as e:
+            logger.error(f"Erro de requisição ao buscar pools: {e}")
+        except Exception as e:
+            logger.error(f"Erro inesperado ao buscar pools: {e}")
+        return []
+
 async def discover_and_filter_pairs():
     """Busca e filtra novos pares, analisando página por página para minimizar a latência."""
     logger.info("🚀 Iniciando nova busca por pares... Analisando página por página.")
@@ -816,6 +834,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
