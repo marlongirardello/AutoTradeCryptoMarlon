@@ -267,7 +267,7 @@ async def is_pair_quotable_on_jupiter(pair_details):
 # ---------------- Descoberta e Filtragem (implementado conforme solicitado) ----------------
 async def get_new_pools(page=1):
     """Busca uma página de novas pools da API GeckoTerminal."""
-    url = f"https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page={page}&include=base_token,quote_token"
+    url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools?page={page}&sort=h24_volume_usd_desc&include=base_token,quote_token"
     headers = {'Accept': 'application/json'}
     async with httpx.AsyncClient() as client:
         try:
@@ -285,88 +285,90 @@ async def get_new_pools(page=1):
 
 async def discover_and_filter_pairs():
     """
-    Busca e filtra novos pares, analisando página por página e tratando dados ausentes 
-    de forma robusta para evitar erros, de acordo com a documentação da API.
+    Busca pools de alto volume e filtra aqueles que são muito recentes (entre 15 e 60 min)
+    e atendem a critérios de liquidez e transações.
+    Esta função substitui a antiga 'discover_and_filter_pairs'.
     """
-    logger.info("🚀 Iniciando nova busca por pares... Analisando página por página.")
-    
-    for page in range(1, 11): # Analisa até 10 páginas
-        logger.info(f"📄 Buscando pools da página {page}...")
+    logger.info("🚀 Iniciando busca por pares de ALTO VOLUME e RECÉM-CRIADOS...")
+
+    # Analisamos menos páginas, pois focamos apenas nos pools com maior volume do mercado.
+    for page in range(1, 6): # Analisa até 5 páginas (top 500 pools se o tamanho da pág for 100)
+        logger.info(f"📄 Buscando top pools por volume da página {page}...")
         try:
-            pools_page = await get_new_pools(page)
+            pools_page = await get_pools_by_volume(page)
             if not pools_page:
-                logger.warning(f"Nenhuma pool encontrada na página {page}.")
+                logger.warning(f"Nenhuma pool encontrada na página de alto volume {page}.")
                 await asyncio.sleep(1)
                 continue
 
             logger.info(f"🧪 Aplicando filtros a {len(pools_page)} pools da página {page}...")
-            
+
             for pool in pools_page:
-                # --- Extração segura dos dados usando .get() ---
                 attributes = pool.get('attributes', {})
                 
-                symbol = attributes.get('name', 'SímboloDesconhecido') 
-                address = attributes.get('address')
-                
-                if not address:
-                    continue
-
-                liquidity = float(attributes.get('reserve_in_usd', 0))
-                # O volume de 1h está dentro do objeto 'volume_usd'
-                volume_h1 = float(attributes.get('volume_usd', {}).get('h1', 0))
+                # --- FILTRO PRIMÁRIO E MAIS IMPORTANTE: IDADE ---
                 pool_age_str = attributes.get('pool_created_at')
-
                 if not pool_age_str:
-                    logger.warning(f"⚠️ {symbol} pulado por não ter data de criação.")
                     continue
 
                 pool_created_at = datetime.fromisoformat(pool_age_str.replace('Z', '+00:00'))
                 age_seconds = (datetime.now(timezone.utc) - pool_created_at).total_seconds()
+                
+                # A grande maioria dos pools de alto volume será antiga.
+                # Rejeitamos rapidamente para focar no que importa.
+                if not (900 <= age_seconds <= 3600):  # Entre 15 e 60 minutos
+                    continue
+
+                # Se o código chegou aqui, ENCONTRAMOS UM ALVO EM POTENCIAL!
+                # Agora aplicamos os filtros de qualidade.
                 age_minutes = age_seconds / 60
+                symbol = attributes.get('name', 'SímboloDesconhecido')
+                logger.info(f"🎯 ALVO EM POTENCIAL (Idade Perfeita): {symbol} com {age_minutes:.1f} min. Verificando qualidade...")
 
-                # --- APLICAÇÃO DOS FILTROS ---
-
+                # --- FILTROS DE QUALIDADE (para pools com a idade certa) ---
+                liquidity = float(attributes.get('reserve_in_usd', 0))
                 if liquidity < MIN_LIQUIDITY:
-                    logger.info(f"❌ REJEITADO {symbol}: Liquidez ${liquidity:,.2f} < Mínimo ${MIN_LIQUIDITY:,.2f}.")
+                    logger.info(f"❌ REJEITADO (Liquidez): {symbol} | Liquidez ${liquidity:,.2f} < Mínimo ${MIN_LIQUIDITY:,.2f}.")
                     continue
 
+                volume_h1 = float(attributes.get('volume_usd', {}).get('h1', 0))
                 if volume_h1 < MIN_VOLUME_H1:
-                    logger.info(f"❌ REJEITADO {symbol}: Volume 1h ${volume_h1:,.2f} < Mínimo ${MIN_VOLUME_H1:,.2f}.")
+                    logger.info(f"❌ REJEITADO (Volume 1h): {symbol} | Volume 1h ${volume_h1:,.2f} < Mínimo ${MIN_VOLUME_H1:,.2f}.")
                     continue
-                
-                if not (900 <= age_seconds <= 3600): # Entre 15 e 60 minutos
-                    logger.info(f"❌ REJEITADO {symbol}: Idade de {age_minutes:.2f} min fora do intervalo (15-60 min).")
-                    continue
-                
-                # Extração segura dos dados de transações
+
                 txns_h1 = attributes.get('transactions', {}).get('h1', {})
                 txns_h1_buys = int(txns_h1.get('buys', 0))
                 txns_h1_sells = int(txns_h1.get('sells', 0))
 
                 if txns_h1_buys < 10 or txns_h1_sells < 3:
-                    logger.info(f"❌ REJEITADO {symbol}: Transações insuficientes (Compras: {txns_h1_buys}/10, Vendas: {txns_h1_sells}/3).")
+                    logger.info(f"❌ REJEITADO (Transações): {symbol} | Compras: {txns_h1_buys}/10, Vendas: {txns_h1_sells}/3.")
                     continue
 
-                # ✅ APROVADO!
-                logger.info(f"✅ APROVADO: {symbol} | Liquidez ${liquidity:,.2f} | Vol 1h ${volume_h1:,.2f} | Idade {age_minutes:.1f} min")
+                # ✅ APROVADO! O pool passou em todos os filtros.
+                # O endereço do pool no endpoint /pools vem no campo 'id', no formato 'rede_endereco'
+                address_full = pool.get('id', '')
+                if not address_full.startswith('solana_'):
+                    continue
+                address = address_full.split('_')[1]
+
+                logger.info(f"✅✅✅ APROVADO: {symbol} | Idade {age_minutes:.1f} min | Liq ${liquidity:,.2f} | Vol 1h ${volume_h1:,.2f}")
                 
-                # Retorna os dados necessários para a próxima etapa
-                base_token_symbol = symbol.split('/')[0].strip() # Pega o símbolo do token base
+                base_token_symbol = symbol.split('/')[0].strip()
                 return {
-                    'symbol': base_token_symbol, 
+                    'symbol': base_token_symbol,
                     'address': address,
                     'liquidity': liquidity,
                     'volume_h1': volume_h1,
                     'age_minutes': age_minutes
                 }
-            
-            await asyncio.sleep(1)
+
+            await asyncio.sleep(2)  # Pausa de 2 segundos entre as páginas
 
         except Exception as e:
-            logger.error(f"Erro inesperado ao processar a página {page}: {e}", exc_info=True)
+            logger.error(f"Erro inesperado ao processar a página de alto volume {page}: {e}", exc_info=True)
             await asyncio.sleep(5)
 
-    logger.info("🏁 Descoberta finalizada. Nenhuma pool passou em todos os filtros nesta rodada.")
+    logger.info("🏁 Busca por volume finalizada. Nenhum pool novo passou nos filtros nesta rodada.")
     return None
 
 async def analyze_and_score_coin(symbol, pair_address):
@@ -836,6 +838,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
