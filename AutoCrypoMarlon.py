@@ -47,6 +47,9 @@ CHAT_ID = os.getenv("CHAT_ID")
 PRIVATE_KEY_B58 = os.getenv("PRIVATE_KEY_BASE58")
 RPC_URL = os.getenv("RPC_URL")
 
+MIN_LIQUIDITY = 40000  # Mínimo de $40,000 de liquidez
+MIN_VOLUME_H1 = 100000 # Mínimo de $100,000 de volume na última hora
+
 if not all([RPC_URL, PRIVATE_KEY_B58, TELEGRAM_TOKEN, CHAT_ID]):
     logger.error("Erro: variáveis de ambiente RPC_URL, PRIVATE_KEY_B58, TELEGRAM_TOKEN e CHAT_ID são obrigatórias.")
     raise SystemExit(1)
@@ -843,6 +846,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
