@@ -387,7 +387,7 @@ async def analyze_and_score_coin(symbol, pair_address):
         volatility = df['high'].max() - df['low'].min()
 
         # score simples ponderando preço, volume e estabilidade
-        score = price_change * 1.5 + (avg_volume / 1_000_000) - (volatility / last_price) * 10
+        score = price_change * 1.5 + (avg_volume / 1_000_000) - (volatility / last_price) * 5
         logger.info(f"📊 {symbol}: Δ={price_change:.2f}% | Vol={avg_volume:,.0f} | Score={score:.2f}")
         return score
     except Exception as e:
@@ -590,7 +590,7 @@ async def check_velocity_strategy():
             tempo_restante = 180 - (now - automation_state.get("volatility_check_start_time", 0))
             logger.info(f"⏳ Observando {symbol} por mais {tempo_restante:.0f}s para garantir estabilidade...")
             
-            data = await get_ohlcv_data(target_address, limit=1)
+            data = await fetch_geckoterminal_ohlcv(target_address, "1m", limit=1)
             if data is not None and not data.empty:
                 price_change_pct = ((data['close'].iloc[-1] - data['open'].iloc[0]) / data['open'].iloc[0]) * 100
                 logger.info(f"   (Variação da vela atual: {price_change_pct:+.2f}%)")
@@ -617,7 +617,7 @@ async def check_velocity_strategy():
         # ----------------------------------------------------
         if automation_state.get("volatility_check_passed"):
             logger.info(f"🎯 Aguardando gatilho final de compra para {symbol} (>+2% na vela de 1min)...")
-            data = await get_ohlcv_data(target_address, limit=1)
+            data = await fetch_geckoterminal_ohlcv(target_address, "1m", limit=1)
             if data is not None and not data.empty:
                 price_change_pct = ((data['close'].iloc[-1] - data['open'].iloc[0]) / data['open'].iloc[0]) * 100
                 logger.info(f"   (Variação da vela atual: {price_change_pct:+.2f}%)")
@@ -632,8 +632,8 @@ async def check_velocity_strategy():
         # ----------------------------------------------------
         # FASE 1: BUSCANDO SINAL INICIAL
         # ----------------------------------------------------
-        df_1m = await get_ohlcv_data(target_address, limit=1)
-        df_10m = await get_ohlcv_data(target_address, limit=10)
+        df_1m = await fetch_geckoterminal_ohlcv(target_address, "1m", limit=1)
+        df_10m = await fetch_geckoterminal_ohlcv(target_address, "1m", limit=10)
         
         if df_1m is None or df_10m is None or df_1m.empty or df_10m.empty:
             logger.warning(f"Não foi possível obter dados OHLCV para {symbol}. Tentando novamente no próximo ciclo.")
@@ -836,6 +836,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
