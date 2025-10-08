@@ -295,7 +295,7 @@ async def discover_and_filter_pairs():
     for page in range(1, 6): # Analisa até 5 páginas (top 500 pools se o tamanho da pág for 100)
         logger.info(f"📄 Buscando top pools por volume da página {page}...")
         try:
-            pools_page = await get_pools_by_volume(page)
+            pools_page = await get_new_pools(page)
             if not pools_page:
                 logger.warning(f"Nenhuma pool encontrada na página de alto volume {page}.")
                 await asyncio.sleep(1)
@@ -838,6 +838,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
