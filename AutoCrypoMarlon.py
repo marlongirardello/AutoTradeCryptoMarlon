@@ -345,92 +345,57 @@ async def discover_and_filter_pairs():
     logger.info(f"Descoberta finalizada. {len(filtered_pairs)} novas pools passaram nos filtros.")
     return filtered_pairs
 
-# ---------------- Scoring / análise ----------------
-async def discover_and_filter_pairs():
+async def analyze_and_score_coin(symbol, pair_address):
     """
-    Descobre novas pools no GeckoTerminal (páginas sequenciais) e aplica filtros:
-    - Vida entre 15 min (900s) e 60 min (3600s)
-    - Liquidez >= 40_000 USD
-    - Volume 1h >= 100_000 USD
-    - Não entrou antes (took_profit_pairs)
-    Retorna dict {symbol: pair_address}
+    Faz análise básica de pontuação do par (momentum e volume)
+    Retorna score numérico. Quanto maior, melhor.
     """
-    filtered_pairs = {}
-    all_pools = []
+    try:
+        df = await fetch_geckoterminal_ohlcv(pair_address, "1m", limit=15)
+        if df is None or df.empty or len(df) < 5:
+            return 0
 
-    async with httpx.AsyncClient() as client:
-        for page in range(1, 11):  # até ~200 novas pools (10 páginas)
-            try:
-                # ✅ novo endpoint
-                url = f"https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page={page}&include=base_token,quote_token"
-                res = await client.get(url, timeout=20.0)
-                res.raise_for_status()
-                data = res.json().get('data', [])
-                if not data:
-                    break
-                all_pools.extend(data)
-                await asyncio.sleep(0.2)
-            except Exception as e:
-                logger.error(f"Erro ao buscar página {page} do GeckoTerminal: {e}")
-                break
+        last_price = df['close'].iloc[-1]
+        first_price = df['close'].iloc[0]
+        price_change = (last_price - first_price) / first_price * 100
 
-    logger.info(f"Total novas pools buscadas: {len(all_pools)}. Aplicando filtros...")
-    for pool in all_pools:
-        try:
-            attr = pool.get('attributes', {})
-            relationships = pool.get('relationships', {})
-            symbol = attr.get('name', 'N/A').split(' / ')[0]
-            address = pool.get('id', 'N/A')
-            if address.startswith("solana_"):
-                address = address.split('_')[1]
+        avg_volume = df['volume'].mean()
+        volatility = df['high'].max() - df['low'].min()
 
-            # vida da pool
-            age_str = attr.get('pool_created_at') or attr.get('created_at') or attr.get('createdAt')
-            age_seconds = None
-            if age_str:
-                try:
-                    age_dt = pd.to_datetime(age_str).tz_convert('UTC')
-                    age_seconds = (pd.Timestamp.now(tz='UTC') - age_dt).total_seconds()
-                except Exception:
-                    try:
-                        age_dt = pd.to_datetime(age_str)
-                        age_seconds = (pd.Timestamp.now(tz='UTC') - age_dt).total_seconds()
-                    except Exception:
-                        age_seconds = None
+        # score simples ponderando preço, volume e estabilidade
+        score = price_change * 1.5 + (avg_volume / 1_000_000) - (volatility / last_price) * 10
+        logger.info(f"📊 {symbol}: Δ={price_change:.2f}% | Vol={avg_volume:,.0f} | Score={score:.2f}")
+        return score
+    except Exception as e:
+        logger.error(f"Erro ao analisar {symbol}: {e}")
+        return 0
 
-            # filtra vida
-            if age_seconds is None or age_seconds < 900 or age_seconds > 3600:
-                continue
 
-            # liquidez
-            liquidity = float(attr.get('reserve_in_usd', attr.get('liquidity_usd', 0) or 0))
-            if liquidity < 40000:
-                continue
+async def find_best_coin_to_trade(filtered_pairs: dict, ignored_pairs: set):
+    """
+    Recebe os pares aprovados e retorna o melhor (maior score).
+    Ignora pares penalizados.
+    """
+    if not filtered_pairs:
+        logger.warning("Nenhum par disponível para análise.")
+        return None
 
-            # volume 1h
-            volume_1h = float(attr.get('volume_usd', {}).get('h1', 0) or 0)
-            if volume_1h < 100000:
-                continue
+    best_symbol, best_score, best_address = None, -9999, None
 
-            # somente pares contra SOL (reduz ruído)
-            quote_token_id = relationships.get('quote_token', {}).get('data', {}).get('id')
-            if quote_token_id != 'So11111111111111111111111111111111111111112' and not attr.get('name','').endswith(' / SOL'):
-                continue
-
-            # não reentrar se já fez take profit
-            if address in automation_state['took_profit_pairs']:
-                continue
-
-            logger.info(f"✅ APROVADO: {symbol} | Liquidez ${liquidity:,.0f} | Vol1h ${volume_1h:,.0f} | Idade {(age_seconds/60):.1f} min")
-            filtered_pairs[symbol] = address
-
-        except Exception as e:
-            logger.error(f"Erro ao processar pool: {e}")
+    for symbol, address in filtered_pairs.items():
+        if address in ignored_pairs:
             continue
+        score = await analyze_and_score_coin(symbol, address)
+        if score > best_score:
+            best_symbol, best_score, best_address = symbol, score, address
 
-    logger.info(f"Descoberta finalizada. {len(filtered_pairs)} novas pools passaram nos filtros.")
-    return filtered_pairs
+    if best_symbol:
+        logger.info(f"🏆 Melhor par encontrado: {best_symbol} (Score={best_score:.2f})")
+        await send_telegram_message(f"🏆 Melhor par encontrado: <b>{best_symbol}</b>\nScore: {best_score:.2f}")
+        return {"symbol": best_symbol, "address": best_address, "score": best_score}
 
+    logger.info("Nenhum par atingiu pontuação mínima.")
+    return None
 
 # ---------------- Ordem: BUY / SELL (usando seu código) ----------------
 async def execute_buy_order(amount, price, pair_details, manual=False, reason="Sinal da Estratégia"):
@@ -836,6 +801,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
