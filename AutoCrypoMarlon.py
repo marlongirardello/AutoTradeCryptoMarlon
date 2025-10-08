@@ -406,26 +406,25 @@ async def find_best_coin_to_trade(pair_info):
     
     logger.info(f"🔎 Analisando o par aprovado: {symbol} ({address})")
 
-    # Calcula a pontuação para o único par encontrado
-    score = await calculate_score(address)
+    # CORREÇÃO: Chamando a função de pontuação com o nome correto ('analyze_and_score_coin')
+    # e passando os argumentos que ela espera (symbol, address).
+    score = await analyze_and_score_coin(symbol, address)
     
+    # A função original retorna 0 em caso de erro.
     if score is None:
         logger.error(f"Não foi possível calcular a pontuação para {symbol}. Descartando.")
         return None, {}
 
     logger.info(f"🏆 Par único analisado: {symbol} (Score={score:.2f})")
 
-    # Obtém os detalhes completos do par usando o endereço
     try:
+        # A função get_pair_details já existe e busca os detalhes completos
         details = await get_pair_details(address)
         if not details:
             logger.error(f"Não foi possível obter os detalhes completos para o par {symbol} no endereço {address}")
             return None, {}
             
-        # Adiciona a pontuação aos detalhes para uso posterior
         details['score'] = score
-        
-        # Confirma qual é o melhor par (que é o único que analisamos)
         best_pair_symbol = details.get('base_symbol', symbol)
         
         return best_pair_symbol, details
@@ -769,6 +768,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
