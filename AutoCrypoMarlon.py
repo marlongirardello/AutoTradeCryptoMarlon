@@ -415,7 +415,7 @@ async def find_best_coin_to_trade(filtered_pairs: dict, ignored_pairs: set):
 
             # Tenta obter detalhes, mas garante fallback
             try:
-                details = await get_coin_details(symbol, address)
+                details = await get_pair_details(address) # <-- NOME CORRETO
                 best_details = details if details else {}
             except Exception as e:
                 logger.error(f"Erro ao obter detalhes para {symbol}: {e}")
@@ -594,7 +594,7 @@ async def check_velocity_strategy():
         try:
             df_5m['ts_dt'] = pd.to_datetime(df_5m['ts'], unit='s')
             df_5m = df_5m.set_index('ts_dt')
-            close_5m = df_5m['close'].resample('5T').last().dropna()
+            close_5m = df_5m['close'].resample('5min').last().dropna() # <-- '5min' é o novo padrão
             if len(close_5m) >= 2 and close_5m.iloc[-1] > close_5m.iloc[0]:
                 trend5_ok = True
         except Exception:
@@ -841,6 +841,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
