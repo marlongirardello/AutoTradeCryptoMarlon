@@ -619,7 +619,6 @@ async def autonomous_loop():
     global automation_state, in_position, pair_details
 
     logger.info("Loop autônomo iniciado.")
-    # CORREÇÃO CRÍTICA: A condição do loop agora usa a variável de estado correta.
     while automation_state.get("is_running", False):
         try:
             logger.info("Iniciando ciclo do loop autônomo...")
@@ -633,25 +632,32 @@ async def autonomous_loop():
                     best_coin_symbol, details = await find_best_coin_to_trade(approved_pair)
 
                     if best_coin_symbol and details:
-                        pair_details = details
-                        automation_state["current_target_pair_details"] = details
-                        automation_state["current_target_pair_address"] = details.get('address')
-                        automation_state["target_selected_timestamp"] = time.time()
-                        
-                        msg = f"🎯 **Novo Alvo:** {best_coin_symbol} (Score={pair_details.get('score', 0):.2f}). Iniciando monitoramento..."
-                        logger.info(msg.replace("**", ""))
-                        await send_telegram_message(msg)
+                        # --- CORREÇÃO CRÍTICA: VERIFICAÇÃO DO SCORE ---
+                        score = details.get('score', 0)
+                        if score > 0:
+                            pair_details = details
+                            automation_state["current_target_pair_details"] = details
+                            automation_state["current_target_pair_address"] = details.get('address')
+                            automation_state["target_selected_timestamp"] = time.time()
+                            
+                            msg = f"🎯 **Novo Alvo:** {best_coin_symbol} (Score={score:.2f}). Iniciando monitoramento do gatilho final..."
+                            logger.info(msg.replace("**", ""))
+                            await send_telegram_message(msg)
+                        else:
+                            # LOG ADICIONADO: Explica por que o alvo foi descartado.
+                            msg = f"❌ Alvo {best_coin_symbol} descartado devido a Score negativo ({score:.2f}). Procurando um novo alvo."
+                            logger.info(msg)
+                            await send_telegram_message(msg)
                 else:
                     logger.warning("Nenhum par novo passou nos filtros iniciais nesta rodada.")
 
-            # Etapa 3: Se já temos um alvo, iniciar a estratégia de velocidade/compra.
+            # Etapa 3: Se já temos um alvo (com score positivo), monitorar o gatilho final.
             elif automation_state.get("current_target_pair_address") and not in_position:
                 await check_velocity_strategy()
             
             # Etapa 4: Se já estamos em uma posição, gerenciar a posição.
             elif in_position:
-                # (Seu código de gerenciamento de Take Profit / Stop Loss vai aqui)
-                # Esta parte parece estar correta no seu arquivo original, pode mantê-la.
+                # Seu código de gerenciamento de Take Profit / Stop Loss
                 pass
 
             # Aguarda o próximo ciclo
@@ -781,6 +787,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
