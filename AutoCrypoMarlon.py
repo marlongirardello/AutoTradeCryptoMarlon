@@ -393,53 +393,46 @@ async def analyze_and_score_coin(symbol, pair_address):
         logger.error(f"Erro ao analisar {symbol}: {e}")
         return 0
 
-async def find_best_coin_to_trade(filtered_pairs: dict, ignored_pairs: set):
+async def find_best_coin_to_trade(pair_info):
     """
-    Recebe os pares aprovados e retorna o melhor (maior score) com detalhes.
-    Ignora pares penalizados.
-    Garante que 'details' sempre exista, mesmo que haja falha ao obter os detalhes.
+    Analisa uma única moeda aprovada, calcula sua pontuação e retorna seus detalhes.
     """
-    if not filtered_pairs:
-        logger.warning("Nenhum par disponível para análise.")
-        return None
+    if not pair_info or 'address' not in pair_info:
+        logger.warning("Nenhuma informação de par válida recebida para análise.")
+        return None, {}
 
-    best_symbol, best_score, best_address, best_details = None, -9999, None, {}
+    symbol = pair_info.get('symbol', 'N/A')
+    address = pair_info.get('address')
+    
+    logger.info(f"🔎 Analisando o par aprovado: {symbol} ({address})")
 
-    for symbol, address in filtered_pairs.items():
-        if address in ignored_pairs:
-            continue
+    # Calcula a pontuação para o único par encontrado
+    score = await calculate_score(address)
+    
+    if score is None:
+        logger.error(f"Não foi possível calcular a pontuação para {symbol}. Descartando.")
+        return None, {}
 
-        try:
-            score = await analyze_and_score_coin(symbol, address)
-        except Exception as e:
-            logger.error(f"Erro ao calcular score para {symbol}: {e}")
-            continue
+    logger.info(f"🏆 Par único analisado: {symbol} (Score={score:.2f})")
 
-        if score > best_score:
-            best_symbol, best_score, best_address = symbol, score, address
+    # Obtém os detalhes completos do par usando o endereço
+    try:
+        details = await get_pair_details(address)
+        if not details:
+            logger.error(f"Não foi possível obter os detalhes completos para o par {symbol} no endereço {address}")
+            return None, {}
+            
+        # Adiciona a pontuação aos detalhes para uso posterior
+        details['score'] = score
+        
+        # Confirma qual é o melhor par (que é o único que analisamos)
+        best_pair_symbol = details.get('base_symbol', symbol)
+        
+        return best_pair_symbol, details
 
-            # Tenta obter detalhes, mas garante fallback
-            try:
-                details = await get_pair_details(address) # <-- NOME CORRETO
-                best_details = details if details else {}
-            except Exception as e:
-                logger.error(f"Erro ao obter detalhes para {symbol}: {e}")
-                best_details = {}
-
-    if best_symbol:
-        logger.info(f"🏆 Melhor par encontrado: {best_symbol} (Score={best_score:.2f})")
-        await send_telegram_message(
-            f"🏆 Melhor par encontrado: <b>{best_symbol}</b>\nScore: {best_score:.2f}"
-        )
-        return {
-            "symbol": best_symbol,
-            "pair_address": best_address,
-            "score": best_score,
-            "details": best_details
-        }
-
-    logger.info("Nenhum par atingiu pontuação mínima.")
-    return None
+    except Exception as e:
+        logger.error(f"Erro crítico ao obter detalhes finais para {symbol}: {e}", exc_info=True)
+        return None, {}
 
     
 # ---------------- Ordem: BUY / SELL (usando seu código) ----------------
@@ -846,6 +839,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
