@@ -261,107 +261,82 @@ async def is_pair_quotable_on_jupiter(pair_details):
 
 # ---------------- Descoberta e Filtragem (implementado conforme solicitado) ----------------
 async def discover_and_filter_pairs():
-    """
-    Descobre novas pools no GeckoTerminal e aplica filtros:
-    - Vida entre 15 min (900s) e 60 min (3600s)
-    - Liquidez >= 40_000 USD
-    - Volume 1h >= 100_000 USD
-    - Par contra SOL
-    - Não entrou antes (took_profit_pairs)
-    Retorna dict {symbol: pair_address}
-    """
-    filtered_pairs = {}
-    all_pools = []
-    network = "solana"
-
-    async with httpx.AsyncClient() as client:
+    """Busca e filtra novos pares, analisando página por página para minimizar a latência."""
+    logger.info("🚀 Iniciando nova busca por pares... Analisando página por página.")
+    
+    # Itera pelas páginas da API
+    for page in range(1, 11): # Analisa até 10 páginas
+        logger.info(f"📄 Buscando pools da página {page}...")
         try:
-            for page in range(1, 11):  # até 10 páginas (~200 novas pools)
-                url = f"https://api.geckoterminal.com/api/v2/networks/{network}/new_pools?page={page}&include=base_token,quote_token"
-                res = await client.get(url, timeout=20.0)
-                res.raise_for_status()
-                data = res.json().get('data', [])
-                if not data:
-                    logger.info(f"🔚 Nenhum dado retornado na página {page}, encerrando busca.")
-                    break
-                all_pools.extend(data)
-                await asyncio.sleep(0.3)
-            logger.info(f"🔎 Total de novas pools buscadas: {len(all_pools)}")
-        except Exception as e:
-            logger.error(f"Erro ao buscar pools do GeckoTerminal: {e}")
-            return {}
+            pools_page = await get_new_pools(page)
+            if not pools_page:
+                logger.warning(f"Nenhuma pool encontrada na página {page}. Continuando...")
+                await asyncio.sleep(1) # Pausa para não sobrecarregar a API
+                continue
 
-    logger.info("🧪 Aplicando filtros às pools encontradas...")
-    for pool in all_pools:
-        try:
-            attr = pool.get('attributes', {})
-            relationships = pool.get('relationships', {})
-            symbol = attr.get('name', 'N/A').split(' / ')[0]
-            address = pool.get('id', 'N/A')
-            if address.startswith("solana_"):
-                address = address.split('_')[1]
+            logger.info(f"🧪 Aplicando filtros a {len(pools_page)} pools da página {page}...")
+            
+            # Processa cada pool da página imediatamente
+            for pool in pools_page:
+                symbol = pool['attributes']['base_token_price_usd']
+                address = pool['attributes']['address']
+                liquidity = float(pool['attributes']['reserve_in_usd'])
+                volume_h1 = float(pool['attributes']['volume_h1'])
+                pool_age_str = pool['attributes']['pool_created_at']
+                
+                # Converte a idade para segundos
+                pool_created_at = datetime.fromisoformat(pool_age_str.replace('Z', '+00:00'))
+                age_seconds = (datetime.now(timezone.utc) - pool_created_at).total_seconds()
+                age_minutes = age_seconds / 60
 
-            # Calcular idade da pool
-            age_str = attr.get('pool_created_at') or attr.get('created_at') or attr.get('createdAt')
-            age_seconds = None
-            if age_str:
+                # --- APLICAÇÃO DOS FILTROS COM LOGS DETALHADOS ---
+
+                # 1. Filtro de Liquidez
+                if liquidity < MIN_LIQUIDITY:
+                    logger.info(f"❌ REJEITADO {symbol}: Liquidez ${liquidity:,.2f} é menor que o mínimo de ${MIN_LIQUIDITY:,.2f}.")
+                    continue
+
+                # 2. Filtro de Volume em 1 hora
+                if volume_h1 < MIN_VOLUME_H1:
+                    logger.info(f"❌ REJEITADO {symbol}: Volume 1h ${volume_h1:,.2f} é menor que o mínimo de ${MIN_VOLUME_H1:,.2f}.")
+                    continue
+                
+                # 3. Filtro de Idade da Pool
+                if not (900 <= age_seconds <= 3600): # Entre 15 e 60 minutos
+                    logger.info(f"❌ REJEITADO {symbol}: Idade de {age_minutes:.2f} min está fora do intervalo (15-60 min).")
+                    continue
+                
+                # 4. Filtro de Transações
                 try:
-                    age_dt = pd.to_datetime(age_str).tz_convert('UTC')
-                    age_seconds = (pd.Timestamp.now(tz='UTC') - age_dt).total_seconds()
-                except Exception:
-                    try:
-                        age_dt = pd.to_datetime(age_str)
-                        age_seconds = (pd.Timestamp.now(tz='UTC') - age_dt).total_seconds()
-                    except Exception:
-                        pass
+                    txns_h1_buys = int(pool['attributes']['transactions']['h1']['buys'])
+                    txns_h1_sells = int(pool['attributes']['transactions']['h1']['sells'])
+                    if txns_h1_buys < 10 or txns_h1_sells < 3:
+                        logger.info(f"❌ REJEITADO {symbol}: Transações insuficientes (Compras: {txns_h1_buys}/10, Vendas: {txns_h1_sells}/3).")
+                        continue
+                except (KeyError, TypeError):
+                    logger.warning(f"⚠️ AVISO {symbol}: Dados de transação ausentes. Pulando.")
+                    continue
 
-            # Filtro 1 - Idade
-            if age_seconds is None:
-                logger.debug(f"❌ {symbol} rejeitado: idade desconhecida.")
-                continue
-            if age_seconds < 900:
-                logger.debug(f"⏳ {symbol} rejeitado: muito novo ({age_seconds/60:.1f} min).")
-                continue
-            if age_seconds > 3600:
-                logger.debug(f"⌛ {symbol} rejeitado: muito velho ({age_seconds/60:.1f} min).")
-                continue
-
-            # Filtro 2 - Liquidez
-            liquidity = float(attr.get('reserve_in_usd') or attr.get('liquidity_usd') or 0)
-            if liquidity < 40000:
-                logger.debug(f"💧 {symbol} rejeitado: liquidez baixa (${liquidity:,.0f}).")
-                continue
-
-            # Filtro 3 - Volume 1h
-            volume_data = attr.get('volume_usd', {})
-            if isinstance(volume_data, dict):
-                volume_1h = float(volume_data.get('h1', 0))
-            else:
-                volume_1h = float(volume_data or 0)
-            if volume_1h < 100000:
-                logger.debug(f"📉 {symbol} rejeitado: volume 1h baixo (${volume_1h:,.0f}).")
-                continue
-
-            # Filtro 4 - Par contra SOL
-            quote_token_id = relationships.get('quote_token', {}).get('data', {}).get('id', '')
-            if quote_token_id != 'So11111111111111111111111111111111111111112' and not attr.get('name', '').endswith(' / SOL'):
-                logger.debug(f"⚖️ {symbol} rejeitado: não é par contra SOL.")
-                continue
-
-            # Filtro 5 - Já teve take profit
-            if address in automation_state['took_profit_pairs']:
-                logger.debug(f"🔁 {symbol} rejeitado: já operado anteriormente (take profit).")
-                continue
-
-            # Se passou todos os filtros
-            logger.info(f"✅ APROVADO: {symbol} | Liquidez ${liquidity:,.0f} | Vol1h ${volume_1h:,.0f} | Idade {age_seconds/60:.1f} min")
-            filtered_pairs[symbol] = address
+                # ✅ APROVADO!
+                logger.info(f"✅ APROVADO: {symbol} | Liquidez ${liquidity:,.2f} | Vol 1h ${volume_h1:,.2f} | Idade {age_minutes:.1f} min")
+                return {
+                    'symbol': symbol,
+                    'address': address,
+                    'liquidity': liquidity,
+                    'volume_h1': volume_h1,
+                    'age_minutes': age_minutes
+                }
+            
+            # Pausa breve entre as páginas para evitar sobrecarga da API
+            await asyncio.sleep(1)
 
         except Exception as e:
-            logger.error(f"Erro ao processar pool: {e}")
+            logger.error(f"Erro ao processar a página {page}: {e}")
+            await asyncio.sleep(5) # Espera um pouco mais em caso de erro de API
 
-    logger.info(f"🏁 Descoberta finalizada. {len(filtered_pairs)} novas pools passaram nos filtros.")
-    return filtered_pairs
+    # Se o loop terminar sem encontrar nada
+    logger.info("🏁 Descoberta finalizada. Nenhuma pool passou em todos os filtros.")
+    return None
 
 async def analyze_and_score_coin(symbol, pair_address):
     """
@@ -841,6 +816,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
