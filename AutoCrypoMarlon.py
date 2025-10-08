@@ -262,33 +262,36 @@ async def is_pair_quotable_on_jupiter(pair_details):
 # ---------------- Descoberta e Filtragem (implementado conforme solicitado) ----------------
 async def discover_and_filter_pairs():
     """
-    Descobre novas pools no GeckoTerminal (páginas sequenciais) e aplica filtros:
+    Descobre novas pools no GeckoTerminal e aplica filtros:
     - Vida entre 15 min (900s) e 60 min (3600s)
     - Liquidez >= 40_000 USD
     - Volume 1h >= 100_000 USD
+    - Par contra SOL
     - Não entrou antes (took_profit_pairs)
     Retorna dict {symbol: pair_address}
     """
     filtered_pairs = {}
     all_pools = []
+    network = "solana"
 
     async with httpx.AsyncClient() as client:
-        for page in range(1, 11):  # até ~200 novas pools (10 páginas)
-            try:
-                # ✅ novo endpoint
-                url = f"https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page={page}&include=base_token,quote_token"
+        try:
+            for page in range(1, 11):  # até 10 páginas (~200 novas pools)
+                url = f"https://api.geckoterminal.com/api/v2/networks/{network}/new_pools?page={page}&include=base_token,quote_token"
                 res = await client.get(url, timeout=20.0)
                 res.raise_for_status()
                 data = res.json().get('data', [])
                 if not data:
+                    logger.info(f"🔚 Nenhum dado retornado na página {page}, encerrando busca.")
                     break
                 all_pools.extend(data)
-                await asyncio.sleep(0.2)
-            except Exception as e:
-                logger.error(f"Erro ao buscar página {page} do GeckoTerminal: {e}")
-                break
+                await asyncio.sleep(0.3)
+            logger.info(f"🔎 Total de novas pools buscadas: {len(all_pools)}")
+        except Exception as e:
+            logger.error(f"Erro ao buscar pools do GeckoTerminal: {e}")
+            return {}
 
-    logger.info(f"Total novas pools buscadas: {len(all_pools)}. Aplicando filtros...")
+    logger.info("🧪 Aplicando filtros às pools encontradas...")
     for pool in all_pools:
         try:
             attr = pool.get('attributes', {})
@@ -298,7 +301,7 @@ async def discover_and_filter_pairs():
             if address.startswith("solana_"):
                 address = address.split('_')[1]
 
-            # vida da pool
+            # Calcular idade da pool
             age_str = attr.get('pool_created_at') or attr.get('created_at') or attr.get('createdAt')
             age_seconds = None
             if age_str:
@@ -310,39 +313,54 @@ async def discover_and_filter_pairs():
                         age_dt = pd.to_datetime(age_str)
                         age_seconds = (pd.Timestamp.now(tz='UTC') - age_dt).total_seconds()
                     except Exception:
-                        age_seconds = None
+                        pass
 
-            # filtra vida
-            if age_seconds is None or age_seconds < 900 or age_seconds > 3600:
+            # Filtro 1 - Idade
+            if age_seconds is None:
+                logger.debug(f"❌ {symbol} rejeitado: idade desconhecida.")
+                continue
+            if age_seconds < 900:
+                logger.debug(f"⏳ {symbol} rejeitado: muito novo ({age_seconds/60:.1f} min).")
+                continue
+            if age_seconds > 3600:
+                logger.debug(f"⌛ {symbol} rejeitado: muito velho ({age_seconds/60:.1f} min).")
                 continue
 
-            # liquidez
-            liquidity = float(attr.get('reserve_in_usd', attr.get('liquidity_usd', 0) or 0))
+            # Filtro 2 - Liquidez
+            liquidity = float(attr.get('reserve_in_usd') or attr.get('liquidity_usd') or 0)
             if liquidity < 40000:
+                logger.debug(f"💧 {symbol} rejeitado: liquidez baixa (${liquidity:,.0f}).")
                 continue
 
-            # volume 1h
-            volume_1h = float(attr.get('volume_usd', {}).get('h1', 0) or 0)
+            # Filtro 3 - Volume 1h
+            volume_data = attr.get('volume_usd', {})
+            if isinstance(volume_data, dict):
+                volume_1h = float(volume_data.get('h1', 0))
+            else:
+                volume_1h = float(volume_data or 0)
             if volume_1h < 100000:
+                logger.debug(f"📉 {symbol} rejeitado: volume 1h baixo (${volume_1h:,.0f}).")
                 continue
 
-            # somente pares contra SOL (reduz ruído)
-            quote_token_id = relationships.get('quote_token', {}).get('data', {}).get('id')
-            if quote_token_id != 'So11111111111111111111111111111111111111112' and not attr.get('name','').endswith(' / SOL'):
+            # Filtro 4 - Par contra SOL
+            quote_token_id = relationships.get('quote_token', {}).get('data', {}).get('id', '')
+            if quote_token_id != 'So11111111111111111111111111111111111111112' and not attr.get('name', '').endswith(' / SOL'):
+                logger.debug(f"⚖️ {symbol} rejeitado: não é par contra SOL.")
                 continue
 
-            # não reentrar se já fez take profit
+            # Filtro 5 - Já teve take profit
             if address in automation_state['took_profit_pairs']:
+                logger.debug(f"🔁 {symbol} rejeitado: já operado anteriormente (take profit).")
                 continue
 
-            logger.info(f"✅ APROVADO: {symbol} | Liquidez ${liquidity:,.0f} | Vol1h ${volume_1h:,.0f} | Idade {(age_seconds/60):.1f} min")
+            # Se passou todos os filtros
+            logger.info(f"✅ APROVADO: {symbol} | Liquidez ${liquidity:,.0f} | Vol1h ${volume_1h:,.0f} | Idade {age_seconds/60:.1f} min")
             filtered_pairs[symbol] = address
 
         except Exception as e:
             logger.error(f"Erro ao processar pool: {e}")
-            continue
 
-    logger.info(f"Descoberta finalizada. {len(filtered_pairs)} novas pools passaram nos filtros.")
+    logger.info(f"🏁 Descoberta finalizada. {len(filtered_pairs)} novas pools passaram nos filtros.")
     return filtered_pairs
 
 async def analyze_and_score_coin(symbol, pair_address):
@@ -801,6 +819,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
