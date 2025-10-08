@@ -609,141 +609,42 @@ async def check_velocity_strategy():
 
 # ---------------- Loop autônomo completo ----------------
 async def autonomous_loop():
-    global bot_running, in_position, entry_price
-    logger.info("Loop autônomo iniciado.")
-    while bot_running:
+    """O loop principal que executa a estratégia de trade de forma autônoma."""
+    global automation_state, in_position, pair_details
+
+    while automation_state.get("is_running", False):
         try:
-            now = time.time()
-            force_rescan = False
+            logger.info("Iniciando ciclo do loop autônomo...")
 
-            # Timeout de seleção (15 min) -> penaliza e busca novo alvo
-            if not in_position and automation_state.get("current_target_pair_address") and (now - automation_state.get("target_selected_timestamp", 0) > 900):
-                penalized_symbol = automation_state["current_target_symbol"]
-                penalized_address = automation_state["current_target_pair_address"]
-                logger.warning(f"TIMEOUT DE CAÇA: 15 min sem entrada para {penalized_symbol}. Abandonando e penalizando.")
-                await send_telegram_message(f"⌛️ Timeout de caça para **{penalized_symbol}**. Procurando um novo alvo...")
-                automation_state["penalty_box"][penalized_address] = 10
-                automation_state["current_target_pair_address"] = None
-                automation_state["checking_volatility"] = False
-                automation_state["volatility_check_start_time"] = 0
-                automation_state["volatility_check_passed"] = False
-                force_rescan = True
+            # Etapa 1: Descobrir e filtrar novos pares
+            # Esta função agora retorna um único par aprovado ou None
+            approved_pair = await discover_and_filter_pairs()
 
-            # Scan full (a cada 2 horas)
-            if now - automation_state.get("last_scan_timestamp", 0) > 7200:
-                force_rescan = True
+            if approved_pair:
+                # Etapa 2: Analisar o par aprovado
+                # A chamada foi ajustada para passar apenas um argumento
+                best_coin_symbol, details = await find_best_coin_to_trade(approved_pair)
 
-            if force_rescan or not automation_state.get("current_target_pair_address"):
-                # decrementa penalty box
-                if automation_state["penalty_box"]:
-                    for addr in list(automation_state["penalty_box"].keys()):
-                        automation_state["penalty_box"][addr] -= 1
-                        if automation_state["penalty_box"][addr] <= 0:
-                            del automation_state["penalty_box"][addr]
-                            logger.info(f"Endereço {addr} removido da caixa de penalidade.")
-
-                discovered_pairs = await discover_and_filter_pairs()
-                automation_state["discovered_pairs"] = discovered_pairs
-                best_coin = await find_best_coin_to_trade(discovered_pairs, set(automation_state["penalty_box"].keys()))
-                automation_state["last_scan_timestamp"] = now
-
-                if best_coin:
-                    if best_coin["pair_address"] != automation_state.get("current_target_pair_address"):
-                        if in_position:
-                            await execute_sell_order(reason=f"Trocando para {best_coin['symbol']}")
-                        automation_state.update(
-                            current_target_pair_address=best_coin["pair_address"],
-                            current_target_symbol=best_coin["symbol"],
-                            current_target_pair_details=best_coin["details"],
-                            target_selected_timestamp=now
-                        )
-                        automation_state["checking_volatility"] = False
-                        automation_state["volatility_check_start_time"] = 0
-                        automation_state["volatility_check_passed"] = False
-                        await send_telegram_message(f"🎯 **Novo Alvo:** {best_coin['symbol']}. Iniciando monitoramento...")
-
-            # Monitor / volatility check / entry logic
-            if automation_state.get("current_target_pair_address") and not in_position:
-                if automation_state.get("checking_volatility"):
-                    pair_details = automation_state.get("current_target_pair_details")
-                    data = await fetch_geckoterminal_ohlcv(pair_details['pair_address'], parameters["timeframe"], limit=1)
-                    if data is not None and not data.empty:
-                        last_closed_candle = data.iloc[0]
-                        price_change_pct = (last_closed_candle['close'] - last_closed_candle['open']) / last_closed_candle['open'] * 100 if last_closed_candle['open'] > 0 else 0
-
-                        # volatilidade extrema detectada -> penaliza
-                        if abs(price_change_pct) > 10.0:
-                            logger.warning(f"Volatilidade extrema detectada para {pair_details['base_symbol']}: {price_change_pct:.2f}%. Penalizando moeda.")
-                            await send_telegram_message(f"⚠️ Volatilidade extrema (+/- 10%) detectada para **{pair_details['base_symbol']}**. A moeda será penalizada e um novo alvo será buscado.")
-                            automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10
-                            automation_state["current_target_pair_address"] = None
-                            automation_state["checking_volatility"] = False
-                            automation_state["volatility_check_passed"] = False
-                            await asyncio.sleep(60)
-                            continue
-
-                        if now - automation_state.get("volatility_check_start_time", 0) > 180:
-                            automation_state["checking_volatility"] = False
-                            automation_state["volatility_check_passed"] = True
-                            logger.info(f"Verificação de volatilidade de 3 minutos concluída para {pair_details['base_symbol']}. Moeda considerada segura.")
-                            await send_telegram_message(f"✅ Volatilidade de **{pair_details['base_symbol']}** dentro do limite por 3 minutos. Agora, monitorando para sinal de compra (>2%).")
-                    await asyncio.sleep(15)
-                elif automation_state.get("volatility_check_passed"):
-                    pair_details = automation_state.get("current_target_pair_details")
-                    data = await fetch_geckoterminal_ohlcv(pair_details['pair_address'], parameters["timeframe"], limit=1)
-                    if data is not None and not data.empty:
-                        last_closed_candle = data.iloc[0]
-                        price_change_pct = (last_closed_candle['close'] - last_closed_candle['open']) / last_closed_candle['open'] * 100 if last_closed_candle['open'] > 0 else 0
-                        logger.info(f"Monitorando {pair_details['base_symbol']}: Variação da Vela: {price_change_pct:+.2f}%")
-                        if price_change_pct > 2.0:
-                            logger.info(f"Variação da vela para {pair_details['base_symbol']} > 2%. Procedendo com a compra.")
-                            await send_telegram_message(f"✅ Variação da vela para **{pair_details['base_symbol']}** voltou a subir! Executando ordem de compra...")
-                            price_native, _ = await fetch_dexscreener_real_time_price(pair_details['pair_address'])
-                            if price_native:
-                                reason = "Sinal da Estratégia retomado"
-                                await execute_buy_order(parameters["amount"], price_native, pair_details, reason=reason)
-                    await asyncio.sleep(15)
-                else:
-                    # se não em checking, tentar iniciar checagem se houver sinal
+                if best_coin_symbol and details:
+                    pair_details = details
+                    logger.info(f"🏆 Melhor par encontrado: {best_coin_symbol} (Score={pair_details.get('score', 0):.2f})")
+                    
+                    # Etapa 3: Verificar a estratégia de volatilidade antes de comprar
                     await check_velocity_strategy()
-                    await asyncio.sleep(30)
-
-            # Gerenciamento de posição aberta
-            elif in_position:
-                price_native, _ = await fetch_dexscreener_real_time_price(automation_state["current_target_pair_address"])
-                if price_native:
-                    profit = ((price_native - entry_price) / entry_price) * 100 if entry_price > 0 else 0
-                    logger.info(f"Posição Aberta ({automation_state['current_target_symbol']}): P/L: {profit:+.2f}%")
-                    tp_price = entry_price * (1 + parameters["take_profit_percent"]/100)
-                    sl_price = entry_price * (1 - parameters["stop_loss_percent"]/100)
-
-                    # Venda parcial/adaptativa
-                    if profit >= parameters["take_profit_percent"]:
-                        await execute_sell_order(f"Take Profit (+{parameters['take_profit_percent']}%)")
-                        continue
-                    if profit <= -parameters["stop_loss_percent"]:
-                        await execute_sell_order(f"Stop Loss (-{parameters['stop_loss_percent']}%)")
-                        continue
-
-                    # timeout adaptativo: quanto maior o profit, maior margem de espera; se profit negativo, reduz janela
-                    elapsed = time.time() - automation_state.get("position_opened_timestamp", 0)
-                    # adaptive_timeout entre 60s e 1200s (20min) adaptado pelo profit
-                    adaptive_timeout = max(60, min(1200, int(600 * max(0.1, (1 - profit/ (parameters['take_profit_percent'] or 1))))))
-                    if elapsed > adaptive_timeout:
-                        await execute_sell_order(f"Timeout adaptativo (P/L: {profit:+.2f}%)")
-                        continue
-                await asyncio.sleep(15)
+                else:
+                    logger.info("Nenhum par sobreviveu à análise de pontuação ou obtenção de detalhes.")
             else:
-                # sem alvo, sem posição
-                await asyncio.sleep(30)
+                logger.warning("Nenhum par novo passou nos filtros iniciais nesta rodada.")
 
-        except asyncio.CancelledError:
-            logger.info("Loop autônomo cancelado.")
-            break
+            # Aguarda o próximo ciclo
+            logger.info(f"Ciclo finalizado. Aguardando {TRADE_INTERVAL_SECONDS} segundos para o próximo.")
+            await asyncio.sleep(TRADE_INTERVAL_SECONDS)
+
         except Exception as e:
             logger.error(f"Erro crítico no loop autônomo: {e}", exc_info=True)
-            await asyncio.sleep(30)
-
+            # Em caso de erro, espera um pouco mais para evitar loops de erro rápidos
+            await asyncio.sleep(60)
+            
 # ---------------- Comandos Telegram ----------------
 async def start(update, context):
     await update.effective_message.reply_text(
@@ -839,6 +740,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
