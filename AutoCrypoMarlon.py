@@ -388,32 +388,54 @@ async def analyze_and_score_coin(symbol, pair_address):
         logger.error(f"Erro ao analisar {symbol}: {e}")
         return 0
 
-
 async def find_best_coin_to_trade(filtered_pairs: dict, ignored_pairs: set):
     """
-    Recebe os pares aprovados e retorna o melhor (maior score).
+    Recebe os pares aprovados e retorna o melhor (maior score) com detalhes.
     Ignora pares penalizados.
+    Garante que 'details' sempre exista, mesmo que haja falha ao obter os detalhes.
     """
     if not filtered_pairs:
         logger.warning("Nenhum par disponível para análise.")
         return None
 
-    best_symbol, best_score, best_address = None, -9999, None
+    best_symbol, best_score, best_address, best_details = None, -9999, None, {}
 
     for symbol, address in filtered_pairs.items():
         if address in ignored_pairs:
             continue
-        score = await analyze_and_score_coin(symbol, address)
+
+        try:
+            score = await analyze_and_score_coin(symbol, address)
+        except Exception as e:
+            logger.error(f"Erro ao calcular score para {symbol}: {e}")
+            continue
+
         if score > best_score:
             best_symbol, best_score, best_address = symbol, score, address
 
+            # Tenta obter detalhes, mas garante fallback
+            try:
+                details = await get_coin_details(symbol, address)
+                best_details = details if details else {}
+            except Exception as e:
+                logger.error(f"Erro ao obter detalhes para {symbol}: {e}")
+                best_details = {}
+
     if best_symbol:
         logger.info(f"🏆 Melhor par encontrado: {best_symbol} (Score={best_score:.2f})")
-        await send_telegram_message(f"🏆 Melhor par encontrado: <b>{best_symbol}</b>\nScore: {best_score:.2f}")
-        return {"symbol": best_symbol, "pair_address": best_address, "score": best_score}
+        await send_telegram_message(
+            f"🏆 Melhor par encontrado: <b>{best_symbol}</b>\nScore: {best_score:.2f}"
+        )
+        return {
+            "symbol": best_symbol,
+            "pair_address": best_address,
+            "score": best_score,
+            "details": best_details
+        }
 
     logger.info("Nenhum par atingiu pontuação mínima.")
     return None
+
     
 # ---------------- Ordem: BUY / SELL (usando seu código) ----------------
 async def execute_buy_order(amount, price, pair_details, manual=False, reason="Sinal da Estratégia"):
@@ -819,6 +841,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
