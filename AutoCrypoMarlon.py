@@ -612,44 +612,37 @@ async def autonomous_loop():
     """O loop principal que executa a estratégia de trade de forma autônoma."""
     global automation_state, in_position, pair_details
 
-    logger.info("Loop autônomo iniciado.")
-    # CORREÇÃO: A condição do loop agora usa a variável de estado correta.
     while automation_state.get("is_running", False):
         try:
-            now = time.time()
-            force_rescan = False
+            logger.info("Iniciando ciclo do loop autônomo...")
 
-            # Lógica de Timeout (se um alvo fica selecionado por muito tempo sem entrada)
-            if not in_position and automation_state.get("current_target_pair_address") and (now - automation_state.get("target_selected_timestamp", 0) > 900):
-                # (O restante do seu código de timeout continua aqui, sem alterações)
-                pass # Placeholder para o resto da sua lógica
+            # Etapa 1: Descobrir e filtrar novos pares.
+            # A função agora retorna um único dicionário do par aprovado ou None.
+            approved_pair = await discover_and_filter_pairs()
 
-            # Lógica de busca e análise
-            if force_rescan or not automation_state.get("current_target_pair_address"):
-                discovered_pairs = await discover_and_filter_pairs()
-                if discovered_pairs: # Verifica se algo foi descoberto
-                    best_coin = await find_best_coin_to_trade(discovered_pairs, set(automation_state["penalty_box"].keys()))
+            if approved_pair:
+                # Etapa 2: Analisar o par aprovado.
+                # A CHAMADA FOI CORRIGIDA para passar apenas um argumento.
+                best_coin_symbol, details = await find_best_coin_to_trade(approved_pair)
+
+                if best_coin_symbol and details:
+                    pair_details = details
+                    automation_state["current_target_pair_details"] = details
+                    automation_state["current_target_pair_address"] = details.get('address')
+                    automation_state["target_selected_timestamp"] = time.time()
                     
-                    if best_coin:
-                        automation_state.update(
-                            current_target_pair_address=best_coin["pair_address"],
-                            current_target_symbol=best_coin["symbol"],
-                            current_target_pair_details=best_coin.get("details", {}),
-                            target_selected_timestamp=now
-                        )
-                        await send_telegram_message(f"🎯 Novo Alvo: {best_coin['symbol']}. Monitorando...")
+                    logger.info(f"🏆 Alvo selecionado: {best_coin_symbol} (Score={pair_details.get('score', 0):.2f})")
+                    await send_telegram_message(f"🎯 Novo Alvo: {best_coin_symbol}. Monitorando...")
+                    
+                    # Etapa 3: Verificar a estratégia de volatilidade antes de comprar
+                    await check_velocity_strategy()
+                else:
+                    logger.info("O par aprovado não sobreviveu à análise de pontuação ou obtenção de detalhes.")
+            else:
+                logger.warning("Nenhum par novo passou nos filtros iniciais nesta rodada.")
 
-            # Lógica de gerenciamento de posição (quando já comprou)
-            elif in_position:
-                # (O restante do seu código de gerenciamento de P/L, stop, etc. continua aqui)
-                pass # Placeholder
-
-            # Se não está em posição mas tem um alvo, monitora para comprar
-            elif automation_state.get("current_target_pair_address"):
-                 await check_velocity_strategy()
-
-
-            # Intervalo entre os ciclos para não sobrecarregar a CPU e as APIs
+            # Aguarda o próximo ciclo
+            logger.info(f"Ciclo finalizado. Aguardando {TRADE_INTERVAL_SECONDS} segundos para o próximo.")
             await asyncio.sleep(TRADE_INTERVAL_SECONDS)
 
         except asyncio.CancelledError:
@@ -657,7 +650,8 @@ async def autonomous_loop():
             break
         except Exception as e:
             logger.error(f"Erro crítico no loop autônomo: {e}", exc_info=True)
-            await asyncio.sleep(30)     
+            # Em caso de erro, espera um pouco mais para evitar loops de erro rápidos
+            await asyncio.sleep(60)
             
 # ---------------- Comandos Telegram ----------------
 async def start(update, context):
@@ -775,6 +769,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
