@@ -262,40 +262,33 @@ async def is_pair_quotable_on_jupiter(pair_details):
 # ---------------- Descoberta e Filtragem (implementado conforme solicitado) ----------------
 async def discover_and_filter_pairs():
     """
-    Descobre pares no GeckoTerminal e aplica filtros:
+    Descobre novas pools no GeckoTerminal (páginas sequenciais) e aplica filtros:
     - Vida entre 15 min (900s) e 60 min (3600s)
     - Liquidez >= 40_000 USD
     - Volume 1h >= 100_000 USD
-    - Pares contra SOL
     - Não entrou antes (took_profit_pairs)
     Retorna dict {symbol: pair_address}
     """
     filtered_pairs = {}
     all_pools = []
-    discard_reasons = Counter()
-    total_checked = 0
-
-    logger.info("🚀 Iniciando varredura de pares no GeckoTerminal (Solana)...")
 
     async with httpx.AsyncClient() as client:
-        for page in range(1, 31):  # até 2000 pares (10 páginas)
+        for page in range(1, 11):  # até ~200 novas pools (10 páginas)
             try:
-                url = f"https://api.geckoterminal.com/api/v2/networks/solana/pools?page={page}&include=base_token,quote_token"
-                res = await client.get(url, timeout=25.0)
+                # ✅ novo endpoint
+                url = f"https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page={page}&include=base_token,quote_token"
+                res = await client.get(url, timeout=20.0)
                 res.raise_for_status()
                 data = res.json().get('data', [])
                 if not data:
-                    logger.info(f"🛑 Página {page} sem resultados, encerrando busca.")
                     break
                 all_pools.extend(data)
-                logger.info(f"📄 Página {page}: {len(data)} pares carregados.")
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(0.2)
             except Exception as e:
-                logger.error(f"⚠️ Erro ao buscar página {page}: {e}")
-                await asyncio.sleep(2)
+                logger.error(f"Erro ao buscar página {page} do GeckoTerminal: {e}")
+                break
 
-    logger.info(f"🔍 Total de pares coletados: {len(all_pools)}. Aplicando filtros...")
-
+    logger.info(f"Total novas pools buscadas: {len(all_pools)}. Aplicando filtros...")
     for pool in all_pools:
         try:
             attr = pool.get('attributes', {})
@@ -304,141 +297,140 @@ async def discover_and_filter_pairs():
             address = pool.get('id', 'N/A')
             if address.startswith("solana_"):
                 address = address.split('_')[1]
-            total_checked += 1
 
-            # --- Calcular idade ---
+            # vida da pool
             age_str = attr.get('pool_created_at') or attr.get('created_at') or attr.get('createdAt')
-            try:
-                age_dt = pd.to_datetime(age_str).tz_convert('UTC')
-            except Exception:
-                age_dt = pd.to_datetime(age_str, utc=True)
-            age_seconds = (pd.Timestamp.now(tz='UTC') - age_dt).total_seconds() if age_dt else None
+            age_seconds = None
+            if age_str:
+                try:
+                    age_dt = pd.to_datetime(age_str).tz_convert('UTC')
+                    age_seconds = (pd.Timestamp.now(tz='UTC') - age_dt).total_seconds()
+                except Exception:
+                    try:
+                        age_dt = pd.to_datetime(age_str)
+                        age_seconds = (pd.Timestamp.now(tz='UTC') - age_dt).total_seconds()
+                    except Exception:
+                        age_seconds = None
+
+            # filtra vida
             if age_seconds is None or age_seconds < 900 or age_seconds > 3600:
-                discard_reasons["idade fora do intervalo"] += 1
                 continue
 
-            # --- Liquidez ---
+            # liquidez
             liquidity = float(attr.get('reserve_in_usd', attr.get('liquidity_usd', 0) or 0))
-            if liquidity < 40_000:
-                discard_reasons["liquidez baixa"] += 1
+            if liquidity < 40000:
                 continue
 
-            # --- Volume 1h ---
-            vol_1h_data = attr.get('volume_usd', {})
-            if isinstance(vol_1h_data, dict):
-                volume_1h = float(vol_1h_data.get('h1', 0))
-            else:
-                volume_1h = float(vol_1h_data or 0)
-            if volume_1h < 100_000:
-                discard_reasons["volume baixo"] += 1
+            # volume 1h
+            volume_1h = float(attr.get('volume_usd', {}).get('h1', 0) or 0)
+            if volume_1h < 100000:
                 continue
 
-            # --- Pares contra SOL ---
+            # somente pares contra SOL (reduz ruído)
             quote_token_id = relationships.get('quote_token', {}).get('data', {}).get('id')
-            if quote_token_id != 'So11111111111111111111111111111111111111112' and not attr.get('name', '').endswith(' / SOL'):
-                discard_reasons["não é par SOL"] += 1
+            if quote_token_id != 'So11111111111111111111111111111111111111112' and not attr.get('name','').endswith(' / SOL'):
                 continue
 
-            # --- Evita reentrar ---
+            # não reentrar se já fez take profit
             if address in automation_state['took_profit_pairs']:
-                discard_reasons["já operado"] += 1
                 continue
 
-            # --- Aprovado ---
-            logger.info(f"✅ {symbol} aprovado | LQ ${liquidity:,.0f} | VOL1h ${volume_1h:,.0f} | Idade {age_seconds/60:.1f} min")
+            logger.info(f"✅ APROVADO: {symbol} | Liquidez ${liquidity:,.0f} | Vol1h ${volume_1h:,.0f} | Idade {(age_seconds/60):.1f} min")
             filtered_pairs[symbol] = address
 
         except Exception as e:
             logger.error(f"Erro ao processar pool: {e}")
-            discard_reasons["erro parsing"] += 1
             continue
 
-    resumo = (
-        f"📊 *Scanner Finalizado*\n"
-        f"Total analisado: `{total_checked}`\n"
-        f"Aprovados: `{len(filtered_pairs)}`\n\n"
-        f"Motivos de descarte:\n" +
-        "\n".join([f"- {k}: {v}" for k, v in discard_reasons.items()])
-    )
-
-    logger.info(f"✅ Descoberta finalizada. {len(filtered_pairs)} pares aprovados.")
-    await send_telegram_message(resumo)
-
+    logger.info(f"Descoberta finalizada. {len(filtered_pairs)} novas pools passaram nos filtros.")
     return filtered_pairs
 
 # ---------------- Scoring / análise ----------------
-async def analyze_and_score_coin(pair_address, symbol):
-    try:
-        pair_details = await get_pair_details(pair_address)
-        if not pair_details: return 0, None
-        if not await is_pair_quotable_on_jupiter(pair_details): 
-            logger.info(f"{symbol} não quotable em Jupiter -> descartado")
-            return 0, None
+async def discover_and_filter_pairs():
+    """
+    Descobre novas pools no GeckoTerminal (páginas sequenciais) e aplica filtros:
+    - Vida entre 15 min (900s) e 60 min (3600s)
+    - Liquidez >= 40_000 USD
+    - Volume 1h >= 100_000 USD
+    - Não entrou antes (took_profit_pairs)
+    Retorna dict {symbol: pair_address}
+    """
+    filtered_pairs = {}
+    all_pools = []
 
-        df_1m = await fetch_geckoterminal_ohlcv(pair_address, "1m", limit=15)
-        df_5m = await fetch_geckoterminal_ohlcv(pair_address, "1m", limit=15)  # we'll aggregate for 5m
-        if df_1m is None or len(df_1m) < 15:
-            logger.info(f"{symbol} sem dados 1m suficientes")
-            return 0, None
+    async with httpx.AsyncClient() as client:
+        for page in range(1, 11):  # até ~200 novas pools (10 páginas)
+            try:
+                # ✅ novo endpoint
+                url = f"https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page={page}&include=base_token,quote_token"
+                res = await client.get(url, timeout=20.0)
+                res.raise_for_status()
+                data = res.json().get('data', [])
+                if not data:
+                    break
+                all_pools.extend(data)
+                await asyncio.sleep(0.2)
+            except Exception as e:
+                logger.error(f"Erro ao buscar página {page} do GeckoTerminal: {e}")
+                break
 
-        # build 5m trend by resampling 1m (if available)
+    logger.info(f"Total novas pools buscadas: {len(all_pools)}. Aplicando filtros...")
+    for pool in all_pools:
         try:
-            df_1m['ts_dt'] = pd.to_datetime(df_1m['ts'], unit='s')
-            df_1m = df_1m.set_index('ts_dt')
-            df_5m_series = df_1m['close'].resample('5T').last().dropna()
-            if len(df_5m_series) < 2:
-                return 0, None
-            trend5 = df_5m_series.iloc[-1] - df_5m_series.iloc[0]
-            if trend5 <= 0:
-                logger.info(f"{symbol} sem tendência 5m positiva -> descartado")
-                return 0, None
-        except Exception:
-            # se falhar, aborta
-            return 0, None
+            attr = pool.get('attributes', {})
+            relationships = pool.get('relationships', {})
+            symbol = attr.get('name', 'N/A').split(' / ')[0]
+            address = pool.get('id', 'N/A')
+            if address.startswith("solana_"):
+                address = address.split('_')[1]
 
-        # volume and volatility scoring
-        vol_sum = df_1m['volume'].sum()
-        price_range = df_1m['high'].max() - df_1m['low'].min()
-        low_min = df_1m['low'].min()
-        volatility_score = (price_range / low_min) * 100 if low_min and low_min > 0 else 0
-        base_score = (volatility_score * 1000) + vol_sum
+            # vida da pool
+            age_str = attr.get('pool_created_at') or attr.get('created_at') or attr.get('createdAt')
+            age_seconds = None
+            if age_str:
+                try:
+                    age_dt = pd.to_datetime(age_str).tz_convert('UTC')
+                    age_seconds = (pd.Timestamp.now(tz='UTC') - age_dt).total_seconds()
+                except Exception:
+                    try:
+                        age_dt = pd.to_datetime(age_str)
+                        age_seconds = (pd.Timestamp.now(tz='UTC') - age_dt).total_seconds()
+                    except Exception:
+                        age_seconds = None
 
-        total_move = price_range
-        if total_move > 0:
-            df_1m['candle_move'] = df_1m['high'] - df_1m['low']
-            biggest = df_1m['candle_move'].max()
-            spike_ratio = biggest / total_move if total_move else 1
-            trend_quality_index = max(0.0, 1 - spike_ratio)
-        else:
-            trend_quality_index = 0
+            # filtra vida
+            if age_seconds is None or age_seconds < 900 or age_seconds > 3600:
+                continue
 
-        final_score = base_score * trend_quality_index
-        logger.info(f"Candidato {symbol} -> score {final_score:,.0f} (vol {volatility_score:.2f}%, vol_sum {vol_sum:,.0f})")
-        return final_score, pair_details
+            # liquidez
+            liquidity = float(attr.get('reserve_in_usd', attr.get('liquidity_usd', 0) or 0))
+            if liquidity < 40000:
+                continue
 
-    except Exception as e:
-        logger.error(f"Erro ao analisar {symbol} ({pair_address}): {e}")
-        return 0, None
+            # volume 1h
+            volume_1h = float(attr.get('volume_usd', {}).get('h1', 0) or 0)
+            if volume_1h < 100000:
+                continue
 
-async def find_best_coin_to_trade(candidate_pairs, penalized_pairs=set()):
-    if not candidate_pairs:
-        logger.info("Nenhum candidato para pontuar.")
-        return None
-    best_score, best_coin_info = -1, None
-    valid_candidates = {s:a for s,a in candidate_pairs.items() if a not in penalized_pairs}
-    if not valid_candidates:
-        logger.info("Nenhum candidato válido após penalizados.")
-        return None
+            # somente pares contra SOL (reduz ruído)
+            quote_token_id = relationships.get('quote_token', {}).get('data', {}).get('id')
+            if quote_token_id != 'So11111111111111111111111111111111111111112' and not attr.get('name','').endswith(' / SOL'):
+                continue
 
-    tasks = [analyze_and_score_coin(addr, symbol) for symbol, addr in valid_candidates.items()]
-    results = await asyncio.gather(*tasks)
-    for (symbol, addr), (score, details) in zip(valid_candidates.items(), results):
-        if details and score > best_score:
-            best_score = score
-            best_coin_info = {"symbol": symbol, "pair_address": addr, "score": score, "details": details}
-    if best_coin_info:
-        logger.info(f"Selecionado: {best_coin_info['symbol']} (score {best_coin_info['score']:,.0f})")
-    return best_coin_info
+            # não reentrar se já fez take profit
+            if address in automation_state['took_profit_pairs']:
+                continue
+
+            logger.info(f"✅ APROVADO: {symbol} | Liquidez ${liquidity:,.0f} | Vol1h ${volume_1h:,.0f} | Idade {(age_seconds/60):.1f} min")
+            filtered_pairs[symbol] = address
+
+        except Exception as e:
+            logger.error(f"Erro ao processar pool: {e}")
+            continue
+
+    logger.info(f"Descoberta finalizada. {len(filtered_pairs)} novas pools passaram nos filtros.")
+    return filtered_pairs
+
 
 # ---------------- Ordem: BUY / SELL (usando seu código) ----------------
 async def execute_buy_order(amount, price, pair_details, manual=False, reason="Sinal da Estratégia"):
@@ -844,6 +836,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
