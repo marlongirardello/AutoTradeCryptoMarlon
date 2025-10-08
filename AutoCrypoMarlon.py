@@ -571,48 +571,91 @@ async def execute_sell_order(reason=""):
 
 # ---------------- Estratégia velocity / momentum & adaptive timeout ----------------
 async def check_velocity_strategy():
-    """Analisa candles 1m do target e decide iniciar o período de observação se o sinal for forte."""
-    global in_position
+    """Analisa o alvo atual e gerencia o processo de compra em múltiplos estágios, com logs detalhados."""
+    global in_position, automation_state, pair_details
     target_address = automation_state.get("current_target_pair_address")
-    if not target_address or in_position or automation_state.get("checking_volatility"):
+
+    if not target_address or in_position:
         return
 
-    pair_details = automation_state.get("current_target_pair_details")
+    pair_details = automation_state.get("current_target_pair_details", {})
     symbol = pair_details.get('base_symbol', 'N/A')
-    data = await fetch_geckoterminal_ohlcv(target_address, parameters["timeframe"], limit=5)
-    if data is None or len(data) < 2:
-        return
+    now = time.time()
 
-    last = data.iloc[-1]
-    price_change_pct = (last['close'] - last['open']) / last['open'] * 100 if last['open'] > 0 else 0
+    try:
+        # ----------------------------------------------------
+        # FASE 2: OBSERVAÇÃO DE VOLATILIDADE (3 minutos)
+        # ----------------------------------------------------
+        if automation_state.get("checking_volatility"):
+            tempo_restante = 180 - (now - automation_state.get("volatility_check_start_time", 0))
+            logger.info(f"⏳ Observando {symbol} por mais {tempo_restante:.0f}s para garantir estabilidade...")
+            
+            data = await get_ohlcv_data(target_address, limit=1)
+            if data is not None and not data.empty:
+                price_change_pct = ((data['close'].iloc[-1] - data['open'].iloc[0]) / data['open'].iloc[0]) * 100
+                logger.info(f"   (Variação da vela atual: {price_change_pct:+.2f}%)")
+                
+                if abs(price_change_pct) > 10.0:
+                    msg = f"⚠️ Volatilidade extrema detectada para **{symbol}** (+/-10%). Alvo penalizado. Reiniciando caça."
+                    logger.warning(msg.replace("**",""))
+                    await send_telegram_message(msg)
+                    automation_state["penalty_box"][target_address] = 10
+                    automation_state["current_target_pair_address"] = None
+                    automation_state["checking_volatility"] = False
+                    return
 
-    # check 5m trend
-    df_5m = await fetch_geckoterminal_ohlcv(target_address, "1m", limit=10)
-    trend5_ok = False
-    if df_5m is not None and len(df_5m) >= 5:
-        try:
-            df_5m['ts_dt'] = pd.to_datetime(df_5m['ts'], unit='s')
-            df_5m = df_5m.set_index('ts_dt')
-            close_5m = df_5m['close'].resample('5T').last().dropna()
-            if len(close_5m) >= 2 and close_5m.iloc[-1] > close_5m.iloc[0]:
-                trend5_ok = True
-        except Exception:
-            trend5_ok = False
+            if now - automation_state.get("volatility_check_start_time", 0) > 180:
+                automation_state["checking_volatility"] = False
+                automation_state["volatility_check_passed"] = True
+                msg = f"✅ Estabilidade de **{symbol}** confirmada. Aguardando gatilho final de compra (>+2%)."
+                logger.info(msg.replace("**",""))
+                await send_telegram_message(msg)
+            return
 
-    # --- LOGS DETALHADOS ---
-    logger.info(f"🕵️ Análise de Sinal para {symbol}: Vela 1min={price_change_pct:+.2f}%, Tendência 5min={'Positiva' if trend5_ok else 'Negativa'}")
+        # ----------------------------------------------------
+        # FASE 3: AGUARDANDO GATILHO FINAL DE COMPRA
+        # ----------------------------------------------------
+        if automation_state.get("volatility_check_passed"):
+            logger.info(f"🎯 Aguardando gatilho final de compra para {symbol} (>+2% na vela de 1min)...")
+            data = await get_ohlcv_data(target_address, limit=1)
+            if data is not None and not data.empty:
+                price_change_pct = ((data['close'].iloc[-1] - data['open'].iloc[0]) / data['open'].iloc[0]) * 100
+                logger.info(f"   (Variação da vela atual: {price_change_pct:+.2f}%)")
+                
+                if price_change_pct > 2.0:
+                    msg = f"✅ GATILHO FINAL ATINGIDO para **{symbol}**! Executando ordem de compra..."
+                    logger.info(msg.replace("**",""))
+                    await send_telegram_message(msg)
+                    await execute_buy_order()
+            return
 
-    if price_change_pct > 2.0 and trend5_ok:
-        automation_state["checking_volatility"] = True
-        automation_state["volatility_check_start_time"] = time.time()
-        msg = f"🔔 SINAL INICIAL FORTE DETECTADO para **{symbol}**. Iniciando período de observação de 3 minutos para garantir estabilidade."
-        logger.info(msg.replace("**",""))
-        await send_telegram_message(msg)
-    else:
-        # LOG ADICIONADO: Informa por que o sinal não foi bom o suficiente
-        logger.info(f"❌ Sinal para {symbol} não atendeu aos critérios (>+2% e tendência 5min positiva). Aguardando novo ciclo.")
-    return
+        # ----------------------------------------------------
+        # FASE 1: BUSCANDO SINAL INICIAL
+        # ----------------------------------------------------
+        df_1m = await get_ohlcv_data(target_address, limit=1)
+        df_10m = await get_ohlcv_data(target_address, limit=10)
+        
+        if df_1m is None or df_10m is None or df_1m.empty or df_10m.empty:
+            logger.warning(f"Não foi possível obter dados OHLCV para {symbol}. Tentando novamente no próximo ciclo.")
+            return
 
+        price_change_pct = ((df_1m['close'].iloc[-1] - df_1m['open'].iloc[0]) / df_1m['open'].iloc[0]) * 100
+        trend10_ok = df_10m['close'].iloc[-1] > df_10m['close'].iloc[0]
+
+        logger.info(f"🕵️ Buscando sinal inicial para {symbol}: Vela 1min={price_change_pct:+.2f}%, Tendência 10min={'Positiva' if trend10_ok else 'Negativa'}")
+
+        if price_change_pct > 2.0 and trend10_ok:
+            automation_state["checking_volatility"] = True
+            automation_state["volatility_check_start_time"] = now
+            msg = f"🔔 SINAL INICIAL FORTE DETECTADO para **{symbol}**. Iniciando período de observação de 3 minutos."
+            logger.info(msg.replace("**",""))
+            await send_telegram_message(msg)
+        else:
+            logger.info(f"❌ Sinal inicial para {symbol} ainda não encontrado. Continuará monitorando.")
+
+    except Exception as e:
+        logger.error(f"Erro em check_velocity_strategy: {e}", exc_info=True)
+        
 # ---------------- Loop autônomo completo ----------------
 async def autonomous_loop():
     """O loop principal que executa a estratégia de trade de forma autônoma, com estados de operação claros."""
@@ -793,6 +836,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
