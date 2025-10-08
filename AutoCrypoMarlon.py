@@ -615,54 +615,60 @@ async def check_velocity_strategy():
 
 # ---------------- Loop autônomo completo ----------------
 async def autonomous_loop():
-    """O loop principal que executa a estratégia de trade de forma autônoma."""
+    """O loop principal que executa a estratégia de trade de forma autônoma, com estados de operação claros."""
     global automation_state, in_position, pair_details
 
     logger.info("Loop autônomo iniciado.")
     while automation_state.get("is_running", False):
         try:
-            logger.info("Iniciando ciclo do loop autônomo...")
-
-            # Etapa 1: Descobrir um novo par se não houver um alvo atual.
+            now = time.time()
+            # ------------------------------------------------------------------
+            # ESTADO 1: CAÇA (Nenhum alvo selecionado)
+            # ------------------------------------------------------------------
             if not automation_state.get("current_target_pair_address"):
+                logger.info("Iniciando ciclo de caça...")
                 approved_pair = await discover_and_filter_pairs()
 
                 if approved_pair:
-                    # Etapa 2: Analisar o par encontrado.
                     best_coin_symbol, details = await find_best_coin_to_trade(approved_pair)
-
                     if best_coin_symbol and details:
-                        # --- CORREÇÃO CRÍTICA: VERIFICAÇÃO DO SCORE ---
                         score = details.get('score', 0)
                         if score > 0:
                             pair_details = details
                             automation_state["current_target_pair_details"] = details
                             automation_state["current_target_pair_address"] = details.get('address')
-                            automation_state["target_selected_timestamp"] = time.time()
+                            automation_state["target_selected_timestamp"] = now
                             
-                            msg = f"🎯 **Novo Alvo:** {best_coin_symbol} (Score={score:.2f}). Iniciando monitoramento do gatilho final..."
+                            msg = f"🎯 **Novo Alvo:** {best_coin_symbol} (Score={score:.2f}). Iniciando monitoramento do gatilho..."
                             logger.info(msg.replace("**", ""))
                             await send_telegram_message(msg)
                         else:
-                            # LOG ADICIONADO: Explica por que o alvo foi descartado.
-                            msg = f"❌ Alvo {best_coin_symbol} descartado devido a Score negativo ({score:.2f}). Procurando um novo alvo."
+                            msg = f"❌ Alvo {best_coin_symbol} descartado devido a Score negativo ({score:.2f}). Reiniciando caça."
                             logger.info(msg)
-                            await send_telegram_message(msg)
+                            # Não precisa de send_telegram_message aqui para não poluir
                 else:
-                    logger.warning("Nenhum par novo passou nos filtros iniciais nesta rodada.")
+                    logger.warning("Nenhum par novo passou nos filtros iniciais nesta rodada de caça.")
+                
+                # Aguarda o intervalo de caça
+                await asyncio.sleep(TRADE_INTERVAL_SECONDS)
 
-            # Etapa 3: Se já temos um alvo (com score positivo), monitorar o gatilho final.
+            # ------------------------------------------------------------------
+            # ESTADO 2: MONITORAMENTO (Alvo selecionado, aguardando para comprar)
+            # ------------------------------------------------------------------
             elif automation_state.get("current_target_pair_address") and not in_position:
+                # Chama a função de verificação, que agora tem logs detalhados
                 await check_velocity_strategy()
-            
-            # Etapa 4: Se já estamos em uma posição, gerenciar a posição.
-            elif in_position:
-                # Seu código de gerenciamento de Take Profit / Stop Loss
-                pass
+                # Durante o monitoramento, o intervalo de verificação é menor
+                await asyncio.sleep(15) 
 
-            # Aguarda o próximo ciclo
-            logger.info(f"Ciclo finalizado. Aguardando {TRADE_INTERVAL_SECONDS} segundos para o próximo.")
-            await asyncio.sleep(TRADE_INTERVAL_SECONDS)
+            # ------------------------------------------------------------------
+            # ESTADO 3: EM POSIÇÃO (Gerenciando a compra)
+            # ------------------------------------------------------------------
+            elif in_position:
+                # (Seu código de gerenciamento de Take Profit / Stop Loss)
+                pass # Mantém a lógica que você já tinha aqui
+                await asyncio.sleep(15)
+
 
         except asyncio.CancelledError:
             logger.info("Loop autônomo cancelado.")
@@ -787,6 +793,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
