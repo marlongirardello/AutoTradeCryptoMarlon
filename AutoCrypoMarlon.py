@@ -602,8 +602,11 @@ async def execute_sell_order(reason=""):
                 await send_telegram_message(f"⚠️ Erro crítico ao vender {symbol}: {e}. Tentativa {sell_fail_count}/100. O bot permanecerá em posição.")
 
 # ---------------- Estratégia velocity / momentum & adaptive timeout ----------------
+import time
+import asyncio
+
 async def check_velocity_strategy():
-    """Analisa o alvo atual e gerencia o processo de compra em múltiplos estágios, com logs detalhados."""
+    """Analisa o alvo atual para um gatilho de compra imediato e executa a ordem."""
     global in_position, automation_state, pair_details
     target_address = automation_state.get("current_target_pair_address")
 
@@ -612,78 +615,35 @@ async def check_velocity_strategy():
 
     pair_details = automation_state.get("current_target_pair_details", {})
     symbol = pair_details.get('base_symbol', 'N/A')
-    now = time.time()
 
     try:
-        # ----------------------------------------------------
-        # FASE 2: OBSERVAÇÃO DE VOLATILIDADE (3 minutos)
-        # ----------------------------------------------------
-        if automation_state.get("checking_volatility"):
-            tempo_restante = 180 - (now - automation_state.get("volatility_check_start_time", 0))
-            logger.info(f"⏳ Observando {symbol} por mais {tempo_restante:.0f}s para garantir estabilidade...")
-            
-            data = await fetch_geckoterminal_ohlcv(target_address, "1m", limit=1)
-            if data is not None and not data.empty:
-                price_change_pct = ((data['close'].iloc[-1] - data['open'].iloc[0]) / data['open'].iloc[0]) * 100
-                logger.info(f"   (Variação da vela atual: {price_change_pct:+.2f}%)")
-                
-                if abs(price_change_pct) > 10.0:
-                    msg = f"⚠️ Volatilidade extrema detectada para **{symbol}** (+/-10%). Alvo penalizado. Reiniciando caça."
-                    logger.warning(msg.replace("**",""))
-                    await send_telegram_message(msg)
-                    automation_state["penalty_box"][target_address] = 10
-                    automation_state["current_target_pair_address"] = None
-                    automation_state["checking_volatility"] = False
-                    return
-
-            if now - automation_state.get("volatility_check_start_time", 0) > 180:
-                automation_state["checking_volatility"] = False
-                automation_state["volatility_check_passed"] = True
-                msg = f"✅ Estabilidade de **{symbol}** confirmada. Aguardando gatilho final de compra (>+2%)."
-                logger.info(msg.replace("**",""))
-                await send_telegram_message(msg)
-            return
-
-        # ----------------------------------------------------
-        # FASE 3: AGUARDANDO GATILHO FINAL DE COMPRA
-        # ----------------------------------------------------
-        if automation_state.get("volatility_check_passed"):
-            logger.info(f"🎯 Aguardando gatilho final de compra para {symbol} (>+2% na vela de 1min)...")
-            data = await fetch_geckoterminal_ohlcv(target_address, "1m", limit=1)
-            if data is not None and not data.empty:
-                price_change_pct = ((data['close'].iloc[-1] - data['open'].iloc[0]) / data['open'].iloc[0]) * 100
-                logger.info(f"   (Variação da vela atual: {price_change_pct:+.2f}%)")
-                
-                if price_change_pct > 2.0:
-                    msg = f"✅ GATILHO FINAL ATINGIDO para **{symbol}**! Executando ordem de compra..."
-                    logger.info(msg.replace("**",""))
-                    await send_telegram_message(msg)
-                    await execute_buy_order()
-            return
-
-        # ----------------------------------------------------
-        # FASE 1: BUSCANDO SINAL INICIAL
-        # ----------------------------------------------------
+        # Puxa os dados da última vela de 1 minuto
         df_1m = await fetch_geckoterminal_ohlcv(target_address, "1m", limit=1)
-        df_10m = await fetch_geckoterminal_ohlcv(target_address, "1m", limit=10)
         
-        if df_1m is None or df_10m is None or df_1m.empty or df_10m.empty:
-            logger.warning(f"Não foi possível obter dados OHLCV para {symbol}. Tentando novamente no próximo ciclo.")
+        if df_1m is None or df_1m.empty:
+            logger.warning(f"Não foi possível obter dados OHLCV para {symbol}. Tentando novamente.")
             return
 
-        price_change_pct = ((df_1m['close'].iloc[-1] - df_1m['open'].iloc[0]) / df_1m['open'].iloc[0]) * 100
-        trend10_ok = df_10m['close'].iloc[-1] > df_10m['close'].iloc[0]
+        # Verifica se a vela de 1 minuto é positiva (fechamento > abertura)
+        is_positive_candle = df_1m['close'].iloc[-1] > df_1m['open'].iloc[-1]
 
-        logger.info(f"🕵️ Buscando sinal inicial para {symbol}: Vela 1min={price_change_pct:+.2f}%, Tendência 10min={'Positiva' if trend10_ok else 'Negativa'}")
+        # Loga a análise para visibilidade
+        logger.info(f"🕵️ Monitorando {symbol}: Vela de 1 minuto está {'positiva' if is_positive_candle else 'negativa'}.")
 
-        if price_change_pct > 2.0 and trend10_ok:
-            automation_state["checking_volatility"] = True
-            automation_state["volatility_check_start_time"] = now
-            msg = f"🔔 SINAL INICIAL FORTE DETECTADO para **{symbol}**. Iniciando período de observação de 3 minutos."
+        # Se a vela for positiva, dispara o gatilho de compra imediatamente
+        if is_positive_candle:
+            msg = f"✅ GATILHO ATINGIDO para **{symbol}**! Executando ordem de compra..."
             logger.info(msg.replace("**",""))
             await send_telegram_message(msg)
+            
+            # Chama a função de compra
+            await execute_buy_order()
+            
+            # Define o estado do bot para "em posição" para parar de comprar
+            in_position = True 
         else:
-            logger.info(f"❌ Sinal inicial para {symbol} ainda não encontrado. Continuará monitorando.")
+            logger.info(f"❌ Sinal para {symbol} não encontrado. Continuará monitorando.")
+            # O bot continua no estado de monitoramento, esperando o próximo ciclo
 
     except Exception as e:
         logger.error(f"Erro em check_velocity_strategy: {e}", exc_info=True)
@@ -879,6 +839,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
