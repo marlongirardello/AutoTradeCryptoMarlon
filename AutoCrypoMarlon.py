@@ -470,6 +470,7 @@ async def find_best_coin_to_trade(pair_info):
 # ---------------- Ordem: BUY / SELL (usando seu código) ----------------
 async def execute_buy_order(amount, price, pair_details, manual=False, reason="Sinal da Estratégia"):
     global in_position, entry_price, sell_fail_count, buy_fail_count
+    
     if in_position: 
         logger.info("Já em posição, abortando compra.")
         return
@@ -704,6 +705,17 @@ async def manage_position():
         logger.error(f"Erro em manage_position: {e}", exc_info=True)
         # Em caso de erro, o bot não trava e continua a checagem no próximo ciclo
 # ---------------- Loop autônomo completo ----------------
+async def get_pair_details(pair_address):
+    url = f"https://api.dexscreener.com/latest/dex/pairs/solana/{pair_address}"
+    try:
+        async with httpx.AsyncClient() as client:
+            res = await client.get(url, timeout=10.0)
+            res.raise_for_status()
+            pair_data = res.json().get('pair')
+            if not pair_data: return None
+            return {"pair_address": pair_data['pairAddress'], "base_symbol": pair_data['baseToken']['symbol'], "quote_symbol": pair_data['quoteToken']['symbol'], "base_address": pair_data['baseToken']['address'], "quote_address": pair_data['quoteToken']['address']}
+    except Exception: return None
+        
 async def autonomous_loop():
     """O loop principal que executa a estratégia de trade de forma autônoma, com estados de operação claros."""
     global automation_state, in_position, pair_details
@@ -717,33 +729,37 @@ async def autonomous_loop():
             # ------------------------------------------------------------------
             if not automation_state.get("current_target_pair_address"):
                 logger.info("Iniciando ciclo de caça...")
-                approved_pairs = discover_and_filter_pairs(pages_to_scan=10)
+                gecko_approved_pairs = discover_and_filter_pairs(pages_to_scan=10)
 
-                if approved_pairs:
+                if gecko_approved_pairs:
                     best_score = 0
-                    best_pair = None
+                    best_pair_details = None
 
                     # Analisa e pontua todas as moedas aprovadas
-                    for pair in approved_pairs:
-                        score = analyze_and_score_coin(pair)
-                        if score > best_score:
-                            best_score = score
-                            best_pair = pair
+                    for gecko_pair in gecko_approved_pairs:
+                        # Pega a informação completa do par usando a função Dexscreener
+                        pair_details = await get_pair_details(gecko_pair['pair_address'])
+                        
+                        if pair_details:
+                            # Agora a moeda tem a estrutura de dados que as funções de trade esperam
+                            score = analyze_and_score_coin(pair_details)
+                            if score > best_score:
+                                best_score = score
+                                best_pair_details = pair_details
                     
                     # Se a melhor moeda tiver uma pontuação acima de 70, define como alvo
-                    if best_pair and best_score >= 70:
-                        pair_details = best_pair
-                        automation_state["current_target_pair_details"] = best_pair
-                        automation_state["current_target_pair_address"] = best_pair.get('pair_address')
+                    if best_pair_details and best_score >= 70:
+                        pair_details = best_pair_details
+                        automation_state["current_target_pair_details"] = pair_details
+                        automation_state["current_target_pair_address"] = pair_details["pair_address"]
                         automation_state["target_selected_timestamp"] = now
 
-                        msg = f"🎯 **Novo Alvo:** {pair_details['attributes']['name']} (Score={best_score:.2f}). Iniciando monitoramento do gatilho..."
+                        msg = f"🎯 **Novo Alvo:** {pair_details['base_symbol']} (Score={best_score:.2f}). Iniciando monitoramento do gatilho..."
                         logger.info(msg.replace("**", ""))
                         await send_telegram_message(msg)
                     else:
                         msg = f"⚠️ Nenhuma moeda alcançou a pontuação mínima de 70. Reiniciando caça."
                         logger.info(msg)
-                        # Não precisa de send_telegram_message para não poluir
 
                 else:
                     logger.warning("Nenhum par novo passou nos filtros iniciais nesta rodada de caça.")
@@ -755,10 +771,6 @@ async def autonomous_loop():
             # ESTADO 2: MONITORAMENTO (Alvo selecionado, aguardando para comprar)
             # ------------------------------------------------------------------
             elif automation_state.get("current_target_pair_address") and not in_position:
-                # Aqui o bot continua a lógica de monitoramento
-                msg = f"⚠️ Iniciando Monitoramento"
-                logger.info(msg)
-                
                 await check_velocity_strategy()
                 await asyncio.sleep(15)
 
@@ -893,6 +905,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
