@@ -699,22 +699,31 @@ async def autonomous_loop():
                 approved_pairs = discover_and_filter_pairs(pages_to_scan=10)
 
                 if approved_pairs:
-                    best_coin_symbol, details = await find_best_coin_to_trade(approved_pairs)
-                    if best_coin_symbol and details:
-                        score = details.get('score', 0)
-                        if score > 0:
-                            pair_details = details
-                            automation_state["current_target_pair_details"] = details
-                            automation_state["current_target_pair_address"] = details.get('address')
-                            automation_state["target_selected_timestamp"] = now
-                            
-                            msg = f"🎯 **Novo Alvo:** {best_coin_symbol} (Score={score:.2f}). Iniciando monitoramento do gatilho..."
-                            logger.info(msg.replace("**", ""))
-                            await send_telegram_message(msg)
-                        else:
-                            msg = f"❌ Alvo {best_coin_symbol} descartado devido a Score negativo ({score:.2f}). Reiniciando caça."
-                            logger.info(msg)
-                            # Não precisa de send_telegram_message aqui para não poluir
+                    best_score = 0
+                    best_pair = None
+
+                    # Analisa e pontua todas as moedas aprovadas
+                    for pair in approved_pairs:
+                        score = analyze_and_score_coin(pair)
+                        if score > best_score:
+                            best_score = score
+                            best_pair = pair
+                    
+                    # Se a melhor moeda tiver uma pontuação acima de 70, define como alvo
+                    if best_pair and best_score >= 70:
+                        pair_details = best_pair
+                        automation_state["current_target_pair_details"] = best_pair
+                        automation_state["current_target_pair_address"] = best_pair.get('pair_address')
+                        automation_state["target_selected_timestamp"] = now
+
+                        msg = f"🎯 **Novo Alvo:** {pair_details['attributes']['name']} (Score={best_score:.2f}). Iniciando monitoramento do gatilho..."
+                        logger.info(msg.replace("**", ""))
+                        await send_telegram_message(msg)
+                    else:
+                        msg = f"⚠️ Nenhuma moeda alcançou a pontuação mínima de 70. Reiniciando caça."
+                        logger.info(msg)
+                        # Não precisa de send_telegram_message para não poluir
+
                 else:
                     logger.warning("Nenhum par novo passou nos filtros iniciais nesta rodada de caça.")
                 
@@ -725,17 +734,16 @@ async def autonomous_loop():
             # ESTADO 2: MONITORAMENTO (Alvo selecionado, aguardando para comprar)
             # ------------------------------------------------------------------
             elif automation_state.get("current_target_pair_address") and not in_position:
-                # Chama a função de verificação, que agora tem logs detalhados
+                # Aqui o bot continua a lógica de monitoramento
                 await check_velocity_strategy()
-                # Durante o monitoramento, o intervalo de verificação é menor
-                await asyncio.sleep(15) 
+                await asyncio.sleep(15)
 
             # ------------------------------------------------------------------
             # ESTADO 3: EM POSIÇÃO (Gerenciando a compra)
             # ------------------------------------------------------------------
             elif in_position:
                 # (Seu código de gerenciamento de Take Profit / Stop Loss)
-                pass # Mantém a lógica que você já tinha aqui
+                pass
                 await asyncio.sleep(15)
 
 
@@ -862,6 +870,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
