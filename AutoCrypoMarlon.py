@@ -565,9 +565,9 @@ async def execute_sell_order(reason="", sell_price=None):
                 await send_telegram_message(f"⚠️ Limite de {sell_fail_count} falhas de venda para **{symbol}** atingido. Posição abandonada.")
                 in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0
                 if automation_state.get('current_target_pair_address'):
-                    automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10
+                    automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 100
                     automation_state["current_target_pair_address"] = None
-                    await send_telegram_message(f"⚠️ **{symbol}** foi penalizada por 10 ciclos após {sell_fail_count} falhas de venda.")
+                    await send_telegram_message(f"⚠️ **{symbol}** foi penalizada por 100 ciclos após {sell_fail_count} falhas de venda.") # Adjusted message
                 sell_fail_count = 0
             await send_telegram_message(f"⚠️ Erro ao obter saldo do token {symbol}. A venda falhou. Tentativa {sell_fail_count}/100.")
             return
@@ -604,16 +604,18 @@ async def execute_sell_order(reason="", sell_price=None):
             # --- Add penalty logic for Take Profit, Stop Loss, and Timeout ---
             if automation_state.get('current_target_pair_address'):
                 # Penalize the coin to not re-enter for a while
-                automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 100
-                automation_state["current_target_pair_address"] = None
-
-                # Send a message to Telegram informing about the penalty
+                # Check the reason for selling and apply penalty accordingly
                 if "Take Profit" in reason:
-                    await send_telegram_message(f"💰 **{symbol}** atingiu o Take Profit e foi penalizada por 10 ciclos.")
+                    automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 100 # Increased penalty for TP
+                    await send_telegram_message(f"💰 **{symbol}** atingiu o Take Profit e foi penalizada por 100 ciclos.")
                 elif "Stop Loss" in reason:
-                     await send_telegram_message(f"⚠️ **{symbol}** atingiu o Stop Loss e foi penalizada por 10 ciclos.")
+                     automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 100 # Standard penalty for SL
+                     await send_telegram_message(f"⚠️ **{symbol}** atingiu o Stop Loss e foi penalizada por 100 ciclos.")
                 elif "Timeout" in reason: # Added penalty for Timeout
-                    await send_telegram_message(f"⏰ **{symbol}** atingiu o Timeout e foi penalizada por 10 ciclos.")
+                    automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 100 # Standard penalty for Timeout
+                    await send_telegram_message(f"⏰ **{symbol}** atingiu o Timeout e foi penalizada por 100 ciclos.")
+
+                automation_state["current_target_pair_address"] = None # Reset target after selling
 
 
             sell_fail_count = 0
