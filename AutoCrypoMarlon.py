@@ -489,13 +489,24 @@ async def execute_buy_order(amount, price, pair_details, manual=False, reason="S
 
     if not manual:
         logger.info(f"Verificação final de cotação para {pair_details['baseToken']['symbol']} antes da compra...")
-        if not await is_pair_quotable_on_jupiter(pair_details):
-            logger.error(f"FALHA NA COMPRA: Par {pair_details['baseToken']['symbol']} não mais negociável na Jupiter. Penalizando e buscando novo alvo.")
-            await send_telegram_message(f"❌ Compra para **{pair_details['baseToken']['symbol']}** abortada. Moeda não mais negociável na Jupiter.")
+        # Add retry logic for Jupiter quotability check
+        retries = 3
+        is_quotable = False
+        for attempt in range(retries):
+            if await is_pair_quotable_on_jupiter(pair_details):
+                is_quotable = True
+                break
+            logger.warning(f"Par {pair_details['baseToken']['symbol']} não quotable na Jupiter. Tentativa {attempt + 1}/{retries}. Aguardando 5 segundos...")
+            await asyncio.sleep(5)
+
+        if not is_quotable:
+            logger.error(f"FALHA NA COMPRA: Par {pair_details['baseToken']['symbol']} não se tornou negociável na Jupiter após {retries} tentativas. Penalizando e buscando novo alvo.")
+            await send_telegram_message(f"❌ Compra para **{pair_details['baseToken']['symbol']}** abortada. Moeda não negociável na Jupiter após várias tentativas.")
             if automation_state.get("current_target_pair_address"):
                 automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10
                 automation_state["current_target_pair_address"] = None
             return
+
 
     slippage_bps = await calculate_dynamic_slippage(pair_details['pairAddress'])
     logger.info(f"EXECUTANDO ORDEM DE COMPRA de {amount} SOL para {pair_details['baseToken']['symbol']} ao preço de {price}")
@@ -581,13 +592,13 @@ async def execute_sell_order(reason=""):
             entry_price = 0.0 # Reset entry_price on successful sell
             automation_state["position_opened_timestamp"] = 0
 
-            # --- Adicionar a lógica de penalização para Take Profit ---
+            # --- Add penalty logic for Take Profit ---
             if automation_state.get('current_target_pair_address'):
-                # Penaliza a moeda para não re-entrar por um tempo
+                # Penalize the coin to not re-enter for a while
                 automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 100
                 automation_state["current_target_pair_address"] = None
 
-                # Envia uma mensagem para o Telegram informando a penalização
+                # Send a message to Telegram informing about the penalty
                 if "Take Profit" in reason:
                     await send_telegram_message(f"💰 **{symbol}** atingiu o Take Profit e foi penalizada por 10 ciclos.")
                 elif "Stop Loss" in reason or "Timeout" in reason:
@@ -895,7 +906,7 @@ async def stop_bot(update, context):
     # CORREÇÃO: Desliga o bot usando a variável de estado correta
     automation_state["is_running"] = False
 
-    # Cancela a tarefa asyncio se ela existir
+    # Cancela a tarefa asyncio if it exists
     if "task" in automation_state and automation_state["task"]:
         automation_state["task"].cancel()
 
