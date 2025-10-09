@@ -332,8 +332,8 @@ async def discover_and_filter_pairs(pages_to_scan=1):
                 created_at_ts = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
                 age_seconds = (datetime.now(created_at_ts.tzinfo) - created_at_ts).total_seconds()
 
-                if not (60 <= age_seconds <= 600):
-                    print(f"❌ Par {pair_name} ({pair_address}) eliminado: Fora da janela de idade (Idade: {age_seconds:.2f}s).")
+                if not (60 <= age_seconds <= 660): # Adjusted to allow for 600s (10 mins) for testing
+                    #print(f"❌ Par {pair_name} ({pair_address}) eliminado: Fora da janela de idade (Idade: {age_seconds:.2f}s).")
                     continue
 
                 try:
@@ -347,15 +347,15 @@ async def discover_and_filter_pairs(pages_to_scan=1):
                     continue
 
                 if liquidity_usd < 50000:
-                    print(f"❌ Par {pair_name} ({pair_address}) eliminado: Baixa liquidez (USD: {liquidity_usd:,.2f}).")
+                    # print(f"❌ Par {pair_name} ({pair_address}) eliminado: Baixa liquidez (USD: {liquidity_usd:,.2f}).") # Removed this line
                     continue
 
                 if txns_h1_buys > 0 and (txns_h1_sells / txns_h1_buys) > 0.5:
-                    print(f"❌ Par {pair_name} ({pair_address}) eliminado: Proporção de vendas muito alta ({txns_h1_sells} vendas, {txns_h1_buys} compras).")
+                    #print(f"❌ Par {pair_name} ({pair_address}) eliminado: Proporção de vendas muito alta ({txns_h1_sells} vendas, {txns_h1_buys} compras).")
                     continue
 
                 if volume_h1_usd < 100000 or price_change_h1 < 20:
-                    print(f"❌ Par {pair_name} ({pair_address}) eliminado: Volume/Variação insuficientes (Volume: {volume_h1_usd:,.2f} USD, Variação: {price_change_h1:.2f}%).")
+                    #print(f"❌ Par {pair_name} ({pair_address}) eliminado: Volume/Variação insuficientes (Volume: {volume_h1_usd:,.2f} USD, Variação: {price_change_h1:.2f}%).")
                     continue
 
                 # --- CORREÇÃO AQUI ---
@@ -414,11 +414,11 @@ def analyze_and_score_coin(pair_details):
         buys_sells_score = 0
         if txns_h1_buys > 0:
             buy_ratio = txns_h1_buys / (txns_h1_buys + txns_h1_sells)
-            if buy_ratio >= 0.9: # 90% ou mais de compras
+            if buy_ratio >= 0.8: # 90% ou mais de compras
                 buys_sells_score = 30
-            elif buy_ratio >= 0.8: # 80% ou mais de compras
+            elif buy_ratio >= 0.7: # 80% ou mais de compras
                 buys_sells_score = 20
-            elif buy_ratio >= 0.7: # 70% ou mais de compras
+            elif buy_ratio >= 0.6: # 70% ou mais de compras
                 buys_sells_score = 10
         else:
              buy_ratio = 0 # Evita divisão por zero se não houver compras
@@ -542,7 +542,7 @@ async def execute_buy_order(amount, price, pair_details, manual=False, reason="S
                 automation_state["current_target_pair_address"] = None
             buy_fail_count = 0
 
-async def execute_sell_order(reason=""):
+async def execute_sell_order(reason="", sell_price=None):
     global in_position, entry_price, sell_fail_count, buy_fail_count
     if not in_position: return
 
@@ -561,13 +561,13 @@ async def execute_sell_order(reason=""):
             logger.error(f"Erro ao obter saldo do token {symbol}: Resposta RPC inválida.")
             sell_fail_count += 1
             if sell_fail_count >= 100:
-                logger.error("ATINGIDO LIMITE DE FALHAS DE VENDA. RESETANDO POSIÇÃO.")
-                await send_telegram_message(f"⚠️ Limite de 100 falhas de venda para **{symbol}** atingido. Posição abandonada.")
+                logger.error(f"ATINGIDO LIMITE DE {sell_fail_count} FALHAS DE VENDA. RESETANDO POSIÇÃO.")
+                await send_telegram_message(f"⚠️ Limite de {sell_fail_count} falhas de venda para **{symbol}** atingido. Posição abandonada.")
                 in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0
                 if automation_state.get('current_target_pair_address'):
                     automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10
                     automation_state["current_target_pair_address"] = None
-                    await send_telegram_message(f"⚠️ **{symbol}** foi penalizada por 10 ciclos após falhas de venda.")
+                    await send_telegram_message(f"⚠️ **{symbol}** foi penalizada por 10 ciclos após {sell_fail_count} falhas de venda.")
                 sell_fail_count = 0
             await send_telegram_message(f"⚠️ Erro ao obter saldo do token {symbol}. A venda falhou. Tentativa {sell_fail_count}/100.")
             return
@@ -583,8 +583,14 @@ async def execute_sell_order(reason=""):
         tx_sig = await execute_swap(pair_details['baseToken']['address'], pair_details['quoteToken']['address'], amount_to_sell, token_balance_data.decimals, slippage_bps)
 
         if tx_sig:
+            # Calculate P/L
+            profit_loss_percent = 0.0
+            if entry_price is not None and entry_price > 0 and sell_price is not None:
+                 profit_loss_percent = ((sell_price - entry_price) / entry_price) * 100
+
             log_message = (f"🛑 VENDA REALIZADA: {symbol}\n"
                            f"Motivo: {reason}\n"
+                           f"Lucro/Prejuízo: {profit_loss_percent:.2f}%\n" # Added P/L
                            f"Slippage Usado: {slippage_bps/100:.2f}%\n"
                            f"Taxa de Prioridade: {parameters.get('priority_fee')} micro-lamports\n"
                            f"https://solscan.io/tx/{tx_sig}")
@@ -595,7 +601,7 @@ async def execute_sell_order(reason=""):
             entry_price = 0.0 # Reset entry_price on successful sell
             automation_state["position_opened_timestamp"] = 0
 
-            # --- Add penalty logic for Take Profit ---
+            # --- Add penalty logic for Take Profit, Stop Loss, and Timeout ---
             if automation_state.get('current_target_pair_address'):
                 # Penalize the coin to not re-enter for a while
                 automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 100
@@ -604,8 +610,11 @@ async def execute_sell_order(reason=""):
                 # Send a message to Telegram informing about the penalty
                 if "Take Profit" in reason:
                     await send_telegram_message(f"💰 **{symbol}** atingiu o Take Profit e foi penalizada por 10 ciclos.")
-                elif "Stop Loss" in reason or "Timeout" in reason:
-                    await send_telegram_message(f"⚠️ **{symbol}** foi penalizada por 10 ciclos após a venda por stop/timeout.")
+                elif "Stop Loss" in reason:
+                     await send_telegram_message(f"⚠️ **{symbol}** atingiu o Stop Loss e foi penalizada por 10 ciclos.")
+                elif "Timeout" in reason: # Added penalty for Timeout
+                    await send_telegram_message(f"⏰ **{symbol}** atingiu o Timeout e foi penalizada por 10 ciclos.")
+
 
             sell_fail_count = 0
             buy_fail_count = 0
@@ -613,13 +622,13 @@ async def execute_sell_order(reason=""):
             logger.error(f"FALHA NA VENDA do token {symbol}. Tentativa {sell_fail_count+1}/100.")
             sell_fail_count += 1
             if sell_fail_count >= 100:
-                logger.error("ATINGIDO LIMITE DE FALHAS DE VENDA. RESETANDO POSIÇÃO.")
-                await send_telegram_message(f"⚠️ Limite de 100 falhas de venda para **{symbol}** atingido. Posição abandonada.")
+                logger.error(f"ATINGIDO LIMITE DE {sell_fail_count} FALHAS DE VENDA. RESETANDO POSIÇÃO.")
+                await send_telegram_message(f"⚠️ Limite de {sell_fail_count} falhas de venda para **{symbol}** atingido. Posição abandonada.")
                 in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0
                 if automation_state.get('current_target_pair_address'):
                     automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10
                     automation_state["current_target_pair_address"] = None
-                    await send_telegram_message(f"⚠️ **{symbol}** foi penalizada por 10 ciclos após falhas de venda.")
+                    await send_telegram_message(f"⚠️ **{symbol}** foi penalizada por 10 ciclos após {sell_fail_count} falhas de venda.") # Adjusted message
                 sell_fail_count = 0
             await send_telegram_message(f"❌ FALHA NA VENDA do token {symbol}. Tentativa {sell_fail_count}/100. O bot tentará novamente.")
 
@@ -627,8 +636,8 @@ async def execute_sell_order(reason=""):
         logger.error(f"Erro crítico ao vender {symbol}: {e}")
         sell_fail_count += 1
         if sell_fail_count >= 100:
-            logger.error("ATINGIDO LIMITE DE FALHAS DE VENDA. RESETANDO POSIÇÃO.")
-            await send_telegram_message(f"⚠️ Limite de 100 falhas de venda para **{symbol}** atingido. Posição abandonada.")
+            logger.error(f"ATINGIDO LIMITE DE {sell_fail_count} FALHAS DE VENDA. RESETANDO POSIÇÃO.")
+            await send_telegram_message(f"⚠️ Limite de {sell_fail_count} falhas de venda para **{symbol}** atingido. Posição abandonada.")
             in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0
             if automation_state.get('current_target_pair_address'):
                 automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10
@@ -689,7 +698,7 @@ async def check_velocity_strategy():
 
 
 async def manage_position():
-    """Gerencia a posição de trade, checando Take Profit e Stop Loss."""
+    """Gerencia a posição de trade, checando Take Profit, Stop Loss e Timeout."""
     global in_position, automation_state, entry_price
 
     pair_details = automation_state.get("current_target_pair_details")
@@ -700,6 +709,7 @@ async def manage_position():
     target_address = pair_details.get('pairAddress')
     symbol = pair_details.get('baseToken', {}).get('symbol', 'N/A')
     buy_price = entry_price # Use entry_price from global state
+    position_opened_timestamp = automation_state.get("position_opened_timestamp", 0)
 
     if buy_price is None or buy_price == 0.0: # Check if entry_price is set and not zero
          logger.error(f"manage_position: entry_price não definido ou é zero ({buy_price}), não é possível gerenciar a posição.")
@@ -713,7 +723,6 @@ async def manage_position():
     if take_profit_percentage is None or stop_loss_percentage is None:
         logger.error("Parâmetros de Take Profit ou Stop Loss não definidos. Não é possível gerenciar a posição.")
         return
-
 
     try:
         # Puxa o preço atual da moeda
@@ -731,12 +740,16 @@ async def manage_position():
         take_profit_price = buy_price * (1 + take_profit_percentage / 100)
         stop_loss_price = buy_price * (1 - stop_loss_percentage / 100)
 
-        # Checa as condições de venda
+        now = time.time()
+        position_duration = now - position_opened_timestamp
+        timeout_seconds = 300 # 5 minutes
+
+        # Checa as condições de venda (TP, SL, Timeout)
         if current_price >= take_profit_price:
             msg = f"🟢 **TAKE PROFIT ATINGIDO!** Vendendo **{symbol}** com lucro."
             logger.info(msg.replace("**", ""))
             await send_telegram_message(msg)
-            await execute_sell_order(reason="Take Profit Atingido")
+            await execute_sell_order(reason="Take Profit Atingido", sell_price=current_price)
             # Reseta o estado do bot após a venda
             # in_position and entry_price are reset in execute_sell_order
             automation_state["current_target_pair_details"] = None
@@ -748,14 +761,25 @@ async def manage_position():
             msg = f"🔴 **STOP LOSS ATINGIDO!** Vendendo **{symbol}** para limitar o prejuízo."
             logger.info(msg.replace("**", ""))
             await send_telegram_message(msg)
-            await execute_sell_order(reason="Stop Loss Atingido")
+            await execute_sell_order(reason="Stop Loss Atingido", sell_price=current_price)
             # Reseta o estado do bot após a venda
             # in_position and entry_price are reset in execute_sell_order
             automation_state["current_target_pair_details"] = None
             automation_state["current_target_pair_address"] = None # Reset target after selling
+
+        elif position_duration >= timeout_seconds:
+            msg = f"⏰ **TIMEOUT!** Posição em **{symbol}** aberta por mais de {timeout_seconds/60:.0f} minutos. Vendendo."
+            logger.info(msg.replace("**", ""))
+            await send_telegram_message(msg)
+            await execute_sell_order(reason=f"Timeout de {timeout_seconds/60:.0f} minutos", sell_price=current_price)
+            # Reseta o estado do bot após a venda
+            # in_position and entry_price are reset in execute_sell_order
+            automation_state["current_target_pair_details"] = None
+            automation_state["current_target_pair_address"] = None # Reset target after selling
+
         else:
             # Continua monitorando a posição
-            logger.info(f"Monitorando {symbol} | Preço atual (USD): ${current_price:,.8f} | TP: ${take_profit_price:,.8f} | SL: ${stop_loss_price:,.8f}")
+            logger.info(f"Monitorando {symbol} | Preço atual (USD): ${current_price:,.8f} | TP: ${take_profit_price:,.8f} | SL: ${stop_loss_price:,.8f} | Tempo em posição: {position_duration:.0f}s")
 
     except Exception as e:
         logger.error(f"Erro em manage_position: {e}", exc_info=True)
@@ -815,7 +839,7 @@ async def autonomous_loop():
                             best_pair_details = pair_details
 
                     # Se a melhor moeda tiver uma pontuação acima de 70, define como alvo
-                    if best_pair_details and best_score >= 70:
+                    if best_pair_details and best_score >= 60:
                         automation_state["current_target_pair_details"] = best_pair_details
                         automation_state["current_target_pair_address"] = best_pair_details["pairAddress"]
                         automation_state["target_selected_timestamp"] = now
@@ -924,7 +948,11 @@ async def stop_bot(update, context):
         automation_state["task"].cancel()
 
     if in_position:
-        await execute_sell_order("Parada manual do bot")
+        # Fetch current price to calculate P/L before selling
+        pair_details = automation_state.get('current_target_pair_details', {})
+        pair_address = pair_details.get('pairAddress')
+        _, current_price_usd = await fetch_dexscreener_real_time_price(pair_address)
+        await execute_sell_order(reason="Parada manual do bot", sell_price=current_price_usd)
 
     # Limpa o estado para um reinício limpo
     in_position = False
@@ -983,8 +1011,11 @@ async def manual_sell(update, context):
     if not in_position:
         await update.effective_message.reply_text("⚠️ Nenhuma posição aberta para vender.")
         return
+    pair_details = automation_state.get('current_target_pair_details', {})
+    pair_address = pair_details.get('pairAddress')
+    _, current_price_usd = await fetch_dexscreener_real_time_price(pair_address)
     await update.effective_message.reply_text("Forçando venda manual da posição atual...")
-    await execute_sell_order(reason="Venda Manual Forçada")
+    await execute_sell_order(reason="Venda Manual Forçada", sell_price=current_price_usd)
     # in_position and entry_price are reset inside execute_sell_order if successful
 
 
