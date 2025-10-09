@@ -203,16 +203,18 @@ async def get_pair_details(pair_address):
         async with httpx.AsyncClient() as client:
             res = await client.get(url, timeout=10.0)
             res.raise_for_status()
-            pair_data = res.json().get('pair')
-            if not pair_data: return None
-            return {
-                "pair_address": pair_data['pairAddress'],
-                "base_symbol": pair_data['baseToken']['symbol'],
-                "quote_symbol": pair_data['quoteToken']['symbol'],
-                "base_address": pair_data['baseToken']['address'],
-                "quote_address": pair_data['quoteToken']['address']
-            }
-    except Exception:
+            
+            # A API retorna um array de pares, mesmo que você procure por um só
+            pair_data = res.json().get('pairs', [None])[0]
+            if not pair_data:
+                return None
+            
+            # Retorna o dicionário completo que a função analyze_and_score_coin espera
+            # Extraímos todos os dados necessários aqui
+            return pair_data
+            
+    except Exception as e:
+        # Se a requisição falhar, a função retorna None, o que já é tratado no loop
         return None
 
 async def fetch_geckoterminal_ohlcv(pair_address, timeframe, limit=60):
@@ -914,6 +916,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
