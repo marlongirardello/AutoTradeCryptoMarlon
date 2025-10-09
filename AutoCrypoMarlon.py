@@ -293,7 +293,7 @@ import time
 import requests
 from datetime import datetime
 
-def discover_and_filter_pairs(pages_to_scan=1):
+async def discover_and_filter_pairs(pages_to_scan=1):
     print(f"Iniciando a busca por novas moedas na rede Solana, escaneando {pages_to_scan} página(s)...")
     
     filtered_pairs = []
@@ -307,20 +307,20 @@ def discover_and_filter_pairs(pages_to_scan=1):
             response.raise_for_status()
             data = response.json()
             
-            pairs = data['data']
+            gecko_pairs = data.get('data', [])
             
-            if not pairs:
+            if not gecko_pairs:
                 print(f"Nenhum par novo encontrado na página {page}. Encerrando a busca...")
                 break
 
-            for pair in pairs:
-                attributes = pair['attributes']
+            for gecko_pair in gecko_pairs:
+                attributes = gecko_pair['attributes']
                 
                 # Nome e endereço do par para logs
                 pair_name = attributes.get('name', 'N/A')
                 pair_address = attributes['address']
-                
-                # Verificação de valores nulos para evitar erros
+
+                # --- LÓGICA DE FILTRAGEM (MANTIDA) ---
                 created_at_str = attributes['pool_created_at']
                 if created_at_str is None or attributes.get('reserve_in_usd') is None or attributes.get('transactions') is None:
                     print(f"❌ Par {pair_name} ({pair_address}) eliminado: Dados essenciais faltando.")
@@ -329,8 +329,7 @@ def discover_and_filter_pairs(pages_to_scan=1):
                 created_at_ts = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
                 age_seconds = (datetime.now(created_at_ts.tzinfo) - created_at_ts).total_seconds()
                 
-                # Filtro 1: Idade da pool (1 a 10 minutos)
-                if not (60 <= age_seconds <= 900):
+                if not (60 <= age_seconds <= 600):
                     print(f"❌ Par {pair_name} ({pair_address}) eliminado: Fora da janela de idade (Idade: {age_seconds:.2f}s).")
                     continue
                 
@@ -344,31 +343,34 @@ def discover_and_filter_pairs(pages_to_scan=1):
                     print(f"❌ Par {pair_name} ({pair_address}) eliminado: Erro ao converter dados.")
                     continue
 
-                # Filtro 2: Liquidez mínima
                 if liquidity_usd < 50000:
                     print(f"❌ Par {pair_name} ({pair_address}) eliminado: Baixa liquidez (USD: {liquidity_usd:,.2f}).")
                     continue
 
-                # Filtro 3: Taxa de vendas vs. compras (AGORA MAIS FLEXÍVEL)
                 if txns_h1_buys > 0 and (txns_h1_sells / txns_h1_buys) > 0.5:
                     print(f"❌ Par {pair_name} ({pair_address}) eliminado: Proporção de vendas muito alta ({txns_h1_sells} vendas, {txns_h1_buys} compras).")
                     continue
 
-                # Filtro 4: Volume e variação de preço
                 if volume_h1_usd < 100000 or price_change_h1 < 20:
                     print(f"❌ Par {pair_name} ({pair_address}) eliminado: Volume/Variação insuficientes (Volume: {volume_h1_usd:,.2f} USD, Variação: {price_change_h1:.2f}%).")
                     continue
                 
-                pair['pair_address'] = pair_address
-                filtered_pairs.append(pair)
-                print(f"✅ Nova moeda encontrada e validada na Solana: {pair_name} - Endereço: {pair_address}")
+                # --- NOVO: Obtém os detalhes da Dexscreener APENAS para os pares validados ---
+                dex_pair_details = await get_pair_details(pair_address)
+                
+                if dex_pair_details:
+                    # Adiciona o par completo do Dexscreener à lista final
+                    filtered_pairs.append(dex_pair_details)
+                    print(f"✅ Nova moeda encontrada e validada na Solana: {dex_pair_details['baseToken']['symbol']} - Endereço: {pair_address}")
+                else:
+                    print(f"⚠️ Par {pair_name} ({pair_address}) eliminado: Não encontrado na Dexscreener.")
 
         except requests.exceptions.RequestException as e:
             print(f"Erro na requisição para a API do GeckoTerminal (Página {page}): {e}")
             break
 
     return filtered_pairs
-        
+    
 def analyze_and_score_coin(pair_details):
     """
     Analisa e pontua uma moeda com base em dados de volume, preço e transações.
@@ -922,6 +924,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
