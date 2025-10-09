@@ -130,7 +130,8 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
 
     async with httpx.AsyncClient() as client:
         try:
-            quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={input_mint_str}&outputMint={output_mint_str}&amount={amount_wei}&slippageBps={slippage_bps}&maxAccounts=64"
+            # Atualizado para o novo endpoint da Jupiter
+            quote_url = f"https://lite-api.jup.ag/swap/v1/quote?inputMint={input_mint_str}&outputMint={output_mint_str}&amount={amount_wei}&slippageBps={slippage_bps}&maxAccounts=64"
             quote_res = await client.get(quote_url, timeout=60.0)
             quote_res.raise_for_status()
             quote_response = quote_res.json()
@@ -148,7 +149,8 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
                 }
             }
 
-            swap_url = "https://quote-api.jup.ag/v6/swap"
+            # Atualizado para o novo endpoint da Jupiter
+            swap_url = "https://lite-api.jup.ag/swap/v1/swap"
             swap_res = await client.post(swap_url, json=swap_payload, timeout=60.0)
             swap_res.raise_for_status()
             swap_response = swap_res.json()
@@ -259,7 +261,8 @@ async def fetch_dexscreener_real_time_price(pair_address):
 async def is_pair_quotable_on_jupiter(pair_details):
     if not pair_details: return False
     test_amount_wei = 10000
-    url = f"https://quote-api.jup.ag/v6/quote?inputMint={pair_details['quoteToken']['address']}&outputMint={pair_details['baseToken']['address']}&amount={test_amount_wei}"
+    # Atualizado para o novo endpoint da Jupiter
+    url = f"https://lite-api.jup.ag/swap/v1/quote?inputMint={pair_details['quoteToken']['address']}&outputMint={pair_details['baseToken']['address']}&amount={test_amount_wei}"
     try:
         async with httpx.AsyncClient() as client:
             res = await client.get(url, timeout=10.0)
@@ -739,6 +742,7 @@ async def manage_position():
             # in_position and entry_price are reset in execute_sell_order
             automation_state["current_target_pair_details"] = None
             automation_state["current_target_pair_address"] = None # Reset target after selling
+            automation_state["took_profit_pairs"].add(pair_details.get('pairAddress')) # Add pair to took_profit_pairs
 
         elif current_price <= stop_loss_price:
             msg = f"🔴 **STOP LOSS ATINGIDO!** Vendendo **{symbol}** para limitar o prejuízo."
@@ -860,8 +864,9 @@ async def test_jupiter_api():
     amount_in_lamports = 100000000
     slippage_bps = 50 # 0.5%
 
+    # Atualizado para o novo endpoint da Jupiter
     quote_url = (
-        f"https://quote-api.jup.ag/v6/quote?"
+        f"https://lite-api.jup.ag/swap/v1/quote?"
         f"inputMint={sol_mint}&"
         f"outputMint={usdc_mint}&"
         f"amount={amount_in_lamports}&"
@@ -1051,3 +1056,4 @@ async def main():
 if __name__ == '__main__':
     # Para executar a função main assíncrona
     asyncio.run(main())
+    
