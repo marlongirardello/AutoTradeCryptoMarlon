@@ -686,7 +686,7 @@ async def autonomous_loop():
             # ------------------------------------------------------------------
             if not automation_state.get("current_target_pair_address"):
                 logger.info("Iniciando ciclo de caça...")
-                approved_pair = await discover_and_filter_pairs()
+                approved_pair = await self.discover_and_filter_pairs()
 
                 if approved_pair:
                     best_coin_symbol, details = await find_best_coin_to_trade(approved_pair)
@@ -852,6 +852,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
