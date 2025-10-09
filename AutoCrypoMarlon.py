@@ -328,7 +328,7 @@ def discover_and_filter_pairs(pages_to_scan=1):
                 age_seconds = (datetime.now(created_at_ts.tzinfo) - created_at_ts).total_seconds()
                 
                 # Filtro 1: Idade da pool (1 a 10 minutos)
-                if not (60 <= age_seconds <= 600):
+                if not (60 <= age_seconds <= 900):
                     print(f"❌ Par {pair_name} ({pair_address}) eliminado: Fora da janela de idade (Idade: {age_seconds:.2f}s).")
                     continue
                 
@@ -873,6 +873,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
