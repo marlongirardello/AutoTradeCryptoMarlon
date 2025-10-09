@@ -126,7 +126,7 @@ async def send_telegram_message(message):
 async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, slippage_bps):
     logger.info(f"Iniciando swap de {amount} do token {input_mint_str} para {output_mint_str} com slippage de {slippage_bps} BPS e limite computacional dinâmico.")
     amount_wei = int(amount * (10**input_decimals))
-    
+
     async with httpx.AsyncClient() as client:
         try:
             quote_url = f"https://quote-api.jup.ag/v6/quote?inputMint={input_mint_str}&outputMint={output_mint_str}&amount={amount_wei}&slippageBps={slippage_bps}&maxAccounts=64"
@@ -134,10 +134,10 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
             quote_res.raise_for_status()
             quote_response = quote_res.json()
 
-            swap_payload = { 
-                "userPublicKey": str(payer.pubkey()), 
-                "quoteResponse": quote_response, 
-                "wrapAndUnwrapSol": True, 
+            swap_payload = {
+                "userPublicKey": str(payer.pubkey()),
+                "quoteResponse": quote_response,
+                "wrapAndUnwrapSol": True,
                 "dynamicComputeUnitLimit": True,
                 "prioritizationFeeLamports": {
                     "priorityLevelWithMaxLamports": {
@@ -146,7 +146,7 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
                     }
                 }
             }
-            
+
             swap_url = "https://quote-api.jup.ag/v6/swap"
             swap_res = await client.post(swap_url, json=swap_payload, timeout=60.0)
             swap_res.raise_for_status()
@@ -154,7 +154,7 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
             swap_tx_b64 = swap_response.get('swapTransaction')
             if not swap_tx_b64:
                 logger.error(f"Erro na API da Jupiter: {swap_response}"); return None
-            
+
             raw_tx_bytes = b64decode(swap_tx_b64)
             swap_tx = VersionedTransaction.from_bytes(raw_tx_bytes)
             # assinatura com solders - use to_bytes_versioned
@@ -164,9 +164,9 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
             tx_opts = TxOpts(skip_preflight=True, preflight_commitment="processed")
             # send_raw_transaction espera bytes
             tx_signature = solana_client.send_raw_transaction(bytes(signed_tx), opts=tx_opts).value
-            
+
             logger.info(f"Transação enviada: {tx_signature}")
-            
+
             # tentativa de confirmação
             try:
                 solana_client.confirm_transaction(tx_signature, commitment="confirmed")
@@ -203,16 +203,16 @@ async def get_pair_details(pair_address):
         async with httpx.AsyncClient() as client:
             res = await client.get(url, timeout=10.0)
             res.raise_for_status()
-            
+
             # A API retorna um array de pares, mesmo que você procure por um só
             pair_data = res.json().get('pairs', [None])[0]
             if not pair_data:
                 return None
-            
+
             # Retorna o dicionário completo que a função analyze_and_score_coin espera
             # Extraímos todos os dados necessários aqui
             return pair_data
-            
+
     except Exception as e:
         # Se a requisição falhar, a função retorna None, o que já é tratado no loop
         return None
@@ -258,7 +258,7 @@ async def fetch_dexscreener_real_time_price(pair_address):
 async def is_pair_quotable_on_jupiter(pair_details):
     if not pair_details: return False
     test_amount_wei = 10000
-    url = f"https://quote-api.jup.ag/v6/quote?inputMint={pair_details['quote_address']}&outputMint={pair_details['base_address']}&amount={test_amount_wei}"
+    url = f"https://quote-api.jup.ag/v6/quote?inputMint={pair_details['quoteToken']['address']}&outputMint={pair_details['baseToken']['address']}&amount={test_amount_wei}"
     try:
         async with httpx.AsyncClient() as client:
             res = await client.get(url, timeout=10.0)
@@ -295,27 +295,27 @@ from datetime import datetime
 
 async def discover_and_filter_pairs(pages_to_scan=1):
     print(f"Iniciando a busca por novas moedas na rede Solana, escaneando {pages_to_scan} página(s)...")
-    
+
     filtered_pairs = []
-    
+
     for page in range(1, pages_to_scan + 1):
         url = f"https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page={page}"
         headers = {'Content-Type': 'application/json'}
-        
+
         try:
             response = requests.get(url, headers=headers)
             response.raise_for_status()
             data = response.json()
-            
+
             gecko_pairs = data.get('data', [])
-            
+
             if not gecko_pairs:
                 print(f"Nenhum par novo encontrado na página {page}. Encerrando a busca...")
                 break
 
             for gecko_pair in gecko_pairs:
                 attributes = gecko_pair['attributes']
-                
+
                 # Nome e endereço do par para logs
                 pair_name = attributes.get('name', 'N/A')
                 pair_address = attributes['address']
@@ -325,14 +325,14 @@ async def discover_and_filter_pairs(pages_to_scan=1):
                 if created_at_str is None or attributes.get('reserve_in_usd') is None or attributes.get('transactions') is None:
                     print(f"❌ Par {pair_name} ({pair_address}) eliminado: Dados essenciais faltando.")
                     continue
-                
+
                 created_at_ts = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
                 age_seconds = (datetime.now(created_at_ts.tzinfo) - created_at_ts).total_seconds()
-                
+
                 if not (60 <= age_seconds <= 600):
                     print(f"❌ Par {pair_name} ({pair_address}) eliminado: Fora da janela de idade (Idade: {age_seconds:.2f}s).")
                     continue
-                
+
                 try:
                     liquidity_usd = float(attributes['reserve_in_usd'])
                     txns_h1_buys = attributes['transactions']['h1']['buys']
@@ -354,12 +354,12 @@ async def discover_and_filter_pairs(pages_to_scan=1):
                 if volume_h1_usd < 100000 or price_change_h1 < 20:
                     print(f"❌ Par {pair_name} ({pair_address}) eliminado: Volume/Variação insuficientes (Volume: {volume_h1_usd:,.2f} USD, Variação: {price_change_h1:.2f}%).")
                     continue
-                
+
                 # --- CORREÇÃO AQUI ---
                 # A função discover_and_filter_pairs agora é assíncrona,
                 # então a chamada à Dexscreener também deve ser com await
                 dex_pair_details = await get_pair_details(pair_address)
-                
+
                 if dex_pair_details:
                     filtered_pairs.append(dex_pair_details)
                     print(f"✅ Nova moeda encontrada e validada na Solana: {dex_pair_details['baseToken']['symbol']} - Endereço: {pair_address}")
@@ -371,23 +371,23 @@ async def discover_and_filter_pairs(pages_to_scan=1):
             break
 
     return filtered_pairs
-    
+
 def analyze_and_score_coin(pair_details):
     """
     Analisa e pontua uma moeda com base em dados de volume, preço e transações.
     A função é agora compatível com a estrutura de dados da Dexscreener.
     """
-    
+
     try:
         # Extraindo dados para a análise da estrutura de dados da Dexscreener
         # Usamos o método .get() para evitar erros caso a chave não exista
         volume_h1_usd = float(pair_details.get('volume', {}).get('h1', 0))
         price_change_h1 = float(pair_details.get('priceChange', {}).get('h1', 0))
-        
+
         txns_h1 = pair_details.get('txns', {}).get('h1', {'buys': 0, 'sells': 0})
         txns_h1_buys = txns_h1.get('buys', 0)
         txns_h1_sells = txns_h1.get('sells', 0)
-        
+
         # --- Lógica de Pontuação ---
         # Pontuação 1: Volume
         volume_score = 0
@@ -406,7 +406,7 @@ def analyze_and_score_coin(pair_details):
             price_change_score = 20
         elif price_change_h1 >= 50:
             price_change_score = 10
-            
+
         # Pontuação 3: Compras vs. Vendas
         buys_sells_score = 0
         if txns_h1_buys > 0:
@@ -417,85 +417,90 @@ def analyze_and_score_coin(pair_details):
                 buys_sells_score = 20
             elif buy_ratio >= 0.7: # 70% ou mais de compras
                 buys_sells_score = 10
-        
+        else:
+             buy_ratio = 0 # Evita divisão por zero se não houver compras
+
         # Calculando a pontuação final
         final_score = volume_score + price_change_score + buys_sells_score
-        
+
         print(f"Análise de {pair_details['baseToken']['symbol']}:")
         print(f"  Volume (H1): ${volume_h1_usd:,.2f} -> Pontos: {volume_score}")
         print(f"  Variação (H1): {price_change_h1:.2f}% -> Pontos: {price_change_score}")
         print(f"  Compras/Vendas: {buy_ratio:.2f} -> Pontos: {buys_sells_score}")
         print(f"  Pontuação Final: {final_score:.2f}\n")
-        
+
         return final_score
-    
+
     except (KeyError, TypeError, ValueError, ZeroDivisionError) as e:
         print(f"Erro ao analisar a moeda {pair_details.get('baseToken', {}).get('symbol', 'N/A')}: {e}")
         return 0
-        
+
 async def find_best_coin_to_trade(pair_info):
     """
     Analisa uma única moeda aprovada, calcula sua pontuação e retorna seus detalhes.
     """
-    if not pair_info or 'address' not in pair_info:
+    if not pair_info or 'pairAddress' not in pair_info:
         logger.warning("Nenhuma informação de par válida recebida para análise.")
         return None, {}
 
-    symbol = pair_info.get('symbol', 'N/A')
-    address = pair_info.get('address')
-    
+    address = pair_info.get('pairAddress')
+
+    logger.info(f"🔎 Analisando o par aprovado: {address})")
+
+    # Fetch complete details from Dexscreener
+    details = await get_pair_details(address)
+
+    if not details:
+        logger.error(f"Não foi possível obter os detalhes completos para o par no endereço {address}")
+        return None, {}
+
+    symbol = details.get('baseToken', {}).get('symbol', 'N/A')
     logger.info(f"🔎 Analisando o par aprovado: {symbol} ({address})")
 
     # CORREÇÃO: Chamando a função de pontuação com o nome correto ('analyze_and_score_coin')
     # e passando os argumentos que ela espera (symbol, address).
-    score = await analyze_and_score_coin(symbol, address)
-    
+    score = analyze_and_score_coin(details) # Pass the full details dictionary
+
     # A função original retorna 0 em caso de erro.
-    if score is None:
+    if score is None or score == 0:
         logger.error(f"Não foi possível calcular a pontuação para {symbol}. Descartando.")
         return None, {}
 
     logger.info(f"🏆 Par único analisado: {symbol} (Score={score:.2f})")
 
     try:
-        # A função get_pair_details já existe e busca os detalhes completos
-        details = await get_pair_details(address)
-        if not details:
-            logger.error(f"Não foi possível obter os detalhes completos para o par {symbol} no endereço {address}")
-            return None, {}
-            
         details['score'] = score
-        best_pair_symbol = details.get('base_symbol', symbol)
-        
+        best_pair_symbol = details.get('baseToken', {}).get('symbol', symbol)
+
         return best_pair_symbol, details
 
     except Exception as e:
         logger.error(f"Erro crítico ao obter detalhes finais para {symbol}: {e}", exc_info=True)
         return None, {}
 
-    
+
 # ---------------- Ordem: BUY / SELL (usando seu código) ----------------
 async def execute_buy_order(amount, price, pair_details, manual=False, reason="Sinal da Estratégia"):
     global in_position, entry_price, sell_fail_count, buy_fail_count
-    
-    if in_position: 
+
+    if in_position:
         logger.info("Já em posição, abortando compra.")
         return
 
     if not manual:
-        logger.info(f"Verificação final de cotação para {pair_details['base_symbol']} antes da compra...")
+        logger.info(f"Verificação final de cotação para {pair_details['baseToken']['symbol']} antes da compra...")
         if not await is_pair_quotable_on_jupiter(pair_details):
-            logger.error(f"FALHA NA COMPRA: Par {pair_details['base_symbol']} não mais negociável na Jupiter. Penalizando e buscando novo alvo.")
-            await send_telegram_message(f"❌ Compra para **{pair_details['base_symbol']}** abortada. Moeda não mais negociável na Jupiter.")
+            logger.error(f"FALHA NA COMPRA: Par {pair_details['baseToken']['symbol']} não mais negociável na Jupiter. Penalizando e buscando novo alvo.")
+            await send_telegram_message(f"❌ Compra para **{pair_details['baseToken']['symbol']}** abortada. Moeda não mais negociável na Jupiter.")
             if automation_state.get("current_target_pair_address"):
                 automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10
                 automation_state["current_target_pair_address"] = None
             return
 
-    slippage_bps = await calculate_dynamic_slippage(pair_details['pair_address'])
-    logger.info(f"EXECUTANDO ORDEM DE COMPRA de {amount} SOL para {pair_details['base_symbol']} ao preço de {price}")
+    slippage_bps = await calculate_dynamic_slippage(pair_details['pairAddress'])
+    logger.info(f"EXECUTANDO ORDEM DE COMPRA de {amount} SOL para {pair_details['baseToken']['symbol']} ao preço de {price}")
 
-    tx_sig = await execute_swap(pair_details['quote_address'], pair_details['base_address'], amount, 9, slippage_bps)
+    tx_sig = await execute_swap(pair_details['quoteToken']['address'], pair_details['baseToken']['address'], amount, 9, slippage_bps)
 
     if tx_sig:
         in_position = True
@@ -503,7 +508,7 @@ async def execute_buy_order(amount, price, pair_details, manual=False, reason="S
         automation_state["position_opened_timestamp"] = time.time()
         sell_fail_count = 0
         buy_fail_count = 0
-        log_message = (f"✅ COMPRA REALIZADA: {amount} SOL para {pair_details['base_symbol']}\n"
+        log_message = (f"✅ COMPRA REALIZADA: {amount} SOL para {pair_details['baseToken']['symbol']}\n"
                        f"Motivo: {reason}\n"
                        f"Entrada: {price:.10f} | Alvo: {price * (1 + parameters['take_profit_percent']/100):.10f} | "
                        f"Stop: {price * (1 - parameters['stop_loss_percent']/100):.10f}\n"
@@ -514,10 +519,10 @@ async def execute_buy_order(amount, price, pair_details, manual=False, reason="S
         await send_telegram_message(log_message)
     else:
         buy_fail_count += 1
-        logger.error(f"FALHA NA EXECUÇÃO da compra para {pair_details['base_symbol']}. Tentativa {buy_fail_count}/10.")
+        logger.error(f"FALHA NA EXECUÇÃO da compra para {pair_details['baseToken']['symbol']}. Tentativa {buy_fail_count}/10.")
         if buy_fail_count >= 10:
-            logger.error(f"Limite de falhas de compra atingido para {pair_details['base_symbol']}. Penalizando.")
-            await send_telegram_message(f"❌ FALHA NA EXECUÇÃO da compra para **{pair_details['base_symbol']}**. Limite atingido. Moeda penalizada.")
+            logger.error(f"Limite de falhas de compra atingido para {pair_details['baseToken']['symbol']}. Penalizando.")
+            await send_telegram_message(f"❌ FALHA NA EXECUÇÃO da compra para **{pair_details['baseToken']['symbol']}**. Limite atingido. Moeda penalizada.")
             if automation_state.get("current_target_pair_address"):
                 automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10
                 automation_state["current_target_pair_address"] = None
@@ -526,14 +531,14 @@ async def execute_buy_order(amount, price, pair_details, manual=False, reason="S
 async def execute_sell_order(reason=""):
     global in_position, entry_price, sell_fail_count, buy_fail_count
     if not in_position: return
-    
+
     pair_details = automation_state.get('current_target_pair_details', {})
-    symbol = pair_details.get('base_symbol', 'TOKEN')
+    symbol = pair_details.get('baseToken', {}).get('symbol', 'TOKEN')
     logger.info(f"EXECUTANDO ORDEM DE VENDA de {symbol}. Motivo: {reason}")
     try:
-        token_mint_pubkey = Pubkey.from_string(pair_details['base_address'])
+        token_mint_pubkey = Pubkey.from_string(pair_details['baseToken']['address'])
         ata_address = get_associated_token_address(payer.pubkey(), token_mint_pubkey)
-        
+
         balance_response = solana_client.get_token_account_balance(ata_address)
 
         if hasattr(balance_response, 'value'):
@@ -560,9 +565,9 @@ async def execute_sell_order(reason=""):
             sell_fail_count = 0
             return
 
-        slippage_bps = await calculate_dynamic_slippage(pair_details['pair_address'])
-        tx_sig = await execute_swap(pair_details['base_address'], pair_details['quote_address'], amount_to_sell, token_balance_data.decimals, slippage_bps)
-        
+        slippage_bps = await calculate_dynamic_slippage(pair_details['pairAddress'])
+        tx_sig = await execute_swap(pair_details['baseToken']['address'], pair_details['quoteToken']['address'], amount_to_sell, token_balance_data.decimals, slippage_bps)
+
         if tx_sig:
             log_message = (f"🛑 VENDA REALIZADA: {symbol}\n"
                            f"Motivo: {reason}\n"
@@ -571,23 +576,23 @@ async def execute_sell_order(reason=""):
                            f"https://solscan.io/tx/{tx_sig}")
             logger.info(log_message)
             await send_telegram_message(log_message)
-            
+
             in_position = False
             entry_price = 0.0
             automation_state["position_opened_timestamp"] = 0
-            
+
             # --- Adicionar a lógica de penalização para Take Profit ---
             if automation_state.get('current_target_pair_address'):
                 # Penaliza a moeda para não re-entrar por um tempo
-                automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 100 
+                automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 100
                 automation_state["current_target_pair_address"] = None
-                
+
                 # Envia uma mensagem para o Telegram informando a penalização
                 if "Take Profit" in reason:
                     await send_telegram_message(f"💰 **{symbol}** atingiu o Take Profit e foi penalizada por 10 ciclos.")
                 elif "Stop Loss" in reason or "Timeout" in reason:
                     await send_telegram_message(f"⚠️ **{symbol}** foi penalizada por 10 ciclos após a venda por stop/timeout.")
-                    
+
             sell_fail_count = 0
             buy_fail_count = 0
         else:
@@ -622,19 +627,19 @@ import asyncio
 
 async def check_velocity_strategy():
     """Analisa o alvo atual para um gatilho de compra imediato e executa a ordem."""
-    global in_position, automation_state, pair_details
-    target_address = automation_state.get("current_target_pair_address")
+    global in_position, automation_state
+    pair_details = automation_state.get("current_target_pair_details")
 
-    if not target_address or in_position:
+    if not pair_details or in_position:
         return
 
-    pair_details = automation_state.get("current_target_pair_details", {})
-    symbol = pair_details.get('base_symbol', 'N/A')
+    target_address = pair_details.get('pairAddress')
+    symbol = pair_details.get('baseToken', {}).get('symbol', 'N/A')
 
     try:
         # Puxa os dados da última vela de 1 minuto
         df_1m = await fetch_geckoterminal_ohlcv(target_address, "1m", limit=1)
-        
+
         if df_1m is None or df_1m.empty:
             logger.warning(f"Não foi possível obter dados OHLCV para {symbol}. Tentando novamente.")
             return
@@ -666,58 +671,78 @@ async def check_velocity_strategy():
 
     except Exception as e:
         logger.error(f"Erro em check_velocity_strategy: {e}", exc_info=True)
-        
+
 
 async def manage_position():
     """Gerencia a posição de trade, checando Take Profit e Stop Loss."""
-    global in_position, automation_state, pair_details
-    
+    global in_position, automation_state
+
+    pair_details = automation_state.get("current_target_pair_details")
+
     if not in_position or not pair_details:
         return
-    
-    target_address = automation_state.get("current_target_pair_address")
-    buy_price = automation_state.get("buy_price")
-    
+
+    target_address = pair_details.get('pairAddress')
+    symbol = pair_details.get('baseToken', {}).get('symbol', 'N/A')
+    buy_price = automation_state.get("entry_price") # Use entry_price from global state
+
+    if buy_price is None:
+         logger.error("entry_price não definido, não é possível gerenciar a posição.")
+         return
+
     # Obtém os valores de Take Profit e Stop Loss da configuração
-    take_profit_percentage = automation_state.get("take_profit_percentage", 50)  # Padrão: 50%
-    stop_loss_percentage = automation_state.get("stop_loss_percentage", 30)      # Padrão: 30%
+    take_profit_percentage = parameters.get("take_profit_percent")
+    stop_loss_percentage = parameters.get("stop_loss_percent")
+
+    if take_profit_percentage is None or stop_loss_percentage is None:
+        logger.error("Parâmetros de Take Profit ou Stop Loss não definidos. Não é possível gerenciar a posição.")
+        return
+
 
     try:
         # Puxa o preço atual da moeda
-        current_price = await get_current_price(target_address)
-        if current_price is None:
-            logger.warning(f"Não foi possível obter o preço atual para {pair_details['attributes']['name']}.")
+        # Use fetch_dexscreener_real_time_price que retorna priceNative e priceUsd
+        price_native, current_price_usd = await fetch_dexscreener_real_time_price(target_address)
+
+        # Decidir qual preço usar para TP/SL. Se a entrada foi em USD, usar USD. Se foi em SOL (native), usar native.
+        # Assumindo que a entrada (entry_price) é em USD (baseado nos logs de compra), usamos current_price_usd
+        current_price = current_price_usd
+        if current_price is None or current_price == 0:
+            logger.warning(f"Não foi possível obter o preço atual em USD para {symbol}.")
             return
-        
-        # Calcula os preços de TP e SL com base no preço de compra
+
+        # Calcula os preços de TP e SL com base no preço de compra (em USD)
         take_profit_price = buy_price * (1 + take_profit_percentage / 100)
         stop_loss_price = buy_price * (1 - stop_loss_percentage / 100)
 
         # Checa as condições de venda
         if current_price >= take_profit_price:
-            msg = f"🟢 **TAKE PROFIT ATINGIDO!** Vendendo **{pair_details['attributes']['name']}** com lucro."
+            msg = f"🟢 **TAKE PROFIT ATINGIDO!** Vendendo **{symbol}** com lucro."
             logger.info(msg.replace("**", ""))
             await send_telegram_message(msg)
-            await execute_sell_order()
+            await execute_sell_order(reason="Take Profit Atingido")
             # Reseta o estado do bot após a venda
             in_position = False
-            automation_state["current_target_pair_address"] = None
+            automation_state["current_target_pair_details"] = None
+            automation_state["current_target_pair_address"] = None # Reset target after selling
 
         elif current_price <= stop_loss_price:
-            msg = f"🔴 **STOP LOSS ATINGIDO!** Vendendo **{pair_details['attributes']['name']}** para limitar o prejuízo."
+            msg = f"🔴 **STOP LOSS ATINGIDO!** Vendendo **{symbol}** para limitar o prejuízo."
             logger.info(msg.replace("**", ""))
             await send_telegram_message(msg)
-            await execute_sell_order()
+            await execute_sell_order(reason="Stop Loss Atingido")
             # Reseta o estado do bot após a venda
             in_position = False
-            automation_state["current_target_pair_address"] = None
+            automation_state["current_target_pair_details"] = None
+            automation_state["current_target_pair_address"] = None # Reset target after selling
         else:
             # Continua monitorando a posição
-            logger.info(f"Monitorando {pair_details['attributes']['name']} | Preço atual: ${current_price:,.8f} | TP: ${take_profit_price:,.8f} | SL: ${stop_loss_price:,.8f}")
+            logger.info(f"Monitorando {symbol} | Preço atual (USD): ${current_price:,.8f} | TP: ${take_profit_price:,.8f} | SL: ${stop_loss_price:,.8f}")
 
     except Exception as e:
         logger.error(f"Erro em manage_position: {e}", exc_info=True)
         # Em caso de erro, o bot não trava e continua a checagem no próximo ciclo
+
 # ---------------- Loop autônomo completo ----------------
 async def get_pair_details(pair_address):
     url = f"https://api.dexscreener.com/latest/dex/pairs/solana/{pair_address}"
@@ -727,12 +752,12 @@ async def get_pair_details(pair_address):
             res.raise_for_status()
             pair_data = res.json().get('pair')
             if not pair_data: return None
-            return {"pair_address": pair_data['pairAddress'], "base_symbol": pair_data['baseToken']['symbol'], "quote_symbol": pair_data['quoteToken']['symbol'], "base_address": pair_data['baseToken']['address'], "quote_address": pair_data['quoteToken']['address']}
+            return pair_data # Return the full pair data dictionary
     except Exception: return None
-        
+
 async def autonomous_loop():
     """O loop principal que executa a estratégia de trade de forma autônoma, com estados de operação claros."""
-    global automation_state, in_position, pair_details
+    global automation_state, in_position
 
     logger.info("Loop autônomo iniciado.")
     while automation_state.get("is_running", False):
@@ -751,30 +776,24 @@ async def autonomous_loop():
 
                     # Analisa e pontua todas as moedas aprovadas
                     for gecko_pair in gecko_approved_pairs:
-                        # A função get_pair_details retorna um array de pares, então temos que verificar
-                        dex_pair_response = await get_pair_details(gecko_pair['pair_address'])
-                        
-                        # Se a resposta for válida, pegamos o primeiro par
-                        if dex_pair_response and 'pairs' in dex_pair_response and dex_pair_response['pairs']:
-                            pair_details = dex_pair_response['pairs'][0]
-                            
-                            # Agora a moeda tem a estrutura de dados que as funções de trade esperam
-                            score = analyze_and_score_coin(pair_details)
-                            
-                            if score > best_score:
-                                best_score = score
-                                best_pair_details = pair_details
-                        else:
-                            logger.warning(f"Não foi possível obter detalhes da Dexscreener para o par {gecko_pair['pair_address']}. Ignorando.")
-                    
+                        # A função discover_and_filter_pairs já filtra e retorna detalhes completos da Dexscreener
+                        # então gecko_pair já é o dicionário completo esperado
+                        pair_details = gecko_pair
+
+                        # Agora a moeda tem a estrutura de dados que as funções de trade esperam
+                        score = analyze_and_score_coin(pair_details)
+
+                        if score > best_score:
+                            best_score = score
+                            best_pair_details = pair_details
+
                     # Se a melhor moeda tiver uma pontuação acima de 70, define como alvo
                     if best_pair_details and best_score >= 70:
-                        pair_details = best_pair_details
-                        automation_state["current_target_pair_details"] = pair_details
-                        automation_state["current_target_pair_address"] = pair_details["pair_address"]
+                        automation_state["current_target_pair_details"] = best_pair_details
+                        automation_state["current_target_pair_address"] = best_pair_details["pairAddress"]
                         automation_state["target_selected_timestamp"] = now
 
-                        msg = f"🎯 **Novo Alvo:** {pair_details['base_symbol']} (Score={best_score:.2f}). Iniciando monitoramento do gatilho..."
+                        msg = f"🎯 **Novo Alvo:** {best_pair_details['baseToken']['symbol']} (Score={best_score:.2f}). Iniciando monitoramento do gatilho..."
                         logger.info(msg.replace("**", ""))
                         await send_telegram_message(msg)
                     else:
@@ -783,7 +802,7 @@ async def autonomous_loop():
 
                 else:
                     logger.warning("Nenhum par novo passou nos filtros iniciais nesta rodada de caça.")
-                
+
                 # Aguarda o intervalo de caça
                 await asyncio.sleep(TRADE_INTERVAL_SECONDS)
 
@@ -808,7 +827,7 @@ async def autonomous_loop():
         except Exception as e:
             logger.error(f"Erro crítico no loop autônomo: {e}", exc_info=True)
             await asyncio.sleep(60)
-            
+
 # ---------------- Comandos Telegram ----------------
 async def start(update, context):
     await update.effective_message.reply_text(
@@ -837,7 +856,7 @@ async def run_bot(update, context):
 
     automation_state["is_running"] = True
     automation_state["task"] = asyncio.create_task(autonomous_loop()) # <-- ESTA LINHA FOI RE-ADICIONADA
-    
+
     logger.info("Bot de trade autônomo iniciado.")
     await update.effective_message.reply_text(
         "🚀 Bot de trade autônomo iniciado!\n"
@@ -854,7 +873,7 @@ async def stop_bot(update, context):
 
     # CORREÇÃO: Desliga o bot usando a variável de estado correta
     automation_state["is_running"] = False
-    
+
     # Cancela a tarefa asyncio se ela existir
     if "task" in automation_state and automation_state["task"]:
         automation_state["task"].cancel()
@@ -870,18 +889,18 @@ async def stop_bot(update, context):
         target_selected_timestamp=0,
         checking_volatility=False
     )
-    
+
     logger.info("Bot de trade parado.")
     await update.effective_message.reply_text("🛑 Bot parado. Todas as tarefas e posições foram finalizadas.")
 
 async def manual_buy(update, context):
-    if not bot_running:
+    if not automation_state.get("is_running", False):
         await update.effective_message.reply_text("⚠️ O bot precisa estar em execução. Use /run primeiro.")
         return
     if in_position:
         await update.effective_message.reply_text("⚠️ Já existe uma posição aberta.")
         return
-    if not automation_state.get("current_target_pair_address"):
+    if not automation_state.get("current_target_pair_details"):
         await update.effective_message.reply_text("⚠️ O bot ainda não selecionou um alvo. Aguarde o ciclo de descoberta.")
         return
     try:
@@ -890,10 +909,12 @@ async def manual_buy(update, context):
             await update.effective_message.reply_text("⚠️ O valor da compra deve ser positivo.")
             return
         pair_details = automation_state["current_target_pair_details"]
-        price_native, _ = await fetch_dexscreener_real_time_price(pair_details['pair_address'])
-        if price_native:
-            await update.effective_message.reply_text(f"Forçando compra manual de {amount} SOL em {pair_details['base_symbol']}...")
-            await execute_buy_order(amount, price_native, pair_details, manual=True, reason="Compra Manual Forçada")
+        # Use priceUsd for manual buy price display
+        _, price_usd = await fetch_dexscreener_real_time_price(pair_details['pairAddress'])
+        if price_usd is not None:
+            await update.effective_message.reply_text(f"Forçando compra manual de {amount} SOL em {pair_details['baseToken']['symbol']}...")
+            # Pass the price in USD to execute_buy_order
+            await execute_buy_order(amount, price_usd, pair_details, manual=True, reason="Compra Manual Forçada")
         else:
             await update.effective_message.reply_text("⚠️ Não foi possível obter o preço atual para a compra.")
     except (IndexError, ValueError):
@@ -925,57 +946,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
