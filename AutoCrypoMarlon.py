@@ -355,11 +355,12 @@ async def discover_and_filter_pairs(pages_to_scan=1):
                     print(f"❌ Par {pair_name} ({pair_address}) eliminado: Volume/Variação insuficientes (Volume: {volume_h1_usd:,.2f} USD, Variação: {price_change_h1:.2f}%).")
                     continue
                 
-                # --- NOVO: Obtém os detalhes da Dexscreener APENAS para os pares validados ---
+                # --- CORREÇÃO AQUI ---
+                # A função discover_and_filter_pairs agora é assíncrona,
+                # então a chamada à Dexscreener também deve ser com await
                 dex_pair_details = await get_pair_details(pair_address)
                 
                 if dex_pair_details:
-                    # Adiciona o par completo do Dexscreener à lista final
                     filtered_pairs.append(dex_pair_details)
                     print(f"✅ Nova moeda encontrada e validada na Solana: {dex_pair_details['baseToken']['symbol']} - Endereço: {pair_address}")
                 else:
@@ -924,6 +925,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
