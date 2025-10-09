@@ -859,7 +859,7 @@ async def autonomous_loop():
 async def test_jupiter_api():
     """Testa a API de cotação da Jupiter com um par consolidado (SOL para USDC)."""
     sol_mint = "So11111111111111111111111111111111111111112"
-    usdc_mint = "4w2cysotX6czaUGmmWg13hDpY4QEMG2CzeKYEQyK9Ama"
+    usdc_mint = "5UUH9RTDiSpq6HKS6bp4NdU9PNJpXRXuiw6ShBTBhgH2"
     # 0.1 SOL em lamports (1 SOL = 10^9 lamports)
     amount_in_lamports = 100000000
     slippage_bps = 50 # 0.5%
@@ -1057,4 +1057,5 @@ if __name__ == '__main__':
     # Para executar a função main assíncrona
     asyncio.run(main())
     
+
 
