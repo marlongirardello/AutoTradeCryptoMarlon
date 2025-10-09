@@ -648,6 +648,57 @@ async def check_velocity_strategy():
     except Exception as e:
         logger.error(f"Erro em check_velocity_strategy: {e}", exc_info=True)
         
+
+async def manage_position():
+    """Gerencia a posição de trade, checando Take Profit e Stop Loss."""
+    global in_position, automation_state, pair_details
+    
+    if not in_position or not pair_details:
+        return
+    
+    target_address = automation_state.get("current_target_pair_address")
+    buy_price = automation_state.get("buy_price")
+    
+    # Obtém os valores de Take Profit e Stop Loss da configuração
+    take_profit_percentage = automation_state.get("take_profit_percentage", 50)  # Padrão: 50%
+    stop_loss_percentage = automation_state.get("stop_loss_percentage", 30)      # Padrão: 30%
+
+    try:
+        # Puxa o preço atual da moeda
+        current_price = await get_current_price(target_address)
+        if current_price is None:
+            logger.warning(f"Não foi possível obter o preço atual para {pair_details['attributes']['name']}.")
+            return
+        
+        # Calcula os preços de TP e SL com base no preço de compra
+        take_profit_price = buy_price * (1 + take_profit_percentage / 100)
+        stop_loss_price = buy_price * (1 - stop_loss_percentage / 100)
+
+        # Checa as condições de venda
+        if current_price >= take_profit_price:
+            msg = f"🟢 **TAKE PROFIT ATINGIDO!** Vendendo **{pair_details['attributes']['name']}** com lucro."
+            logger.info(msg.replace("**", ""))
+            await send_telegram_message(msg)
+            # await execute_sell_order() # Substitua por sua função de venda
+            # Reseta o estado do bot após a venda
+            in_position = False
+            automation_state["current_target_pair_address"] = None
+
+        elif current_price <= stop_loss_price:
+            msg = f"🔴 **STOP LOSS ATINGIDO!** Vendendo **{pair_details['attributes']['name']}** para limitar o prejuízo."
+            logger.info(msg.replace("**", ""))
+            await send_telegram_message(msg)
+            # await execute_sell_order() # Substitua por sua função de venda
+            # Reseta o estado do bot após a venda
+            in_position = False
+            automation_state["current_target_pair_address"] = None
+        else:
+            # Continua monitorando a posição
+            logger.info(f"Monitorando {pair_details['attributes']['name']} | Preço atual: ${current_price:,.8f} | TP: ${take_profit_price:,.8f} | SL: ${stop_loss_price:,.8f}")
+
+    except Exception as e:
+        logger.error(f"Erro em manage_position: {e}", exc_info=True)
+        # Em caso de erro, o bot não trava e continua a checagem no próximo ciclo
 # ---------------- Loop autônomo completo ----------------
 async def autonomous_loop():
     """O loop principal que executa a estratégia de trade de forma autônoma, com estados de operação claros."""
@@ -711,8 +762,7 @@ async def autonomous_loop():
             # ESTADO 3: EM POSIÇÃO (Gerenciando a compra)
             # ------------------------------------------------------------------
             elif in_position:
-                # (Seu código de gerenciamento de Take Profit / Stop Loss)
-                pass
+                await manage_position()
                 await asyncio.sleep(15)
 
 
@@ -839,6 +889,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
