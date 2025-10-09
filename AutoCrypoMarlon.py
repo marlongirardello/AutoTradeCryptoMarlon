@@ -735,6 +735,9 @@ async def autonomous_loop():
             # ------------------------------------------------------------------
             elif automation_state.get("current_target_pair_address") and not in_position:
                 # Aqui o bot continua a lógica de monitoramento
+                msg = f"⚠️ Iniciando Monitoramento"
+                logger.info(msg)
+                
                 await check_velocity_strategy()
                 await asyncio.sleep(15)
 
@@ -870,6 +873,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
