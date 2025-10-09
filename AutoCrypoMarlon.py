@@ -347,9 +347,9 @@ def discover_and_filter_pairs(pages_to_scan=1):
                     print(f"❌ Par {pair_name} ({pair_address}) eliminado: Baixa liquidez (USD: {liquidity_usd:,.2f}).")
                     continue
 
-                # Filtro 3: Taxa de vendas vs. compras
-                if txns_h1_buys > 0 and (txns_h1_sells / txns_h1_buys) > 0.1:
-                    print(f"❌ Par {pair_name} ({pair_address}) eliminado: Muitas vendas ({txns_h1_sells} vendas, {txns_h1_buys} compras).")
+                # Filtro 3: Taxa de vendas vs. compras (AGORA MAIS FLEXÍVEL)
+                if txns_h1_buys > 0 and (txns_h1_sells / txns_h1_buys) > 0.5:
+                    print(f"❌ Par {pair_name} ({pair_address}) eliminado: Proporção de vendas muito alta ({txns_h1_sells} vendas, {txns_h1_buys} compras).")
                     continue
 
                 # Filtro 4: Volume e variação de preço
@@ -862,6 +862,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
