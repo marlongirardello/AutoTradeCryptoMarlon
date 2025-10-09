@@ -31,19 +31,16 @@ app = Flask('')
 def home():
     return "Bot is alive!"
 def run_server():
-  # No ambiente de produção como Koyeb, a plataforma geralmente lida com a execução do servidor Flask.
-  # Chamar app.run() aqui pode causar conflitos de loop de eventos com asyncio.
-  # Se você precisa que o Flask rode, ajuste a configuração do Koyeb para apontar para este arquivo
-  # e configure a porta, ou use um servidor WSGI compatível com asyncio se necessário.
-  # Para corrigir o erro de loop de eventos com asyncio, vamos comentar a linha app.run() aqui.
-  # app.run(host='00.0.0',port=8000) # Comentado para evitar conflito com asyncio.run
-    pass # Manter a função, mas sem app.run() para evitar o conflito
+  # IMPORTANTE: Se estiver rodando o bot com asyncio.run(main()), a linha abaixo *NÃO* deve estar ativa (comentada ou removida).
+  # Ela inicia um loop de eventos do Flask que entra em conflito com o loop do asyncio do bot,
+  # causando o erro "RuntimeError: This event loop is already running".
+  # Em ambientes de deploy como Koyeb, a plataforma geralmente inicia e gerencia seu servidor Flask.
+  # Portanto, esta linha é geralmente desnecessária neste contexto quando o bot asyncio também está rodando.
+  # app.run(host='0.0.0.0',port=8000) # Mantenha esta linha comentada se usar asyncio.run(main())
+    pass # Manter a função, mas sem app.run() ativo para evitar o conflito com asyncio.run
 
 def keep_alive():
-    # No ambiente de produção, a thread separada para o Flask pode não ser necessária
-    # e pode causar conflitos com o asyncio.run.
-    # No entanto, a pedido do usuário, vamos manter a estrutura da função.
-    # Certifique-se de que o app.run() em run_server() não esteja ativo se usar asyncio.run()
+    # Mantido conforme a sua preferência. Note que run_server() não deve chamar app.run() se main() usar asyncio.run().
     t = Thread(target=run_server)
     t.start()
 
