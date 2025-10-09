@@ -367,19 +367,19 @@ def discover_and_filter_pairs(pages_to_scan=1):
 
     return filtered_pairs
         
-def analyze_and_score_coin(pair):
+d# A função agora recebe a variável `pair_details` diretamente
+def analyze_and_score_coin(pair_details):
     """
     Analisa e pontua uma moeda com base em dados de volume, preço e transações.
-    Uma pontuação mais alta indica um potencial de momentum maior.
+    A função é agora compatível com a estrutura de dados da Dexscreener.
     """
-    attributes = pair['attributes']
     
     try:
-        # Extraindo dados para a análise
-        volume_h1_usd = float(attributes['volume_usd']['h1'])
-        price_change_h1 = float(attributes['price_change_percentage']['h1'])
-        txns_h1_buys = attributes['transactions']['h1']['buys']
-        txns_h1_sells = attributes['transactions']['h1']['sells']
+        # Extraindo dados para a análise da estrutura de dados da Dexscreener
+        volume_h1_usd = float(pair_details['volume']['h1'])
+        price_change_h1 = float(pair_details['priceChange']['h1'])
+        txns_h1_buys = pair_details['txns']['h1']['buys']
+        txns_h1_sells = pair_details['txns']['h1']['sells']
         
         # --- Lógica de Pontuação ---
         # Pontuação 1: Volume
@@ -414,7 +414,7 @@ def analyze_and_score_coin(pair):
         # Calculando a pontuação final
         final_score = volume_score + price_change_score + buys_sells_score
         
-        print(f"Análise de {attributes['name']}:")
+        print(f"Análise de {pair_details['base_symbol']}:")
         print(f"  Volume (H1): ${volume_h1_usd:,.2f} -> Pontos: {volume_score}")
         print(f"  Variação (H1): {price_change_h1:.2f}% -> Pontos: {price_change_score}")
         print(f"  Compras/Vendas: {buy_ratio:.2f} -> Pontos: {buys_sells_score}")
@@ -423,7 +423,7 @@ def analyze_and_score_coin(pair):
         return final_score
     
     except (KeyError, TypeError, ValueError, ZeroDivisionError) as e:
-        print(f"Erro ao analisar a moeda {attributes.get('name', 'N/A')}: {e}")
+        print(f"Erro ao analisar a moeda {pair_details.get('base_symbol', 'N/A')}: {e}")
         return 0
         
 async def find_best_coin_to_trade(pair_info):
@@ -905,6 +905,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
