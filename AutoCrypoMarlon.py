@@ -375,10 +375,13 @@ def analyze_and_score_coin(pair_details):
     
     try:
         # Extraindo dados para a análise da estrutura de dados da Dexscreener
-        volume_h1_usd = float(pair_details['volume']['h1'])
-        price_change_h1 = float(pair_details['priceChange']['h1'])
-        txns_h1_buys = pair_details['txns']['h1']['buys']
-        txns_h1_sells = pair_details['txns']['h1']['sells']
+        # Usamos o método .get() para evitar erros caso a chave não exista
+        volume_h1_usd = float(pair_details.get('volume', {}).get('h1', 0))
+        price_change_h1 = float(pair_details.get('priceChange', {}).get('h1', 0))
+        
+        txns_h1 = pair_details.get('txns', {}).get('h1', {'buys': 0, 'sells': 0})
+        txns_h1_buys = txns_h1.get('buys', 0)
+        txns_h1_sells = txns_h1.get('sells', 0)
         
         # --- Lógica de Pontuação ---
         # Pontuação 1: Volume
@@ -413,7 +416,7 @@ def analyze_and_score_coin(pair_details):
         # Calculando a pontuação final
         final_score = volume_score + price_change_score + buys_sells_score
         
-        print(f"Análise de {pair_details['base_symbol']}:")
+        print(f"Análise de {pair_details['baseToken']['symbol']}:")
         print(f"  Volume (H1): ${volume_h1_usd:,.2f} -> Pontos: {volume_score}")
         print(f"  Variação (H1): {price_change_h1:.2f}% -> Pontos: {price_change_score}")
         print(f"  Compras/Vendas: {buy_ratio:.2f} -> Pontos: {buys_sells_score}")
@@ -422,7 +425,7 @@ def analyze_and_score_coin(pair_details):
         return final_score
     
     except (KeyError, TypeError, ValueError, ZeroDivisionError) as e:
-        print(f"Erro ao analisar a moeda {pair_details.get('base_symbol', 'N/A')}: {e}")
+        print(f"Erro ao analisar a moeda {pair_details.get('baseToken', {}).get('symbol', 'N/A')}: {e}")
         return 0
         
 async def find_best_coin_to_trade(pair_info):
@@ -563,16 +566,23 @@ async def execute_sell_order(reason=""):
                            f"https://solscan.io/tx/{tx_sig}")
             logger.info(log_message)
             await send_telegram_message(log_message)
-            in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0
             
-            if "Stop Loss" in reason or "Timeout" in reason:
-                if automation_state.get('current_target_pair_address'):
-                    automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10
-                    automation_state["current_target_pair_address"] = None
-                    await send_telegram_message(f"⚠️ **{symbol}** foi penalizada por 10 ciclos após a venda por stop/timeout.")
-            else:
+            in_position = False
+            entry_price = 0.0
+            automation_state["position_opened_timestamp"] = 0
+            
+            # --- Adicionar a lógica de penalização para Take Profit ---
+            if automation_state.get('current_target_pair_address'):
+                # Penaliza a moeda para não re-entrar por um tempo
+                automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 100 
                 automation_state["current_target_pair_address"] = None
-            
+                
+                # Envia uma mensagem para o Telegram informando a penalização
+                if "Take Profit" in reason:
+                    await send_telegram_message(f"💰 **{symbol}** atingiu o Take Profit e foi penalizada por 10 ciclos.")
+                elif "Stop Loss" in reason or "Timeout" in reason:
+                    await send_telegram_message(f"⚠️ **{symbol}** foi penalizada por 10 ciclos após a venda por stop/timeout.")
+                    
             sell_fail_count = 0
             buy_fail_count = 0
         else:
@@ -904,6 +914,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
