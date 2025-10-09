@@ -698,8 +698,8 @@ async def autonomous_loop():
                 logger.info("Iniciando ciclo de caça...")
                 approved_pairs = discover_and_filter_pairs(pages_to_scan=10)
 
-                if approved_pair:
-                    best_coin_symbol, details = await find_best_coin_to_trade(approved_pair)
+                if approved_pairs:
+                    best_coin_symbol, details = await find_best_coin_to_trade(approved_pairs)
                     if best_coin_symbol and details:
                         score = details.get('score', 0)
                         if score > 0:
@@ -862,6 +862,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
