@@ -1013,8 +1013,8 @@ async def main():
     application.add_handler(CommandHandler("buy", manual_buy))
     application.add_handler(CommandHandler("sell", manual_sell))
     logger.info("Bot do Telegram iniciado e aguardando comandos...")
-    # Use run_polling com asyncio_mode=True para integrar o loop do Telegram com o asyncio principal
-    application.run_polling(asyncio_mode=True)
+    # Use run_polling sem asyncio_mode, pois versões recentes integram automaticamente com asyncio
+    application.run_polling()
 
 if __name__ == '__main__':
     # Para executar a função main assíncrona
