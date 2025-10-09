@@ -742,7 +742,7 @@ async def autonomous_loop():
             # ------------------------------------------------------------------
             if not automation_state.get("current_target_pair_address"):
                 logger.info("Iniciando ciclo de caça...")
-                gecko_approved_pairs = discover_and_filter_pairs(pages_to_scan=10)
+                gecko_approved_pairs = await discover_and_filter_pairs(pages_to_scan=10)
 
                 if gecko_approved_pairs:
                     best_score = 0
@@ -924,6 +924,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
