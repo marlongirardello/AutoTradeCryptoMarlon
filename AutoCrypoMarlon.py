@@ -632,18 +632,22 @@ async def check_velocity_strategy():
 
         # Se a vela for positiva, dispara o gatilho de compra imediatamente
         if is_positive_candle:
+            # Obtém o preço da vela de 1 minuto para usar na compra
+            price = df_1m['close'].iloc[-1]
+            reason = "Gatilho de vela positiva de 1m"
+
             msg = f"✅ GATILHO ATINGIDO para **{symbol}**! Executando ordem de compra..."
             logger.info(msg.replace("**",""))
             await send_telegram_message(msg)
-            
-            # Chama a função de compra
-            await execute_buy_order()
-            
+
+            # --- AQUI ESTÁ A CORREÇÃO FINAL ---
+            # Chama a função de compra com todos os argumentos necessários
+            await execute_buy_order(parameters["amount"], price, pair_details, reason=reason)
+
             # Define o estado do bot para "em posição" para parar de comprar
-            in_position = True 
+            in_position = True
         else:
             logger.info(f"❌ Sinal para {symbol} não encontrado. Continuará monitorando.")
-            # O bot continua no estado de monitoramento, esperando o próximo ciclo
 
     except Exception as e:
         logger.error(f"Erro em check_velocity_strategy: {e}", exc_info=True)
@@ -889,6 +893,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
