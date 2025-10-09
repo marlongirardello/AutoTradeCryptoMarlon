@@ -8,6 +8,7 @@ from base64 import b64decode
 import httpx
 import pandas as pd
 from collections import Counter
+import json # Importar a biblioteca json
 
 from solders.pubkey import Pubkey
 from solders.keypair import Keypair
@@ -763,10 +764,17 @@ async def get_pair_details(pair_address):
         async with httpx.AsyncClient() as client:
             res = await client.get(url, timeout=10.0)
             res.raise_for_status()
-            pair_data = res.json().get('pair')
-            if not pair_data: return None
-            return pair_data # Return the full pair data dictionary
-    except Exception: return None
+            pair_data = res.json().get('pairs', [None])[0]
+            if not pair_data:
+                return None
+
+            # Retorna o dicionário completo que a função analyze_and_score_coin espera
+            # Extraímos todos os dados necessários aqui
+            return pair_data
+
+    except Exception as e:
+        # Se a requisição falhar, a função retorna None, o que já é tratado no loop
+        return None
 
 async def autonomous_loop():
     """O loop principal que executa a estratégia de trade de forma autônoma, com estados de operação claros."""
@@ -842,6 +850,53 @@ async def autonomous_loop():
         except Exception as e:
             logger.error(f"Erro crítico no loop autônomo: {e}", exc_info=True)
             await asyncio.sleep(60)
+
+# ---------------- Teste de Conexão com a Jupiter API ----------------
+async def test_jupiter_api():
+    """Testa a API de cotação da Jupiter com um par consolidado (SOL para USDC)."""
+    sol_mint = "So11111111111111111111111111111111111111112"
+    usdc_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+    # 0.1 SOL em lamports (1 SOL = 10^9 lamports)
+    amount_in_lamports = 100000000
+    slippage_bps = 50 # 0.5%
+
+    quote_url = (
+        f"https://quote-api.jup.ag/v6/quote?"
+        f"inputMint={sol_mint}&"
+        f"outputMint={usdc_mint}&"
+        f"amount={amount_in_lamports}&"
+        f"slippageBps={slippage_bps}"
+    )
+
+    logger.info(f"Iniciando teste de conexão com a API da Jupiter para SOL/USDC...")
+    logger.info(f"URL: {quote_url}")
+
+    try:
+        async with httpx.AsyncClient() as client:
+            res = await client.get(quote_url, timeout=10.0)
+            res.raise_for_status() # Lança um erro para respostas 4xx/5xx
+
+            quote_response = res.json()
+
+            logger.info("\n✅ Teste da API da Jupiter (Cotação) concluído com sucesso.")
+            # logger.info(f"Resposta: {json.dumps(quote_response, indent=2)}") # Opcional: logar a resposta completa
+
+            # Verifica se a resposta contém rotas (indica que é negociável)
+            if quote_response and quote_response.get('routes'): # Use 'routes' instead of 'routesInfos' for v6
+                logger.info("👍 A API da Jupiter retornou rotas de negociação para SOL/USDC. A API está funcional.")
+            else:
+                logger.warning("⚠️ A API da Jupiter não retornou rotas de negociação para SOL/USDC. Pode haver um problema com a API ou o par de teste.")
+
+    except httpx.HTTPStatusError as e:
+        logger.error(f"❌ Erro de status HTTP ao chamar a API da Jupiter: {e.response.status_code} - {e.response.text}")
+        await send_telegram_message(f"❌ Erro no teste de conexão com a API da Jupiter: Status {e.response.status_code}")
+    except httpx.RequestError as e:
+        logger.error(f"❌ Erro de requisição ao chamar a API da Jupiter: {e}")
+        await send_telegram_message(f"❌ Erro no teste de conexão com a API da Jupiter: {e}")
+    except Exception as e:
+        logger.error(f"❌ Ocorreu um erro inesperado durante o teste da API da Jupiter: {e}")
+        await send_telegram_message(f"❌ Erro inesperado no teste da API da Jupiter: {e}")
+
 
 # ---------------- Comandos Telegram ----------------
 async def start(update, context):
@@ -976,9 +1031,13 @@ async def manual_sell(update, context):
 
 
 # ---------------- Main ----------------
-def main():
+async def main():
     global application
     keep_alive()
+
+    # Executa o teste da API da Jupiter na inicialização
+    await test_jupiter_api()
+
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("set", set_params))
@@ -990,4 +1049,5 @@ def main():
     application.run_polling()
 
 if __name__ == '__main__':
-    main()
+    # Para executar a função main assíncrona
+    asyncio.run(main())
