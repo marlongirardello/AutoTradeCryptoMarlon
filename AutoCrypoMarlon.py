@@ -748,15 +748,21 @@ async def autonomous_loop():
 
                     # Analisa e pontua todas as moedas aprovadas
                     for gecko_pair in gecko_approved_pairs:
-                        # Pega a informação completa do par usando a função Dexscreener
-                        pair_details = await get_pair_details(gecko_pair['pair_address'])
+                        # A função get_pair_details retorna um array de pares, então temos que verificar
+                        dex_pair_response = await get_pair_details(gecko_pair['pair_address'])
                         
-                        if pair_details:
+                        # Se a resposta for válida, pegamos o primeiro par
+                        if dex_pair_response and 'pairs' in dex_pair_response and dex_pair_response['pairs']:
+                            pair_details = dex_pair_response['pairs'][0]
+                            
                             # Agora a moeda tem a estrutura de dados que as funções de trade esperam
                             score = analyze_and_score_coin(pair_details)
+                            
                             if score > best_score:
                                 best_score = score
                                 best_pair_details = pair_details
+                        else:
+                            logger.warning(f"Não foi possível obter detalhes da Dexscreener para o par {gecko_pair['pair_address']}. Ignorando.")
                     
                     # Se a melhor moeda tiver uma pontuação acima de 70, define como alvo
                     if best_pair_details and best_score >= 70:
@@ -916,6 +922,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
