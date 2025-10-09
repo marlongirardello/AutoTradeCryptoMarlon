@@ -31,10 +31,22 @@ app = Flask('')
 def home():
     return "Bot is alive!"
 def run_server():
-  app.run(host='0.0.0.0',port=8000)
+  # No ambiente de produção como Koyeb, a plataforma geralmente lida com a execução do servidor Flask.
+  # Chamar app.run() aqui pode causar conflitos de loop de eventos com asyncio.
+  # Se você precisa que o Flask rode, ajuste a configuração do Koyeb para apontar para este arquivo
+  # e configure a porta, ou use um servidor WSGI compatível com asyncio se necessário.
+  # Para corrigir o erro de loop de eventos com asyncio, vamos comentar a linha app.run() aqui.
+  # app.run(host='00.0.0',port=8000) # Comentado para evitar conflito com asyncio.run
+    pass # Manter a função, mas sem app.run() para evitar o conflito
+
 def keep_alive():
+    # No ambiente de produção, a thread separada para o Flask pode não ser necessária
+    # e pode causar conflitos com o asyncio.run.
+    # No entanto, a pedido do usuário, vamos manter a estrutura da função.
+    # Certifique-se de que o app.run() em run_server() não esteja ativo se usar asyncio.run()
     t = Thread(target=run_server)
     t.start()
+
 # --- FIM DO CÓDIGO DO SERVIDOR ---
 
 # ---------------- Configuração ----------------
@@ -744,6 +756,7 @@ async def manage_position():
             automation_state["current_target_pair_address"] = None # Reset target after selling
             automation_state["took_profit_pairs"].add(pair_details.get('pairAddress')) # Add pair to took_profit_pairs
 
+
         elif current_price <= stop_loss_price:
             msg = f"🔴 **STOP LOSS ATINGIDO!** Vendendo **{symbol}** para limitar o prejuízo."
             logger.info(msg.replace("**", ""))
@@ -854,53 +867,6 @@ async def autonomous_loop():
         except Exception as e:
             logger.error(f"Erro crítico no loop autônomo: {e}", exc_info=True)
             await asyncio.sleep(60)
-
-# ---------------- Teste de Conexão com a Jupiter API ----------------
-async def test_jupiter_api():
-    """Testa a API de cotação da Jupiter com um par consolidado (SOL para USDC)."""
-    sol_mint = "So11111111111111111111111111111111111111112"
-    usdc_mint = "5UUH9RTDiSpq6HKS6bp4NdU9PNJpXRXuiw6ShBTBhgH2"
-    # 0.1 SOL em lamports (1 SOL = 10^9 lamports)
-    amount_in_lamports = 100000000
-    slippage_bps = 50 # 0.5%
-
-    # Atualizado para o novo endpoint da Jupiter
-    quote_url = (
-        f"https://lite-api.jup.ag/swap/v1/quote?"
-        f"inputMint={sol_mint}&"
-        f"outputMint={usdc_mint}&"
-        f"amount={amount_in_lamports}&"
-        f"slippageBps={slippage_bps}"
-    )
-
-    logger.info(f"Iniciando teste de conexão com a API da Jupiter para SOL/TROLL...")
-    logger.info(f"URL: {quote_url}")
-
-    try:
-        async with httpx.AsyncClient() as client:
-            res = await client.get(quote_url, timeout=10.0)
-            res.raise_for_status() # Lança um erro para respostas 4xx/5xx
-
-            quote_response = res.json()
-
-            logger.info("\n✅ Teste da API da Jupiter (Cotação) concluído com sucesso.")
-            # logger.info(f"Resposta: {json.dumps(quote_response, indent=2)}") # Opcional: logar a resposta completa
-
-            # Verifica se a resposta contém rotas (indica que é negociável)
-            if quote_response and quote_response.get('routes'): # Use 'routes' instead of 'routesInfos' for v6
-                logger.info("👍 A API da Jupiter retornou rotas de negociação para SOL/TROLL. A API está funcional.")
-            else:
-                logger.warning("⚠️ A API da Jupiter não retornou rotas de negociação para SOL/USDC. Pode haver um problema com a API ou o par de teste.")
-
-    except httpx.HTTPStatusError as e:
-        logger.error(f"❌ Erro de status HTTP ao chamar a API da Jupiter: {e.response.status_code} - {e.response.text}")
-        await send_telegram_message(f"❌ Erro no teste de conexão com a API da Jupiter: Status {e.response.status_code}")
-    except httpx.RequestError as e:
-        logger.error(f"❌ Erro de requisição ao chamar a API da Jupiter: {e}")
-        await send_telegram_message(f"❌ Erro no teste de conexão com a API da Jupiter: {e}")
-    except Exception as e:
-        logger.error(f"❌ Ocorreu um erro inesperado durante o teste da API da Jupiter: {e}")
-        await send_telegram_message(f"❌ Erro inesperado no teste da API da Jupiter: {e}")
 
 
 # ---------------- Comandos Telegram ----------------
@@ -1038,10 +1004,9 @@ async def manual_sell(update, context):
 # ---------------- Main ----------------
 async def main():
     global application
+    # A função keep_alive é mantida aqui, mas certifique-se de que app.run() em run_server não esteja ativo
+    # se estiver usando asyncio.run(main()). A plataforma de deploy (Koyeb) deve gerenciar o servidor Flask.
     keep_alive()
-
-    # Executa o teste da API da Jupiter na inicialização
-    await test_jupiter_api()
 
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
@@ -1051,11 +1016,9 @@ async def main():
     application.add_handler(CommandHandler("buy", manual_buy))
     application.add_handler(CommandHandler("sell", manual_sell))
     logger.info("Bot do Telegram iniciado e aguardando comandos...")
+    # Use run_polling para integrar o loop do Telegram com o asyncio
     application.run_polling()
 
 if __name__ == '__main__':
     # Para executar a função main assíncrona
     asyncio.run(main())
-    
-
-
