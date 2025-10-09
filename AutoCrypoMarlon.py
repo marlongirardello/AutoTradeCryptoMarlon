@@ -381,42 +381,48 @@ def analyze_and_score_coin(pair):
         txns_h1_buys = attributes['transactions']['h1']['buys']
         txns_h1_sells = attributes['transactions']['h1']['sells']
         
-        # Atribuindo pesos para cada critério
-        # Esses pesos podem ser ajustados para otimizar a estratégia
-        WEIGHT_VOLUME = 0.4
-        WEIGHT_PRICE_CHANGE = 0.3
-        WEIGHT_BUYS_VS_SELLS = 0.3
-        
-        # Normalizando os valores para que a pontuação fique entre 0 e 100
-        # Normalização do volume: usa uma base de 1 milhão de USD para o cálculo
-        normalized_volume = min(volume_h1_usd / 1_000_000, 1.0)
-        
-        # Normalização da variação de preço: usa uma base de 1000% para o cálculo
-        normalized_price_change = min(price_change_h1 / 1000.0, 1.0)
-        
-        # Normalização da relação compras vs. vendas
+        # --- Lógica de Pontuação ---
+        # Pontuação 1: Volume
+        volume_score = 0
+        if volume_h1_usd >= 300000:
+            volume_score = 40
+        elif volume_h1_usd >= 100000:
+            volume_score = 30
+        elif volume_h1_usd >= 50000:
+            volume_score = 15
+
+        # Pontuação 2: Variação de Preço
+        price_change_score = 0
+        if price_change_h1 >= 500:
+            price_change_score = 30
+        elif price_change_h1 >= 200:
+            price_change_score = 20
+        elif price_change_h1 >= 50:
+            price_change_score = 10
+            
+        # Pontuação 3: Compras vs. Vendas
+        buys_sells_score = 0
         if txns_h1_buys > 0:
-            buy_sell_ratio = txns_h1_buys / (txns_h1_buys + txns_h1_sells)
-        else:
-            buy_sell_ratio = 0
+            buy_ratio = txns_h1_buys / (txns_h1_buys + txns_h1_sells)
+            if buy_ratio >= 0.9: # 90% ou mais de compras
+                buys_sells_score = 30
+            elif buy_ratio >= 0.8: # 80% ou mais de compras
+                buys_sells_score = 20
+            elif buy_ratio >= 0.7: # 70% ou mais de compras
+                buys_sells_score = 10
         
         # Calculando a pontuação final
-        score = (normalized_volume * WEIGHT_VOLUME) + \
-                (normalized_price_change * WEIGHT_PRICE_CHANGE) + \
-                (buy_sell_ratio * WEIGHT_BUYS_VS_SELLS)
-        
-        # Multiplicando por 100 para ter a pontuação em uma escala de 0 a 100
-        final_score = score * 100
+        final_score = volume_score + price_change_score + buys_sells_score
         
         print(f"Análise de {attributes['name']}:")
-        print(f"  Volume (H1): ${volume_h1_usd:,.2f} -> Score: {normalized_volume * WEIGHT_VOLUME * 100:.2f}")
-        print(f"  Variação (H1): {price_change_h1:.2f}% -> Score: {normalized_price_change * WEIGHT_PRICE_CHANGE * 100:.2f}")
-        print(f"  Compras/Vendas: {buy_sell_ratio:.2f} -> Score: {buy_sell_ratio * WEIGHT_BUYS_VS_SELLS * 100:.2f}")
+        print(f"  Volume (H1): ${volume_h1_usd:,.2f} -> Pontos: {volume_score}")
+        print(f"  Variação (H1): {price_change_h1:.2f}% -> Pontos: {price_change_score}")
+        print(f"  Compras/Vendas: {buy_ratio:.2f} -> Pontos: {buys_sells_score}")
         print(f"  Pontuação Final: {final_score:.2f}\n")
         
         return final_score
     
-    except (KeyError, TypeError, ValueError) as e:
+    except (KeyError, TypeError, ValueError, ZeroDivisionError) as e:
         print(f"Erro ao analisar a moeda {attributes.get('name', 'N/A')}: {e}")
         return 0
         
@@ -873,6 +879,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
