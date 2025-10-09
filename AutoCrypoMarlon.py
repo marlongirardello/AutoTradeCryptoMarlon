@@ -283,119 +283,133 @@ async def get_new_pools(page=1):
             logger.error(f"Erro inesperado ao buscar pools: {e}")
         return []
 
-async def discover_and_filter_pairs():
-    """
-    Busca pools de alto volume e filtra aqueles que são muito recentes (entre 15 e 60 min)
-    e atendem a critérios de liquidez e transações.
-    Esta função substitui a antiga 'discover_and_filter_pairs'.
-    """
-    logger.info("🚀 Iniciando busca por pares de ALTO VOLUME e RECÉM-CRIADOS...")
+import time
+import requests
+from datetime import datetime, timedelta
 
-    # Analisamos menos páginas, pois focamos apenas nos pools com maior volume do mercado.
-    for page in range(1, 6): # Analisa até 5 páginas (top 500 pools se o tamanho da pág for 100)
-        logger.info(f"📄 Buscando top pools por volume da página {page}...")
-        try:
-            pools_page = await get_new_pools(page)
-            if not pools_page:
-                logger.warning(f"Nenhuma pool encontrada na página de alto volume {page}.")
-                await asyncio.sleep(1)
+def discover_and_filter_pairs(self):
+    print("Iniciando a busca por novas moedas na rede Solana...")
+    
+    # A URL agora é fixa para a rede Solana
+    url = f"https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page=1"
+    headers = {'Content-Type': 'application/json'}
+    
+    try:
+        response = requests.get(url, headers=headers)
+        response.raise_for_status()
+        data = response.json()
+        
+        pairs = data['data']
+        
+        if not pairs:
+            print("Nenhum par novo encontrado. Tentando novamente em 30 segundos...")
+            time.sleep(30)
+            return []
+
+        filtered_pairs = []
+        for pair in pairs:
+            attributes = pair['attributes']
+            
+            pair_address = attributes['address']
+            
+            created_at_str = attributes['pool_created_at']
+            if created_at_str is None:
+                continue
+            
+            created_at_ts = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
+            age_seconds = (datetime.now(created_at_ts.tzinfo) - created_at_ts).total_seconds()
+            
+            # Filtro 1: Idade da pool (1 a 10 minutos)
+            if not (60 <= age_seconds <= 600):
+                continue
+            
+            if attributes.get('reserve_in_usd') is None or attributes.get('transactions') is None:
+                continue
+                
+            try:
+                liquidity_usd = float(attributes['reserve_in_usd'])
+                txns_h1_buys = attributes['transactions']['h1']['buys']
+                txns_h1_sells = attributes['transactions']['h1']['sells']
+                price_change_h1 = float(attributes['price_change_percentage']['h1'])
+                volume_h1_usd = float(attributes['volume_usd']['h1'])
+            except (KeyError, TypeError, ValueError):
                 continue
 
-            logger.info(f"🧪 Aplicando filtros a {len(pools_page)} pools da página {page}...")
+            # Filtro 2: Liquidez mínima (50.000 USD)
+            if liquidity_usd < 50000:
+                continue
 
-            for pool in pools_page:
-                attributes = pool.get('attributes', {})
-                
-                # --- FILTRO PRIMÁRIO E MAIS IMPORTANTE: IDADE ---
-                pool_age_str = attributes.get('pool_created_at')
-                if not pool_age_str:
-                    continue
+            # Filtro 3: Taxa de vendas vs. compras (< 10% de vendas)
+            if txns_h1_buys > 0 and (txns_h1_sells / txns_h1_buys) > 0.1:
+                continue
 
-                pool_created_at = datetime.fromisoformat(pool_age_str.replace('Z', '+00:00'))
-                age_seconds = (datetime.now(timezone.utc) - pool_created_at).total_seconds()
-                
-                # A grande maioria dos pools de alto volume será antiga.
-                # Rejeitamos rapidamente para focar no que importa.
-                if not (900 <= age_seconds <= 3600):  # Entre 15 e 60 minutos
-                    continue
+            # Filtro 4: Volume e variação de preço (volume > 100k e preço > 20%)
+            if volume_h1_usd < 100000 or price_change_h1 < 20:
+                continue
+            
+            pair['pair_address'] = pair_address
+            filtered_pairs.append(pair)
+            print(f"✅ Nova moeda encontrada e validada na Solana: {attributes['name']} - Endereço: {pair_address}")
 
-                # Se o código chegou aqui, ENCONTRAMOS UM ALVO EM POTENCIAL!
-                # Agora aplicamos os filtros de qualidade.
-                age_minutes = age_seconds / 60
-                symbol = attributes.get('name', 'SímboloDesconhecido')
-                logger.info(f"🎯 ALVO EM POTENCIAL (Idade Perfeita): {symbol} com {age_minutes:.1f} min. Verificando qualidade...")
+        return filtered_pairs
 
-                # --- FILTROS DE QUALIDADE (para pools com a idade certa) ---
-                liquidity = float(attributes.get('reserve_in_usd', 0))
-                if liquidity < MIN_LIQUIDITY:
-                    logger.info(f"❌ REJEITADO (Liquidez): {symbol} | Liquidez ${liquidity:,.2f} < Mínimo ${MIN_LIQUIDITY:,.2f}.")
-                    continue
-
-                volume_h1 = float(attributes.get('volume_usd', {}).get('h1', 0))
-                if volume_h1 < MIN_VOLUME_H1:
-                    logger.info(f"❌ REJEITADO (Volume 1h): {symbol} | Volume 1h ${volume_h1:,.2f} < Mínimo ${MIN_VOLUME_H1:,.2f}.")
-                    continue
-
-                txns_h1 = attributes.get('transactions', {}).get('h1', {})
-                txns_h1_buys = int(txns_h1.get('buys', 0))
-                txns_h1_sells = int(txns_h1.get('sells', 0))
-
-                if txns_h1_buys < 10 or txns_h1_sells < 3:
-                    logger.info(f"❌ REJEITADO (Transações): {symbol} | Compras: {txns_h1_buys}/10, Vendas: {txns_h1_sells}/3.")
-                    continue
-
-                # ✅ APROVADO! O pool passou em todos os filtros.
-                # O endereço do pool no endpoint /pools vem no campo 'id', no formato 'rede_endereco'
-                address_full = pool.get('id', '')
-                if not address_full.startswith('solana_'):
-                    continue
-                address = address_full.split('_')[1]
-
-                logger.info(f"✅✅✅ APROVADO: {symbol} | Idade {age_minutes:.1f} min | Liq ${liquidity:,.2f} | Vol 1h ${volume_h1:,.2f}")
-                
-                base_token_symbol = symbol.split('/')[0].strip()
-                return {
-                    'symbol': base_token_symbol,
-                    'address': address,
-                    'liquidity': liquidity,
-                    'volume_h1': volume_h1,
-                    'age_minutes': age_minutes
-                }
-
-            await asyncio.sleep(2)  # Pausa de 2 segundos entre as páginas
-
-        except Exception as e:
-            logger.error(f"Erro inesperado ao processar a página de alto volume {page}: {e}", exc_info=True)
-            await asyncio.sleep(5)
-
-    logger.info("🏁 Busca por volume finalizada. Nenhum pool novo passou nos filtros nesta rodada.")
-    return None
-
-async def analyze_and_score_coin(symbol, pair_address):
+    except requests.exceptions.RequestException as e:
+        print(f"Erro na requisição para a API do GeckoTerminal: {e}")
+        return []
+        
+def analyze_and_score_coin(self, pair):
     """
-    Faz análise básica de pontuação do par (momentum e volume)
-    Retorna score numérico. Quanto maior, melhor.
+    Analisa e pontua uma moeda com base em dados de volume, preço e transações.
+    Uma pontuação mais alta indica um potencial de momentum maior.
     """
+    attributes = pair['attributes']
+    
     try:
-        df = await fetch_geckoterminal_ohlcv(pair_address, "1m", limit=15)
-        if df is None or df.empty or len(df) < 5:
-            return 0
-
-        last_price = df['close'].iloc[-1]
-        first_price = df['close'].iloc[0]
-        price_change = (last_price - first_price) / first_price * 100
-
-        avg_volume = df['volume'].mean()
-        volatility = df['high'].max() - df['low'].min()
-
-        # score simples ponderando preço, volume e estabilidade
-        score = price_change * 1.5 + (avg_volume / 1_000_000) - (volatility / last_price) * 5
-        logger.info(f"📊 {symbol}: Δ={price_change:.2f}% | Vol={avg_volume:,.0f} | Score={score:.2f}")
-        return score
-    except Exception as e:
-        logger.error(f"Erro ao analisar {symbol}: {e}")
+        # Extraindo dados para a análise
+        volume_h1_usd = float(attributes['volume_usd']['h1'])
+        price_change_h1 = float(attributes['price_change_percentage']['h1'])
+        txns_h1_buys = attributes['transactions']['h1']['buys']
+        txns_h1_sells = attributes['transactions']['h1']['sells']
+        
+        # Atribuindo pesos para cada critério
+        # Esses pesos podem ser ajustados para otimizar a estratégia
+        WEIGHT_VOLUME = 0.4
+        WEIGHT_PRICE_CHANGE = 0.3
+        WEIGHT_BUYS_VS_SELLS = 0.3
+        
+        # Normalizando os valores para que a pontuação fique entre 0 e 100
+        # Normalização do volume: usa uma base de 1 milhão de USD para o cálculo
+        normalized_volume = min(volume_h1_usd / 1_000_000, 1.0)
+        
+        # Normalização da variação de preço: usa uma base de 1000% para o cálculo
+        normalized_price_change = min(price_change_h1 / 1000.0, 1.0)
+        
+        # Normalização da relação compras vs. vendas
+        if txns_h1_buys > 0:
+            buy_sell_ratio = txns_h1_buys / (txns_h1_buys + txns_h1_sells)
+        else:
+            buy_sell_ratio = 0
+        
+        # Calculando a pontuação final
+        score = (normalized_volume * WEIGHT_VOLUME) + \
+                (normalized_price_change * WEIGHT_PRICE_CHANGE) + \
+                (buy_sell_ratio * WEIGHT_BUYS_VS_SELLS)
+        
+        # Multiplicando por 100 para ter a pontuação em uma escala de 0 a 100
+        final_score = score * 100
+        
+        print(f"Análise de {attributes['name']}:")
+        print(f"  Volume (H1): ${volume_h1_usd:,.2f} -> Score: {normalized_volume * WEIGHT_VOLUME * 100:.2f}")
+        print(f"  Variação (H1): {price_change_h1:.2f}% -> Score: {normalized_price_change * WEIGHT_PRICE_CHANGE * 100:.2f}")
+        print(f"  Compras/Vendas: {buy_sell_ratio:.2f} -> Score: {buy_sell_ratio * WEIGHT_BUYS_VS_SELLS * 100:.2f}")
+        print(f"  Pontuação Final: {final_score:.2f}\n")
+        
+        return final_score
+    
+    except (KeyError, TypeError, ValueError) as e:
+        print(f"Erro ao analisar a moeda {attributes.get('name', 'N/A')}: {e}")
         return 0
-
+        
 async def find_best_coin_to_trade(pair_info):
     """
     Analisa uma única moeda aprovada, calcula sua pontuação e retorna seus detalhes.
@@ -838,6 +852,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
