@@ -367,7 +367,6 @@ def discover_and_filter_pairs(pages_to_scan=1):
 
     return filtered_pairs
         
-d# A função agora recebe a variável `pair_details` diretamente
 def analyze_and_score_coin(pair_details):
     """
     Analisa e pontua uma moeda com base em dados de volume, preço e transações.
@@ -905,6 +904,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
