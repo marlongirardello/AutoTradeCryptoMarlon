@@ -367,7 +367,7 @@ def discover_and_filter_pairs(pages_to_scan=1):
 
     return filtered_pairs
         
-def analyze_and_score_coin(self, pair):
+def analyze_and_score_coin(pair):
     """
     Analisa e pontua uma moeda com base em dados de volume, preço e transações.
     Uma pontuação mais alta indica um potencial de momentum maior.
@@ -873,6 +873,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
