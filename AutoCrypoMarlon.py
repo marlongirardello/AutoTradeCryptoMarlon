@@ -77,7 +77,7 @@ bot_running = False
 periodic_task = None
 
 in_position = False
-entry_price = 0.0
+entry_price = 0.0 # Initialize entry_price
 
 sell_fail_count = 0
 buy_fail_count = 0
@@ -504,7 +504,7 @@ async def execute_buy_order(amount, price, pair_details, manual=False, reason="S
 
     if tx_sig:
         in_position = True
-        entry_price = price
+        entry_price = price # Set entry_price on successful buy
         automation_state["position_opened_timestamp"] = time.time()
         sell_fail_count = 0
         buy_fail_count = 0
@@ -578,7 +578,7 @@ async def execute_sell_order(reason=""):
             await send_telegram_message(log_message)
 
             in_position = False
-            entry_price = 0.0
+            entry_price = 0.0 # Reset entry_price on successful sell
             automation_state["position_opened_timestamp"] = 0
 
             # --- Adicionar a lógica de penalização para Take Profit ---
@@ -665,7 +665,8 @@ async def check_velocity_strategy():
             await execute_buy_order(parameters["amount"], price, pair_details, reason=reason)
 
             # Define o estado do bot para "em posição" para parar de comprar
-            in_position = True
+            # in_position is set in execute_buy_order
+
         else:
             logger.info(f"❌ Sinal para {symbol} não encontrado. Continuará monitorando.")
 
@@ -675,7 +676,7 @@ async def check_velocity_strategy():
 
 async def manage_position():
     """Gerencia a posição de trade, checando Take Profit e Stop Loss."""
-    global in_position, automation_state
+    global in_position, automation_state, entry_price
 
     pair_details = automation_state.get("current_target_pair_details")
 
@@ -684,10 +685,11 @@ async def manage_position():
 
     target_address = pair_details.get('pairAddress')
     symbol = pair_details.get('baseToken', {}).get('symbol', 'N/A')
-    buy_price = automation_state.get("entry_price") # Use entry_price from global state
+    buy_price = entry_price # Use entry_price from global state
 
-    if buy_price is None:
-         logger.error("entry_price não definido, não é possível gerenciar a posição.")
+    if buy_price is None or buy_price == 0.0: # Check if entry_price is set and not zero
+         logger.error(f"manage_position: entry_price não definido ou é zero ({buy_price}), não é possível gerenciar a posição.")
+         # Consider adding logic here to exit the position if entry_price is invalid
          return
 
     # Obtém os valores de Take Profit e Stop Loss da configuração
@@ -722,7 +724,7 @@ async def manage_position():
             await send_telegram_message(msg)
             await execute_sell_order(reason="Take Profit Atingido")
             # Reseta o estado do bot após a venda
-            in_position = False
+            # in_position and entry_price are reset in execute_sell_order
             automation_state["current_target_pair_details"] = None
             automation_state["current_target_pair_address"] = None # Reset target after selling
 
@@ -732,7 +734,7 @@ async def manage_position():
             await send_telegram_message(msg)
             await execute_sell_order(reason="Stop Loss Atingido")
             # Reseta o estado do bot após a venda
-            in_position = False
+            # in_position and entry_price are reset in execute_sell_order
             automation_state["current_target_pair_details"] = None
             automation_state["current_target_pair_address"] = None # Reset target after selling
         else:
@@ -760,6 +762,8 @@ async def autonomous_loop():
     global automation_state, in_position
 
     logger.info("Loop autônomo iniciado.")
+    automation_state["is_running"] = True # Ensure is_running is True when loop starts
+
     while automation_state.get("is_running", False):
         try:
             now = time.time()
@@ -849,10 +853,27 @@ async def set_params(update, context):
 
 async def run_bot(update, context):
     """Inicia o loop de trade autônomo."""
-    global automation_state
+    global automation_state, in_position, entry_price
     if automation_state.get("is_running", False):
         await update.effective_message.reply_text("✅ O bot já está em execução.")
         return
+
+    # Ensure a clean state before starting
+    in_position = False
+    entry_price = 0.0
+    automation_state.update(
+        current_target_pair_address=None,
+        current_target_symbol=None,
+        current_target_pair_details=None,
+        position_opened_timestamp=0,
+        target_selected_timestamp=0,
+        checking_volatility=False,
+        volatility_check_start_time=0,
+        penalty_box={},
+        discovered_pairs={},
+        took_profit_pairs=set()
+    )
+
 
     automation_state["is_running"] = True
     automation_state["task"] = asyncio.create_task(autonomous_loop()) # <-- ESTA LINHA FOI RE-ADICIONADA
@@ -866,7 +887,7 @@ async def run_bot(update, context):
 
 async def stop_bot(update, context):
     """Para o loop de trade autônomo e cancela a tarefa em execução."""
-    global automation_state, in_position
+    global automation_state, in_position, entry_price
 
     if not automation_state.get("is_running", False):
         await update.effective_message.reply_text("O bot já está parado."); return
@@ -882,18 +903,27 @@ async def stop_bot(update, context):
         await execute_sell_order("Parada manual do bot")
 
     # Limpa o estado para um reinício limpo
+    in_position = False
+    entry_price = 0.0 # Explicitly reset entry_price
     automation_state.update(
         current_target_pair_address=None,
         current_target_symbol=None,
+        current_target_pair_details=None,
         position_opened_timestamp=0,
         target_selected_timestamp=0,
-        checking_volatility=False
+        checking_volatility=False,
+        volatility_check_start_time=0,
+        penalty_box={},
+        discovered_pairs={},
+        took_profit_pairs=set()
     )
+
 
     logger.info("Bot de trade parado.")
     await update.effective_message.reply_text("🛑 Bot parado. Todas as tarefas e posições foram finalizadas.")
 
 async def manual_buy(update, context):
+    global in_position, entry_price
     if not automation_state.get("is_running", False):
         await update.effective_message.reply_text("⚠️ O bot precisa estar em execução. Use /run primeiro.")
         return
@@ -915,6 +945,7 @@ async def manual_buy(update, context):
             await update.effective_message.reply_text(f"Forçando compra manual de {amount} SOL em {pair_details['baseToken']['symbol']}...")
             # Pass the price in USD to execute_buy_order
             await execute_buy_order(amount, price_usd, pair_details, manual=True, reason="Compra Manual Forçada")
+            # entry_price is set inside execute_buy_order if successful
         else:
             await update.effective_message.reply_text("⚠️ Não foi possível obter o preço atual para a compra.")
     except (IndexError, ValueError):
@@ -924,11 +955,14 @@ async def manual_buy(update, context):
         await update.effective_message.reply_text(f"⚠️ Erro ao executar compra manual: {e}")
 
 async def manual_sell(update, context):
+    global in_position, entry_price
     if not in_position:
         await update.effective_message.reply_text("⚠️ Nenhuma posição aberta para vender.")
         return
     await update.effective_message.reply_text("Forçando venda manual da posição atual...")
     await execute_sell_order(reason="Venda Manual Forçada")
+    # in_position and entry_price are reset inside execute_sell_order if successful
+
 
 # ---------------- Main ----------------
 def main():
