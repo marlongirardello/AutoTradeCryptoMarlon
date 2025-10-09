@@ -859,7 +859,7 @@ async def autonomous_loop():
 async def test_jupiter_api():
     """Testa a API de cotação da Jupiter com um par consolidado (SOL para USDC)."""
     sol_mint = "So11111111111111111111111111111111111111112"
-    usdc_mint = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v"
+    usdc_mint = "4w2cysotX6czaUGmmWg13hDpY4QEMG2CzeKYEQyK9Ama"
     # 0.1 SOL em lamports (1 SOL = 10^9 lamports)
     amount_in_lamports = 100000000
     slippage_bps = 50 # 0.5%
@@ -873,7 +873,7 @@ async def test_jupiter_api():
         f"slippageBps={slippage_bps}"
     )
 
-    logger.info(f"Iniciando teste de conexão com a API da Jupiter para SOL/USDC...")
+    logger.info(f"Iniciando teste de conexão com a API da Jupiter para SOL/TROLL...")
     logger.info(f"URL: {quote_url}")
 
     try:
@@ -888,7 +888,7 @@ async def test_jupiter_api():
 
             # Verifica se a resposta contém rotas (indica que é negociável)
             if quote_response and quote_response.get('routes'): # Use 'routes' instead of 'routesInfos' for v6
-                logger.info("👍 A API da Jupiter retornou rotas de negociação para SOL/USDC. A API está funcional.")
+                logger.info("👍 A API da Jupiter retornou rotas de negociação para SOL/TROLL. A API está funcional.")
             else:
                 logger.warning("⚠️ A API da Jupiter não retornou rotas de negociação para SOL/USDC. Pode haver um problema com a API ou o par de teste.")
 
@@ -1057,3 +1057,4 @@ if __name__ == '__main__':
     # Para executar a função main assíncrona
     asyncio.run(main())
     
+
