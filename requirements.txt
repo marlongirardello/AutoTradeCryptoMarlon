@@ -7,3 +7,4 @@ solders>=0.26.0  # Mantenha esta linha
 solana>=0.33.0  # Altere para a versão mais recente e compatível
 numpy
 Flask
+requests
