@@ -679,7 +679,7 @@ async def manage_position():
             msg = f"🟢 **TAKE PROFIT ATINGIDO!** Vendendo **{pair_details['attributes']['name']}** com lucro."
             logger.info(msg.replace("**", ""))
             await send_telegram_message(msg)
-            # await execute_sell_order() # Substitua por sua função de venda
+            await execute_sell_order()
             # Reseta o estado do bot após a venda
             in_position = False
             automation_state["current_target_pair_address"] = None
@@ -688,7 +688,7 @@ async def manage_position():
             msg = f"🔴 **STOP LOSS ATINGIDO!** Vendendo **{pair_details['attributes']['name']}** para limitar o prejuízo."
             logger.info(msg.replace("**", ""))
             await send_telegram_message(msg)
-            # await execute_sell_order() # Substitua por sua função de venda
+            await execute_sell_order()
             # Reseta o estado do bot após a venda
             in_position = False
             automation_state["current_target_pair_address"] = None
@@ -889,6 +889,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
