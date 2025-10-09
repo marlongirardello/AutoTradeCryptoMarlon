@@ -8,7 +8,6 @@ from base64 import b64decode
 import httpx
 import pandas as pd
 from collections import Counter
-import json # Importar a biblioteca json
 
 from solders.pubkey import Pubkey
 from solders.keypair import Keypair
@@ -31,19 +30,10 @@ app = Flask('')
 def home():
     return "Bot is alive!"
 def run_server():
-  # IMPORTANTE: Se estiver rodando o bot com asyncio.run(main()), a linha abaixo *NÃO* deve estar ativa (comentada ou removida).
-  # Ela inicia um loop de eventos do Flask que entra em conflito com o loop do asyncio do bot,
-  # causando o erro "RuntimeError: This event loop is already running".
-  # Em ambientes de deploy como Koyeb, a plataforma geralmente inicia e gerencia seu servidor Flask.
-  # Portanto, esta linha é geralmente desnecessária neste contexto quando o bot asyncio também está rodando.
-  # app.run(host='0.0.0.0',port=8000) # Mantenha esta linha comentada se usar asyncio.run(main())
-    pass # Manter a função, mas sem app.run() ativo para evitar o conflito com asyncio.run
-
+  app.run(host='0.0.0.0',port=8000)
 def keep_alive():
-    # Mantido conforme a sua preferência. Note que run_server() não deve chamar app.run() se main() usar asyncio.run().
     t = Thread(target=run_server)
     t.start()
-
 # --- FIM DO CÓDIGO DO SERVIDOR ---
 
 # ---------------- Configuração ----------------
@@ -999,12 +989,9 @@ async def manual_sell(update, context):
 
 
 # ---------------- Main ----------------
-async def main():
+def main():
     global application
-    # A função keep_alive é mantida aqui, mas certifique-se de que app.run() em run_server não esteja ativo
-    # se estiver usando asyncio.run(main()). A plataforma de deploy (Koyeb) deve gerenciar o servidor Flask.
     keep_alive()
-
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("set", set_params))
@@ -1013,9 +1000,7 @@ async def main():
     application.add_handler(CommandHandler("buy", manual_buy))
     application.add_handler(CommandHandler("sell", manual_sell))
     logger.info("Bot do Telegram iniciado e aguardando comandos...")
-    # Use run_polling sem asyncio_mode, pois versões recentes integram automaticamente com asyncio
     application.run_polling()
 
 if __name__ == '__main__':
-    # Para executar a função main assíncrona
-    asyncio.run(main())
+    main()
