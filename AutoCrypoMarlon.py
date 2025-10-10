@@ -127,61 +127,70 @@ async def execute_swap(input_mint_str, output_mint_str, amount, input_decimals, 
     logger.info(f"Iniciando swap de {amount} do token {input_mint_str} para {output_mint_str} com slippage de {slippage_bps} BPS e limite computacional dinâmico.")
     amount_wei = int(amount * (10**input_decimals))
 
-    async with httpx.AsyncClient() as client:
-        try:
-            # Atualizado para o novo endpoint da Jupiter
-            quote_url = f"https://lite-api.jup.ag/swap/v1/quote?inputMint={input_mint_str}&outputMint={output_mint_str}&amount={amount_wei}&slippageBps={slippage_bps}&maxAccounts=64"
-            quote_res = await client.get(quote_url, timeout=60.0)
-            quote_res.raise_for_status()
-            quote_response = quote_res.json()
+    max_retries = 5
+    for attempt in range(max_retries):
+        async with httpx.AsyncClient() as client:
+            try:
+                # Atualizado para o novo endpoint da Jupiter
+                quote_url = f"https://lite-api.jup.ag/swap/v1/quote?inputMint={input_mint_str}&outputMint={output_mint_str}&amount={amount_wei}&slippageBps={slippage_bps}&maxAccounts=64"
+                quote_res = await client.get(quote_url, timeout=60.0)
+                quote_res.raise_for_status()
+                quote_response = quote_res.json()
 
-            swap_payload = {
-                "userPublicKey": str(payer.pubkey()),
-                "quoteResponse": quote_response,
-                "wrapAndUnwrapSol": True,
-                "dynamicComputeUnitLimit": True,
-                "prioritizationFeeLamports": {
-                    "priorityLevelWithMaxLamports": {
-                        "maxLamports": 10000000,
-                        "priorityLevel": "veryHigh"
+                swap_payload = {
+                    "userPublicKey": str(payer.pubkey()),
+                    "quoteResponse": quote_response,
+                    "wrapAndUnwrapSol": True,
+                    "dynamicComputeUnitLimit": True,
+                    "prioritizationFeeLamports": {
+                        "priorityLevelWithMaxLamports": {
+                            "maxLamports": 10000000,
+                            "priorityLevel": "veryHigh"
+                        }
                     }
                 }
-            }
 
-            # Atualizado para o novo endpoint da Jupiter
-            swap_url = "https://lite-api.jup.ag/swap/v1/swap"
-            swap_res = await client.post(swap_url, json=swap_payload, timeout=60.0)
-            swap_res.raise_for_status()
-            swap_response = swap_res.json()
-            swap_tx_b64 = swap_response.get('swapTransaction')
-            if not swap_tx_b64:
-                logger.error(f"Erro na API da Jupiter: {swap_response}"); return None
+                # Atualizado para o novo endpoint da Jupiter
+                swap_url = "https://lite-api.jup.ag/swap/v1/swap"
+                swap_res = await client.post(swap_url, json=swap_payload, timeout=60.0)
+                swap_res.raise_for_status()
+                swap_response = swap_res.json()
+                swap_tx_b64 = swap_response.get('swapTransaction')
+                if not swap_tx_b64:
+                    logger.error(f"Erro na API da Jupiter: {swap_response}"); return None
 
-            raw_tx_bytes = b64decode(swap_tx_b64)
-            swap_tx = VersionedTransaction.from_bytes(raw_tx_bytes)
-            # assinatura com solders - use to_bytes_versioned
-            signature = payer.sign_message(to_bytes_versioned(swap_tx.message))
-            signed_tx = VersionedTransaction.populate(swap_tx.message, [signature])
+                raw_tx_bytes = b64decode(swap_tx_b64)
+                swap_tx = VersionedTransaction.from_bytes(raw_tx_bytes)
+                # assinatura com solders - use to_bytes_versioned
+                signature = payer.sign_message(to_bytes_versioned(swap_tx.message))
+                signed_tx = VersionedTransaction.populate(swap_tx.message, [signature])
 
-            tx_opts = TxOpts(skip_preflight=True, preflight_commitment="processed")
-            # send_raw_transaction espera bytes
-            tx_signature = solana_client.send_raw_transaction(bytes(signed_tx), opts=tx_opts).value
+                tx_opts = TxOpts(skip_preflight=True, preflight_commitment="processed")
+                # send_raw_transaction espera bytes
+                tx_signature = solana_client.send_raw_transaction(bytes(signed_tx), opts=tx_opts).value
 
-            logger.info(f"Transação enviada: {tx_signature}")
+                logger.info(f"Transação enviada: {tx_signature}")
 
-            # tentativa de confirmação
-            try:
-                solana_client.confirm_transaction(tx_signature, commitment="confirmed")
-                logger.info(f"Transação confirmada: https://solscan.io/tx/{tx_signature}")
-                return str(tx_signature)
-            except Exception as confirm_e:
-                logger.error(f"Transação enviada, mas falha na confirmação: {confirm_e}")
-                return None
+                # tentativa de confirmação
+                try:
+                    solana_client.confirm_transaction(tx_signature, commitment="confirmed")
+                    logger.info(f"Transação confirmada: https://solscan.io/tx/{tx_signature}")
+                    return str(tx_signature) # Success
+                except Exception as confirm_e:
+                    logger.error(f"Transação enviada, mas falha na confirmação: {confirm_e}")
+                    # Confirmation failed, but transaction might still go through.
+                    # For simplicity here, we treat this as a failure to trigger retry or main loop retry.
+                    pass # Let the outer loop handle retries if tx_sig is None
 
-        except Exception as e:
-            logger.error(f"Falha na transação: {e}")
-            await send_telegram_message(f"⚠️ Falha na transação: {e}")
-            return None
+            except Exception as e:
+                logger.error(f"Falha na transação (tentativa {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(5) # Wait before retrying
+
+    logger.error(f"Falha na transação após {max_retries} tentativas.")
+    await send_telegram_message(f"⚠️ Falha na transação após {max_retries} tentativas: {e}")
+    return None # Return None if all retries fail
+
 
 async def calculate_dynamic_slippage(pair_address):
     logger.info(f"Calculando slippage dinâmico para {pair_address} com base na volatilidade...")
@@ -548,6 +557,8 @@ async def execute_sell_order(reason="", sell_price=None):
 
     pair_details = automation_state.get('current_target_pair_details', {})
     symbol = pair_details.get('baseToken', {}).get('symbol', 'TOKEN')
+    pair_address = pair_details.get('pairAddress')
+
     logger.info(f"EXECUTANDO ORDEM DE VENDA de {symbol}. Motivo: {reason}")
     try:
         token_mint_pubkey = Pubkey.from_string(pair_details['baseToken']['address'])
@@ -559,23 +570,19 @@ async def execute_sell_order(reason="", sell_price=None):
             token_balance_data = balance_response.value
         else:
             logger.error(f"Erro ao obter saldo do token {symbol}: Resposta RPC inválida.")
+            # Increment fail count and notify, but don't abandon position yet
             sell_fail_count += 1
-            if sell_fail_count >= 100:
-                logger.error(f"ATINGIDO LIMITE DE {sell_fail_count} FALHAS DE VENDA. RESETANDO POSIÇÃO.")
-                await send_telegram_message(f"⚠️ Limite de {sell_fail_count} falhas de venda para **{symbol}** atingido. Posição abandonada.")
-                in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0
-                if automation_state.get('current_target_pair_address'):
-                    automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 100
-                    automation_state["current_target_pair_address"] = None
-                    await send_telegram_message(f"⚠️ **{symbol}** foi penalizada por 100 ciclos após {sell_fail_count} falhas de venda.") # Adjusted message
-                sell_fail_count = 0
-            await send_telegram_message(f"⚠️ Erro ao obter saldo do token {symbol}. A venda falhou. Tentativa {sell_fail_count}/100.")
-            return
+            await send_telegram_message(f"⚠️ Erro ao obter saldo do token {symbol}. A venda falhou. Tentativa {sell_fail_count}/100. O bot tentará novamente.")
+            return # Return without changing position state
 
         amount_to_sell = token_balance_data.ui_amount
         if amount_to_sell is None or amount_to_sell == 0:
             logger.warning("Tentativa de venda com saldo zero, resetando posição.")
-            in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0; automation_state["current_target_pair_address"] = None
+            # Reset position state as there's nothing to sell
+            in_position = False
+            entry_price = 0.0
+            automation_state["position_opened_timestamp"] = 0
+            automation_state["current_target_pair_address"] = None
             sell_fail_count = 0
             return
 
@@ -597,27 +604,25 @@ async def execute_sell_order(reason="", sell_price=None):
             logger.info(log_message)
             await send_telegram_message(log_message)
 
+            # Successfully sold, reset position and fail counts
             in_position = False
-            entry_price = 0.0 # Reset entry_price on successful sell
+            entry_price = 0.0
             automation_state["position_opened_timestamp"] = 0
 
-            # --- Add penalty logic for Take Profit, Stop Loss, and Timeout ---
-            if automation_state.get('current_target_pair_address'):
-                # Penalize the coin to not re-enter for a while
-                # Check the reason for selling and apply penalty accordingly
+            # Apply penalty based on reason
+            if pair_address:
                 if "Take Profit" in reason:
-                    automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 100 # Increased penalty for TP
+                    automation_state["penalty_box"][pair_address] = 100 # Increased penalty for TP
                     await send_telegram_message(f"💰 **{symbol}** atingiu o Take Profit e foi penalizada por 100 ciclos.")
                 elif "Stop Loss" in reason:
-                     automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 100 # Standard penalty for SL
+                     automation_state["penalty_box"][pair_address] = 100 # Standard penalty for SL
                      await send_telegram_message(f"⚠️ **{symbol}** atingiu o Stop Loss e foi penalizada por 100 ciclos.")
-                elif "Timeout" in reason: # Added penalty for Timeout
-                    automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 100 # Standard penalty for Timeout
+                elif "Timeout" in reason:
+                    automation_state["penalty_box"][pair_address] = 100 # Standard penalty for Timeout
                     await send_telegram_message(f"⏰ **{symbol}** atingiu o Timeout e foi penalizada por 100 ciclos.")
-                elif "Parada manual" in reason: # Added penalty for Manual Stop
-                    automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10 # Lower penalty for Manual Stop
+                elif "Parada manual" in reason:
+                    automation_state["penalty_box"][pair_address] = 10 # Lower penalty for Manual Stop
                     await send_telegram_message(f"✋ **{symbol}** foi vendida manualmente e penalizada por 10 ciclos.")
-
 
                 automation_state["current_target_pair_address"] = None # Reset target after selling
 
@@ -625,30 +630,42 @@ async def execute_sell_order(reason="", sell_price=None):
             sell_fail_count = 0
             buy_fail_count = 0
         else:
-            logger.error(f"FALHA NA VENDA do token {symbol}. Tentativa {sell_fail_count+1}/100.")
+            # This block is reached if execute_swap returns None after retries
+            logger.error(f"FALHA NA VENDA do token {symbol} após retentativas. Tentativa {sell_fail_count+1}/100.")
             sell_fail_count += 1
-            if sell_fail_count >= 100:
+            await send_telegram_message(f"❌ FALHA NA VENDA do token {symbol} após retentativas. Tentativa {sell_fail_count}/100. O bot tentará novamente.")
+
+            if sell_fail_count >= 100: # Check limit AFTER incrementing
                 logger.error(f"ATINGIDO LIMITE DE {sell_fail_count} FALHAS DE VENDA. RESETANDO POSIÇÃO.")
                 await send_telegram_message(f"⚠️ Limite de {sell_fail_count} falhas de venda para **{symbol}** atingido. Posição abandonada.")
-                in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0
-                if automation_state.get('current_target_pair_address'):
-                    automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10
-                    automation_state["current_target_pair_address"] = None
-                    await send_telegram_message(f"⚠️ **{symbol}** foi penalizada por 10 ciclos após {sell_fail_count} falhas de venda.") # Adjusted message
-                sell_fail_count = 0
-            await send_telegram_message(f"❌ FALHA NA VENDA do token {symbol}. Tentativa {sell_fail_count}/100. O bot tentará novamente.")
+                # Abandon position and penalize on hitting the limit
+                in_position = False
+                entry_price = 0.0
+                automation_state["position_opened_timestamp"] = 0
+                if pair_address:
+                    automation_state["penalty_box"][pair_address] = 100 # Penalize heavily on final failure
+                    await send_telegram_message(f"⚠️ **{symbol}** foi penalizada por 100 ciclos após {sell_fail_count} falhas de venda.")
+                automation_state["current_target_pair_address"] = None
+                sell_fail_count = 0 # Reset fail count after abandoning
 
     except Exception as e:
         logger.error(f"Erro crítico ao vender {symbol}: {e}")
+        # Increment fail count and notify, but don't abandon position immediately on critical error
         sell_fail_count += 1
+        await send_telegram_message(f"⚠️ Erro crítico ao vender {symbol}: {e}. Tentativa {sell_fail_count}/100. O bot permanecerá em posição.")
+        # Abandon position and penalize only if critical errors also hit the limit
         if sell_fail_count >= 100:
-            logger.error(f"ATINGIDO LIMITE DE {sell_fail_count} FALHAS DE VENDA. RESETANDO POSIÇÃO.")
-            await send_telegram_message(f"⚠️ Limite de {sell_fail_count} falhas de venda para **{symbol}** atingido. Posição abandonada.")
-            in_position = False; entry_price = 0.0; automation_state["position_opened_timestamp"] = 0
-            if automation_state.get('current_target_pair_address'):
-                automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10
-                automation_state["current_target_pair_address"] = None
-                await send_telegram_message(f"⚠️ Erro crítico ao vender {symbol}: {e}. Tentativa {sell_fail_count}/100. O bot permanecerá em posição.")
+             logger.error(f"ATINGIDO LIMITE DE {sell_fail_count} FALHAS DE VENDA. RESETANDO POSIÇÃO.")
+             await send_telegram_message(f"⚠️ Limite de {sell_fail_count} falhas de venda para **{symbol}** atingido. Posição abandonada.")
+             in_position = False
+             entry_price = 0.0
+             automation_state["position_opened_timestamp"] = 0
+             if pair_address:
+                 automation_state["penalty_box"][pair_address] = 100 # Penalize heavily on critical error leading to abandonment
+                 await send_telegram_message(f"⚠️ **{symbol}** foi penalizada por 100 ciclos após {sell_fail_count} falhas de venda.")
+             automation_state["current_target_pair_address"] = None
+             sell_fail_count = 0 # Reset fail count after abandoning
+
 
 # ---------------- Estratégia velocity / momentum & adaptive timeout ----------------
 import time
@@ -705,7 +722,7 @@ async def check_velocity_strategy():
 
 async def manage_position():
     """Gerencia a posição de trade, checando Take Profit, Stop Loss e Timeout."""
-    global in_position, automation_state, entry_price
+    global in_position, automation_state, entry_price, sell_fail_count
 
     pair_details = automation_state.get("current_target_pair_details")
 
@@ -740,6 +757,19 @@ async def manage_position():
         current_price = current_price_usd
         if current_price is None or current_price == 0:
             logger.warning(f"Não foi possível obter o preço atual em USD para {symbol}.")
+            # Increment sell_fail_count here as well if price fetch fails
+            sell_fail_count += 1
+            if sell_fail_count >= 100: # Check if price fetch failures exceed limit
+                logger.error(f"ATINGIDO LIMITE DE {sell_fail_count} FALHAS AO OBTER PREÇO. RESETANDO POSIÇÃO.")
+                await send_telegram_message(f"⚠️ Limite de {sell_fail_count} falhas ao obter preço para **{symbol}** atingido. Posição abandonada.")
+                in_position = False
+                entry_price = 0.0
+                automation_state["position_opened_timestamp"] = 0
+                if automation_state.get('current_target_pair_address'):
+                    automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 100 # Penalize heavily on final failure
+                    await send_telegram_message(f"⚠️ **{symbol}** foi penalizada por 100 ciclos após {sell_fail_count} falhas ao obter preço.")
+                automation_state["current_target_pair_address"] = None
+                sell_fail_count = 0 # Reset fail count after abandoning
             return
 
         # Calcula os preços de TP e SL com base no preço de compra (em USD)
@@ -756,40 +786,46 @@ async def manage_position():
             logger.info(msg.replace("**", ""))
             await send_telegram_message(msg)
             await execute_sell_order(reason="Take Profit Atingido", sell_price=current_price)
-            # Reseta o estado do bot após a venda
-            # in_position and entry_price are reset in execute_sell_order
-            automation_state["current_target_pair_details"] = None
-            automation_state["current_target_pair_address"] = None # Reset target after selling
-            automation_state["took_profit_pairs"].add(pair_details.get('pairAddress')) # Add pair to took_profit_pairs
-
+            # execute_sell_order will handle state reset and penalty if successful
 
         elif current_price <= stop_loss_price:
             msg = f"🔴 **STOP LOSS ATINGIDO!** Vendendo **{symbol}** para limitar o prejuízo."
             logger.info(msg.replace("**", ""))
             await send_telegram_message(msg)
             await execute_sell_order(reason="Stop Loss Atingido", sell_price=current_price)
-            # Reseta o estado do bot após a venda
-            # in_position and entry_price are reset in execute_sell_order
-            automation_state["current_target_pair_details"] = None
-            automation_state["current_target_pair_address"] = None # Reset target after selling
+            # execute_sell_order will handle state reset and penalty if successful
 
         elif position_duration >= timeout_seconds:
             msg = f"⏰ **TIMEOUT!** Posição em **{symbol}** aberta por mais de {timeout_seconds/60:.0f} minutos. Vendendo."
             logger.info(msg.replace("**", ""))
             await send_telegram_message(msg)
             await execute_sell_order(reason=f"Timeout de {timeout_seconds/60:.0f} minutos", sell_price=current_price)
-            # Reseta o estado do bot após a venda
-            # in_position and entry_price are reset in execute_sell_order
-            automation_state["current_target_pair_details"] = None
-            automation_state["current_target_pair_address"] = None # Reset target after selling
+            # execute_sell_order will handle state reset and penalty if successful
 
         else:
             # Continua monitorando a posição
             logger.info(f"Monitorando {symbol} | Preço atual (USD): ${current_price:,.8f} | TP: ${take_profit_price:,.8f} | SL: ${stop_loss_price:,.8f} | Tempo em posição: {position_duration:.0f}s")
+            # Reset sell_fail_count if monitoring is successful (price fetched)
+            sell_fail_count = 0
+
 
     except Exception as e:
         logger.error(f"Erro em manage_position: {e}", exc_info=True)
-        # Em caso de erro, o bot não trava e continua a checagem no próximo ciclo
+        # Increment sell_fail_count for unhandled exceptions in manage_position
+        sell_fail_count += 1
+        await send_telegram_message(f"⚠️ Erro em manage_position para {symbol}: {e}. Tentativa {sell_fail_count}/100. O bot permanecerá em posição.")
+        if sell_fail_count >= 100: # Check limit AFTER incrementing
+             logger.error(f"ATINGIDO LIMITE DE {sell_fail_count} ERROS EM manage_position. RESETANDO POSIÇÃO.")
+             await send_telegram_message(f"⚠️ Limite de {sell_fail_count} erros em manage_position para **{symbol}** atingido. Posição abandonada.")
+             in_position = False
+             entry_price = 0.0
+             automation_state["position_opened_timestamp"] = 0
+             if automation_state.get('current_target_pair_address'):
+                 automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 100 # Penalize heavily on final failure
+                 await send_telegram_message(f"⚠️ **{symbol}** foi penalizada por 100 ciclos após {sell_fail_count} erros em manage_position.")
+             automation_state["current_target_pair_address"] = None
+             sell_fail_count = 0 # Reset fail count after abandoning
+
 
 # ---------------- Loop autônomo completo ----------------
 async def get_pair_details(pair_address):
@@ -847,10 +883,12 @@ async def autonomous_loop():
                     for gecko_pair in gecko_approved_pairs:
                         pair_details = gecko_pair
                         pair_address = pair_details.get('pairAddress')
+                        symbol = pair_details.get('baseToken', {}).get('symbol', 'N/A')
+                        logger.info(f"Analisando par: {symbol} ({pair_address})") # Log for each analyzed pair
 
                         # Check if the pair is in the penalty box
                         if pair_address in automation_state["penalty_box"]:
-                            logger.info(f"Pulando par penalizado: {pair_details.get('baseToken', {}).get('symbol', 'N/A')} ({pair_address}). Ciclos restantes: {automation_state['penalty_box'][pair_address]}")
+                            logger.info(f"Pulando par penalizado: {symbol} ({pair_address}). Ciclos restantes: {automation_state['penalty_box'][pair_address]}")
                             continue
 
                         score = analyze_and_score_coin(pair_details)
@@ -864,6 +902,7 @@ async def autonomous_loop():
                         automation_state["current_target_pair_details"] = best_pair_details
                         automation_state["current_target_pair_address"] = best_pair_details["pairAddress"]
                         automation_state["target_selected_timestamp"] = now
+                        analyze_and_score_coin(best_pair_details) # Explicitly call to print scoring
 
                         msg = f"🎯 **Novo Alvo:** {best_pair_details['baseToken']['symbol']} (Score={best_score:.2f}). Iniciando monitoramento do gatilho..."
                         logger.info(msg.replace("**", ""))
