@@ -706,27 +706,29 @@ async def check_velocity_strategy():
 
 
     try:
-        # Puxa os dados das últimas 2 velas de 1 minuto
-        df_1m = await fetch_geckoterminal_ohlcv(target_address, "1m", limit=2)
+        # Puxa os dados das últimas 5 velas de 1 minuto
+        df_1m = await fetch_geckoterminal_ohlcv(target_address, "1m", limit=5)
 
-        if df_1m is None or df_1m.empty or len(df_1m) < 2:
-            logger.warning(f"Dados OHLCV insuficientes para {symbol} (necessário 2 velas). Tentando novamente.")
+        if df_1m is None or df_1m.empty or len(df_1m) < 5:
+            logger.warning(f"Dados OHLCV insuficientes para {symbol} (necessário 5 velas). Tentando novamente.")
             return
 
-        # Verifica se as últimas 2 velas de 1 minuto são positivas (fechamento > abertura)
-        is_positive_candle_1 = df_1m['close'].iloc[-1] > df_1m['open'].iloc[-1]
-        is_positive_candle_2 = df_1m['close'].iloc[-2] > df_1m['open'].iloc[-2] # Check the second to last candle
+        # Verifica se as últimas 5 velas de 1 minuto são positivas (fechamento > abertura)
+        # Check if all of the last 5 candles are positive
+        all_positive_candles = all(df_1m['close'].iloc[-5:] > df_1m['open'].iloc[-5:])
+
 
         # Loga a análise para visibilidade
-        logger.info(f"🕵️ Monitorando {symbol}: Última vela de 1 minuto está {'positiva' if is_positive_candle_1 else 'negativa'}. Vela anterior está {'positiva' if is_positive_candle_2 else 'negativa'}.")
+        logger.info(f"🕵️ Monitorando {symbol}: Últimas 5 velas de 1 minuto estão {'todas positivas' if all_positive_candles else 'nem todas positivas'}.")
 
-        # Se ambas as velas forem positivas, dispara o gatilho de compra
-        if is_positive_candle_1 and is_positive_candle_2:
+
+        # Se todas as 5 velas forem positivas, dispara o gatilho de compra
+        if all_positive_candles:
             # Obtém o preço da última vela de 1 minuto para usar na compra
             price = df_1m['close'].iloc[-1]
-            reason = "Gatilho de 2 velas positivas de 1m"
+            reason = "Gatilho de 5 velas positivas de 1m"
 
-            msg = f"✅ GATILHO ATINGIDO para **{symbol}**! Duas velas positivas de 1m confirmadas. Executando ordem de compra..."
+            msg = f"✅ GATILHO ATINGIDO para **{symbol}**! Cinco velas positivas de 1m confirmadas. Executando ordem de compra..."
             logger.info(msg.replace("**",""))
             await send_telegram_message(msg)
 
@@ -738,7 +740,7 @@ async def check_velocity_strategy():
             # in_position is set in execute_buy_order
 
         else:
-            logger.info(f"❌ Sinal para {symbol} não encontrado (necessita 2 velas positivas). Continuará monitorando.")
+            logger.info(f"❌ Sinal para {symbol} não encontrado (necessita 5 velas positivas). Continuará monitorando.")
 
     except Exception as e:
         logger.error(f"Erro em check_velocity_strategy: {e}", exc_info=True)
