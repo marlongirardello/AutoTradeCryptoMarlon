@@ -413,7 +413,7 @@ def analyze_and_score_coin(pair_details):
         # Pontuação 2: Variação de Preço
         price_change_score = 0
         if price_change_h1 >= 500:
-            price_change_score = 0 # Adjusted to 0 for >= 500% change
+            price_change_score = -30
         elif price_change_h1 >= 200:
             price_change_score = 20
         elif price_change_h1 >= 50:
@@ -1095,3 +1095,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
