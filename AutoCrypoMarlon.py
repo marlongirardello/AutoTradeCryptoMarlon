@@ -421,16 +421,21 @@ def analyze_and_score_coin(pair_details):
 
         # Pontuação 3: Compras vs. Vendas
         buys_sells_score = 0
-        if txns_h1_buys > 0:
-            buy_ratio = txns_h1_buys / (txns_h1_buys + txns_h1_sells)
-            if buy_ratio >= 0.8: # 90% ou mais de compras
-                buys_sells_score = 30
-            elif buy_ratio >= 0.7: # 80% ou mais de compras
-                buys_sells_score = 20
-            elif buy_ratio >= 0.6: # 70% ou mais de compras
-                buys_sells_score = 10
+        buy_ratio = 0 # Initialize buy_ratio outside the if block
+
+        if txns_h1_sells >= 100: # Check for minimum sell transactions
+            if txns_h1_buys > 0:
+                buy_ratio = txns_h1_buys / (txns_h1_buys + txns_h1_sells)
+                if buy_ratio >= 0.8: # 90% ou mais de compras
+                    buys_sells_score = 30
+                elif buy_ratio >= 0.7: # 80% ou mais de compras
+                    buys_sells_score = 20
+                elif buy_ratio >= 0.6: # 70% ou mais de compras
+                    buys_sells_score = 10
+            # If txns_h1_buys is 0 but txns_h1_sells >= 100, buy_ratio remains 0 and score is 0, which is correct.
         else:
-             buy_ratio = 0 # Evita divisão por zero se não houver compras
+            print(f"❌ Par {pair_details.get('baseToken', {}).get('symbol', 'N/A')} eliminado na pontuação: Menos de 100 vendas em 1h ({txns_h1_sells}).") # Log when excluded by this rule
+            buys_sells_score = 0 # Set score to 0 if minimum sells not met
 
         # Calculando a pontuação final
         final_score = volume_score + price_change_score + buys_sells_score
@@ -1113,4 +1118,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
