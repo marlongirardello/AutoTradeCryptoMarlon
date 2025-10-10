@@ -404,7 +404,7 @@ def analyze_and_score_coin(pair_details):
         # Pontuação 2: Variação de Preço
         price_change_score = 0
         if price_change_h1 >= 500:
-            price_change_score = 30
+            price_change_score = 0 # Adjusted to 0 for >= 500% change
         elif price_change_h1 >= 200:
             price_change_score = 20
         elif price_change_h1 >= 50:
@@ -614,6 +614,10 @@ async def execute_sell_order(reason="", sell_price=None):
                 elif "Timeout" in reason: # Added penalty for Timeout
                     automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 100 # Standard penalty for Timeout
                     await send_telegram_message(f"⏰ **{symbol}** atingiu o Timeout e foi penalizada por 100 ciclos.")
+                elif "Parada manual" in reason: # Added penalty for Manual Stop
+                    automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 10 # Lower penalty for Manual Stop
+                    await send_telegram_message(f"✋ **{symbol}** foi vendida manualmente e penalizada por 10 ciclos.")
+
 
                 automation_state["current_target_pair_address"] = None # Reset target after selling
 
@@ -816,6 +820,18 @@ async def autonomous_loop():
     while automation_state.get("is_running", False):
         try:
             now = time.time()
+
+            # Decrement penalty counts
+            pairs_to_remove = []
+            for pair_address in list(automation_state["penalty_box"].keys()):
+                automation_state["penalty_box"][pair_address] -= 1
+                if automation_state["penalty_box"][pair_address] <= 0:
+                    pairs_to_remove.append(pair_address)
+
+            for pair_address in pairs_to_remove:
+                del automation_state["penalty_box"][pair_address]
+                logger.info(f"Penalidade removida para o par: {pair_address}")
+
             # ------------------------------------------------------------------
             # ESTADO 1: CAÇA (Nenhum alvo selecionado)
             # ------------------------------------------------------------------
@@ -829,18 +845,21 @@ async def autonomous_loop():
 
                     # Analisa e pontua todas as moedas aprovadas
                     for gecko_pair in gecko_approved_pairs:
-                        # A função discover_and_filter_pairs já filtra e retorna detalhes completos da Dexscreener
-                        # então gecko_pair já é o dicionário completo esperado
                         pair_details = gecko_pair
+                        pair_address = pair_details.get('pairAddress')
 
-                        # Agora a moeda tem a estrutura de dados que as funções de trade esperam
+                        # Check if the pair is in the penalty box
+                        if pair_address in automation_state["penalty_box"]:
+                            logger.info(f"Pulando par penalizado: {pair_details.get('baseToken', {}).get('symbol', 'N/A')} ({pair_address}). Ciclos restantes: {automation_state['penalty_box'][pair_address]}")
+                            continue
+
                         score = analyze_and_score_coin(pair_details)
 
                         if score > best_score:
                             best_score = score
                             best_pair_details = pair_details
 
-                    # Se a melhor moeda tiver uma pontuação acima de 70, define como alvo
+                    # If the best coin has a score above 60 and is not in the penalty box, set it as target
                     if best_pair_details and best_score >= 60:
                         automation_state["current_target_pair_details"] = best_pair_details
                         automation_state["current_target_pair_address"] = best_pair_details["pairAddress"]
@@ -850,7 +869,7 @@ async def autonomous_loop():
                         logger.info(msg.replace("**", ""))
                         await send_telegram_message(msg)
                     else:
-                        msg = f"⚠️ Nenhuma moeda alcançou a pontuação mínima de 70. Reiniciando caça."
+                        msg = f"⚠️ Nenhuma moeda alcançou a pontuação mínima de 60 ou as moedas elegíveis estão penalizadas. Reiniciando caça."
                         logger.info(msg)
 
                 else:
