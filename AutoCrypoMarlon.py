@@ -413,7 +413,7 @@ def analyze_and_score_coin(pair_details):
         # Pontuação 2: Variação de Preço
         price_change_score = 0
         if price_change_h1 >= 500:
-            price_change_score = -30
+            price_change_score = 0 # Adjusted to 0 for >= 500% change
         elif price_change_h1 >= 200:
             price_change_score = 20
         elif price_change_h1 >= 50:
@@ -681,6 +681,24 @@ async def check_velocity_strategy():
 
     target_address = pair_details.get('pairAddress')
     symbol = pair_details.get('baseToken', {}).get('symbol', 'N/A')
+    target_selected_timestamp = automation_state.get("target_selected_timestamp", 0)
+
+    # Check if monitoring time exceeds 2 minutes (120 seconds)
+    now = time.time()
+    if now - target_selected_timestamp > 120:
+        logger.info(f"Monitoramento do alvo {symbol} ({target_address}) excedeu 2 minutos. Abandonando alvo e retornando à caça.")
+        await send_telegram_message(f"⏰ Monitoramento para **{symbol}** ({target_address}) excedeu o limite de 2 minutos. Abandonando alvo.")
+        # Penalize the coin for failing to trigger a buy within the time limit
+        if target_address:
+             automation_state["penalty_box"][target_address] = 60 # Penalize for 1 minute (adjust as needed)
+             await send_telegram_message(f"⚠️ **{symbol}** penalizada por 60 ciclos por não atingir gatilho de compra.")
+
+        automation_state["current_target_pair_address"] = None
+        automation_state["current_target_symbol"] = None
+        automation_state["current_target_pair_details"] = None
+        automation_state["target_selected_timestamp"] = 0 # Reset timestamp
+        return # Exit the function to go back to hunting state
+
 
     try:
         # Puxa os dados da última vela de 1 minuto
@@ -1095,4 +1113,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
