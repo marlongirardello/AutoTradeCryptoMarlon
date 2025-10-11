@@ -201,9 +201,9 @@ async def calculate_dynamic_slippage(pair_address):
     price_range = df['high'].max() - df['low'].min()
     volatility = (price_range / df['low'].min()) * 100 if df['low'].min() > 0 else 0
     if volatility > 10.0:
-        slippage_bps = 1000 # 10%
+        slippage_bps = 500 # 5%
     else:
-        slippage_bps = 500  # 5%
+        slippage_bps = 200  # 2%
     logger.info(f"Volatilidade ({volatility:.2f}%). Slippage definido para {slippage_bps/100:.2f}%.")
     return slippage_bps
 
@@ -1121,4 +1121,5 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
