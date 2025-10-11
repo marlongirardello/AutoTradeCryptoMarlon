@@ -688,11 +688,11 @@ async def check_velocity_strategy():
     symbol = pair_details.get('baseToken', {}).get('symbol', 'N/A')
     target_selected_timestamp = automation_state.get("target_selected_timestamp", 0)
 
-    # Check if monitoring time exceeds 2 minutes (120 seconds)
+    # Check if monitoring time exceeds 5 minutes (300 seconds)
     now = time.time()
-    if now - target_selected_timestamp > 120:
-        logger.info(f"Monitoramento do alvo {symbol} ({target_address}) excedeu 2 minutos. Abandonando alvo e retornando à caça.")
-        await send_telegram_message(f"⏰ Monitoramento para **{symbol}** ({target_address}) excedeu o limite de 2 minutos. Abandonando alvo.")
+    if now - target_selected_timestamp > 300:
+        logger.info(f"Monitoramento do alvo {symbol} ({target_address}) excedeu 5 minutos. Abandonando alvo e retornando à caça.")
+        await send_telegram_message(f"⏰ Monitoramento para **{symbol}** ({target_address}) excedeu o limite de 5 minutos. Abandonando alvo.")
         # Penalize the coin for failing to trigger a buy within the time limit
         if target_address:
              automation_state["penalty_box"][target_address] = 60 # Penalize for 1 minute (adjust as needed)
@@ -1121,3 +1121,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
