@@ -602,7 +602,7 @@ async def execute_sell_order(reason="", sell_price=None):
 
             log_message = (f"🛑 VENDA REALIZADA: {symbol}\n"
                            f"Motivo: {reason}\n"
-                           f"Lucro/Prejuízo: {profit_loss_percent:.2f}%\n" # Added P/L
+                           f"Lucro/Prejuízo: {profit_loss_percent:.2f}%\n | Entrada: {sell_price} | Saída: {entry_price} " # Added P/L
                            f"Slippage Usado: {slippage_bps/100:.2f}%\n"
                            f"Taxa de Prioridade: {parameters.get('priority_fee')} micro-lamports\n"
                            f"https://solscan.io/tx/{tx_sig}")
@@ -808,7 +808,7 @@ async def manage_position():
 
         # Checa as condições de venda (TP, SL, Timeout)
         if current_price >= take_profit_price:
-            msg = f"🟢 **TAKE PROFIT ATINGIDO!** Vendendo **{symbol}** com lucro."
+            msg = f"🟢 **TAKE PROFIT ATINGIDO!** Vendendo **{symbol}** com lucro. Valor Corrente: {current_price} Take Profit: {take_profit_price}"
             logger.info(msg.replace("**", ""))
             await send_telegram_message(msg)
             await execute_sell_order(reason="Take Profit Atingido", sell_price=current_price)
@@ -1121,6 +1121,7 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
 
