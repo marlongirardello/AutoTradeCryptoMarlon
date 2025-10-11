@@ -414,9 +414,9 @@ def analyze_and_score_coin(pair_details):
         price_change_score = 0
         if price_change_h1 >= 500:
             price_change_score = -30 # Adjusted to 0 for >= 500% change
-        elif price_change_h1 >= 200:
+        elif price_change_h1 >= 100:
             price_change_score = 20
-        elif price_change_h1 >= 50:
+        elif price_change_h1 >= 30:
             price_change_score = 10
 
         # Pontuação 3: Compras vs. Vendas
@@ -979,7 +979,7 @@ async def set_params(update, context):
     try:
         args = context.args
         amount, stop_loss, take_profit = float(args[0]), float(args[1]), float(args[2])
-        priority_fee = int(args[3]) if len(args) > 3 else 2000000
+        priority_fee = int(args[3]) if len(args) > 3 else 00
         parameters.update(amount=amount, stop_loss_percent=stop_loss, take_profit_percent=take_profit, priority_fee=priority_fee)
         await update.effective_message.reply_text(f"✅ Parâmetros definidos: amount={amount} SOL, stop={stop_loss}%, take_profit={take_profit}%, priority_fee={priority_fee}")
     except Exception:
@@ -1121,5 +1121,6 @@ def main():
 
 if __name__ == '__main__':
     main()
+
 
 
