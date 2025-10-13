@@ -197,7 +197,7 @@ async def calculate_dynamic_slippage(pair_address):
     df = await fetch_geckoterminal_ohlcv(pair_address, "1m", limit=5)
     if df is None or df.empty or len(df) < 5:
         logger.warning("Dados insuficientes. Usando slippage padrão (5.0%).")
-        return 500
+        return 500, 0 # Return default slippage and 0 volatility
     price_range = df['high'].max() - df['low'].min()
     volatility = (price_range / df['low'].min()) * 100 if df['low'].min() > 0 else 0
     if volatility > 10.0:
@@ -205,7 +205,7 @@ async def calculate_dynamic_slippage(pair_address):
     else:
         slippage_bps = 200  # 2%
     logger.info(f"Volatilidade ({volatility:.2f}%). Slippage definido para {slippage_bps/100:.2f}%.")
-    return slippage_bps
+    return slippage_bps, volatility # Return slippage and volatility
 
 # ---------------- Funções de dados reais (Dexscreener / Geckoterminal) ----------------
 async def get_pair_details(pair_address):
@@ -524,8 +524,21 @@ async def execute_buy_order(amount, price, pair_details, manual=False, reason="S
                 automation_state["current_target_pair_address"] = None
             return
 
+    # Calculate slippage and get volatility
+    slippage_bps, volatility = await calculate_dynamic_slippage(pair_details['pairAddress'])
 
-    slippage_bps = await calculate_dynamic_slippage(pair_details['pairAddress'])
+    # Check volatility before executing the swap
+    if volatility > 80:
+        logger.warning(f"Alta volatilidade ({volatility:.2f}%) para {pair_details['baseToken']['symbol']}. Abortando compra.")
+        await send_telegram_message(f"⚠️ Compra para **{pair_details['baseToken']['symbol']}** abortada devido à alta volatilidade ({volatility:.2f}%).")
+        if automation_state.get("current_target_pair_address"):
+             automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 60 # Penalize for high volatility
+             await send_telegram_message(f"⚠️ **{pair_details['baseToken']['symbol']}** penalizada por 60 ciclos devido à alta volatilidade.")
+
+        automation_state["current_target_pair_address"] = None # Reset target
+        return # Exit without executing swap
+
+
     logger.info(f"EXECUTANDO ORDEM DE COMPRA de {amount} SOL para {pair_details['baseToken']['symbol']} ao preço de {price}")
 
     tx_sig = await execute_swap(pair_details['quoteToken']['address'], pair_details['baseToken']['address'], amount, 9, slippage_bps)
@@ -591,7 +604,7 @@ async def execute_sell_order(reason="", sell_price=None):
             sell_fail_count = 0
             return
 
-        slippage_bps = await calculate_dynamic_slippage(pair_details['pairAddress'])
+        slippage_bps, _ = await calculate_dynamic_slippage(pair_details['pairAddress']) # Volatility not needed for sell slippage
         tx_sig = await execute_swap(pair_details['baseToken']['address'], pair_details['quoteToken']['address'], amount_to_sell, token_balance_data.decimals, slippage_bps)
 
         if tx_sig:
