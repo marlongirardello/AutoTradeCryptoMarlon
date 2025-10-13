@@ -532,14 +532,14 @@ async def execute_buy_order(amount, price, pair_details, manual=False, reason="S
 
     if tx_sig:
         in_position = True
-        entry_price = price # Set entry_price on successful buy
+        entry_price = price # Set entry_price on successful buy (in USD)
         automation_state["position_opened_timestamp"] = time.time()
         sell_fail_count = 0
         buy_fail_count = 0
         log_message = (f"✅ COMPRA REALIZADA: {amount} SOL para {pair_details['baseToken']['symbol']}\n"
                        f"Motivo: {reason}\n"
-                       f"Entrada: {price:.10f} | Alvo: {price * (1 + parameters['take_profit_percent']/100):.10f} | "
-                       f"Stop: {price * (1 - parameters['stop_loss_percent']/100):.10f}\n"
+                       f"Entrada (USD): ${price:.10f} | Alvo (USD): ${price * (1 + parameters['take_profit_percent']/100):.10f} | "
+                       f"Stop (USD): ${price * (1 - parameters['stop_loss_percent']/100):.10f}\n"
                        f"Slippage Usado: {slippage_bps/100:.2f}%\n"
                        f"Taxa de Prioridade: {parameters.get('priority_fee')} micro-lamports\n"
                        f"https://solscan.io/tx/{tx_sig}")
@@ -595,14 +595,15 @@ async def execute_sell_order(reason="", sell_price=None):
         tx_sig = await execute_swap(pair_details['baseToken']['address'], pair_details['quoteToken']['address'], amount_to_sell, token_balance_data.decimals, slippage_bps)
 
         if tx_sig:
-            # Calculate P/L
+            # Calculate P/L using entry_price (USD) and sell_price (USD)
             profit_loss_percent = 0.0
             if entry_price is not None and entry_price > 0 and sell_price is not None:
                  profit_loss_percent = ((sell_price - entry_price) / entry_price) * 100
 
             log_message = (f"🛑 VENDA REALIZADA: {symbol}\n"
                            f"Motivo: {reason}\n"
-                           f"Lucro/Prejuízo: {profit_loss_percent:.2f}%\n | Entrada: {sell_price} | Saída: {entry_price} " # Added P/L
+                           f"Lucro/Prejuízo: {profit_loss_percent:.2f}%\n"
+                           f"Entrada (USD): ${entry_price:.10f} | Saída (USD): ${sell_price:.10f}\n" # Corrected display
                            f"Slippage Usado: {slippage_bps/100:.2f}%\n"
                            f"Taxa de Prioridade: {parameters.get('priority_fee')} micro-lamports\n"
                            f"https://solscan.io/tx/{tx_sig}")
@@ -725,7 +726,14 @@ async def check_velocity_strategy():
         # Se todas as 5 velas forem positivas, dispara o gatilho de compra
         if all_positive_candles:
             # Obtém o preço da última vela de 1 minuto para usar na compra
-            price = df_1m['close'].iloc[-1]
+            # Use priceUsd for buy price
+            _, price_usd = await fetch_dexscreener_real_time_price(target_address)
+
+            if price_usd is None or price_usd == 0:
+                 logger.warning(f"Não foi possível obter o preço atual em USD para {symbol}. Não é possível comprar.")
+                 return
+
+            price = price_usd # Use USD price for entry_price
             reason = "Gatilho de 5 velas positivas de 1m"
 
             msg = f"✅ GATILHO ATINGIDO para **{symbol}**! Cinco velas positivas de 1m confirmadas. Executando ordem de compra..."
@@ -757,7 +765,7 @@ async def manage_position():
 
     target_address = pair_details.get('pairAddress')
     symbol = pair_details.get('baseToken', {}).get('symbol', 'N/A')
-    buy_price = entry_price # Use entry_price from global state
+    buy_price = entry_price # Use entry_price from global state (in USD)
     position_opened_timestamp = automation_state.get("position_opened_timestamp", 0)
 
     if buy_price is None or buy_price == 0.0: # Check if entry_price is set and not zero
@@ -808,14 +816,14 @@ async def manage_position():
 
         # Checa as condições de venda (TP, SL, Timeout)
         if current_price >= take_profit_price:
-            msg = f"🟢 **TAKE PROFIT ATINGIDO!** Vendendo **{symbol}** com lucro. Valor Corrente: {current_price} Take Profit: {take_profit_price}"
+            msg = f"🟢 **TAKE PROFIT ATINGIDO!** Vendendo **{symbol}** com lucro. Valor Corrente (USD): ${current_price:.10f} Take Profit (USD): ${take_profit_price:.10f}"
             logger.info(msg.replace("**", ""))
             await send_telegram_message(msg)
             await execute_sell_order(reason="Take Profit Atingido", sell_price=current_price)
             # execute_sell_order will handle state reset and penalty if successful
 
         elif current_price <= stop_loss_price:
-            msg = f"🔴 **STOP LOSS ATINGIDO!** Vendendo **{symbol}** para limitar o prejuízo."
+            msg = f"🔴 **STOP LOSS ATINGIDO!** Vendendo **{symbol}** para limitar o prejuízo. Valor Corrente (USD): ${current_price:.10f} Stop Loss (USD): ${stop_loss_price:.10f}"
             logger.info(msg.replace("**", ""))
             await send_telegram_message(msg)
             await execute_sell_order(reason="Stop Loss Atingido", sell_price=current_price)
@@ -979,7 +987,7 @@ async def set_params(update, context):
     try:
         args = context.args
         amount, stop_loss, take_profit = float(args[0]), float(args[1]), float(args[2])
-        priority_fee = int(args[3]) if len(args) > 3 else 00
+        priority_fee = int(args[3]) if len(args) > 3 else 3000000
         parameters.update(amount=amount, stop_loss_percent=stop_loss, take_profit_percent=take_profit, priority_fee=priority_fee)
         await update.effective_message.reply_text(f"✅ Parâmetros definidos: amount={amount} SOL, stop={stop_loss}%, take_profit={take_profit}%, priority_fee={priority_fee}")
     except Exception:
@@ -1121,7 +1129,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
-
-
