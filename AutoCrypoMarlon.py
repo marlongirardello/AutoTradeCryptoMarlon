@@ -352,14 +352,14 @@ async def discover_and_filter_pairs(pages_to_scan=1):
                         logger.info(f"Avalianco par {pair_name} ({pair_address}): Liquidez: ${liquidity_usd:,.2f}, Volume H1: ${volume_h1_usd:,.2f}, Compras H1: {txns_h1_buys}, Vendas H1: {txns_h1_sells}, Variação H1: {price_change_h1:.2f}%")
 
 
-                        # Check if the pair is older than 1 hour
+                        # Check if the pair is older than 12 hours (43200 seconds)
                         created_at = dex_pair_details.get('pairCreatedAt')
                         if created_at:
                             # Convert milliseconds to seconds
                             created_at_timestamp = created_at / 1000
                             current_timestamp = time.time()
                             age_in_seconds = current_timestamp - created_at_timestamp
-                            if age_in_seconds < 3600:  # 3600 seconds = 1 hour
+                            if age_in_seconds < 43200:  # 43200 seconds = 12 hours
                                 logger.info(f"❌ Par {pair_name} ({pair_address}) eliminado: Muito novo ({age_in_seconds:.0f}s).")
                                 continue
                         else:
@@ -378,6 +378,8 @@ async def discover_and_filter_pairs(pages_to_scan=1):
                         if volume_h1_usd < 100000: # Removed price_change_h1 filter
                             logger.info(f"❌ Par {pair_name} ({pair_address}) eliminado: Volume insuficiente (Volume: {volume_h1_usd:,.2f} USD).")
                             continue
+
+                        # Removed price_change_h1 filter as requested
 
 
                         filtered_pairs.append(dex_pair_details)
