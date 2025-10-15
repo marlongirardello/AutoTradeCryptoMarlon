@@ -368,7 +368,7 @@ async def discover_and_filter_pairs(pages_to_scan=1):
 
                         if liquidity_usd < 50000:
                              logger.info(f"❌ Par {pair_name} ({pair_address}) eliminado: Baixa liquidez (USD: {liquidity_usd:,.2f}).")
-                            continue
+                             continue
 
                         if txns_h1_buys > 0 and (txns_h1_sells / txns_h1_buys) > 0.5:
                             logger.info(f"❌ Par {pair_name} ({pair_address}) eliminado: Proporção de vendas muito alta ({txns_h1_sells} vendas, {txns_h1_buys} compras).")
@@ -377,6 +377,8 @@ async def discover_and_filter_pairs(pages_to_scan=1):
                         if volume_h1_usd < 100000: # Removed price_change_h1 filter
                             logger.info(f"❌ Par {pair_name} ({pair_address}) eliminado: Volume insuficiente (Volume: {volume_h1_usd:,.2f} USD).")
                             continue
+
+                        # Removed price_change_h1 filter as requested
 
 
                         filtered_pairs.append(dex_pair_details)
