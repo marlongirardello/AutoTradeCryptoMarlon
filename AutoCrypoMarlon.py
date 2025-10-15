@@ -349,6 +349,9 @@ async def discover_and_filter_pairs(pages_to_scan=1):
                         volume_h1_usd = float(dex_pair_details.get('volume', {}).get('h1', 0))
                         price_change_h1 = float(dex_pair_details.get('priceChange', {}).get('h1', 0))
 
+                        logger.info(f"Avalianco par {pair_name} ({pair_address}): Liquidez: ${liquidity_usd:,.2f}, Volume H1: ${volume_h1_usd:,.2f}, Compras H1: {txns_h1_buys}, Vendas H1: {txns_h1_sells}, Variação H1: {price_change_h1:.2f}%")
+
+
                         # Check if the pair is older than 1 hour
                         created_at = dex_pair_details.get('pairCreatedAt')
                         if created_at:
@@ -364,16 +367,17 @@ async def discover_and_filter_pairs(pages_to_scan=1):
 
 
                         if liquidity_usd < 50000:
-                             # print(f"❌ Par {pair_name} ({pair_address}) eliminado: Baixa liquidez (USD: {liquidity_usd:,.2f}).") # Removed this line
+                             logger.info(f"❌ Par {pair_name} ({pair_address}) eliminado: Baixa liquidez (USD: {liquidity_usd:,.2f}).")
                             continue
 
                         if txns_h1_buys > 0 and (txns_h1_sells / txns_h1_buys) > 0.5:
-                            #print(f"❌ Par {pair_name} ({pair_address}) eliminado: Proporção de vendas muito alta ({txns_h1_sells} vendas, {txns_h1_buys} compras).")
+                            logger.info(f"❌ Par {pair_name} ({pair_address}) eliminado: Proporção de vendas muito alta ({txns_h1_sells} vendas, {txns_h1_buys} compras).")
                             continue
 
-                        if volume_h1_usd < 100000 or price_change_h1 < 20:
-                            #print(f"❌ Par {pair_name} ({pair_address}) eliminado: Volume/Variação insuficientes (Volume: {volume_h1_usd:,.2f} USD, Variação: {price_change_h1:.2f}%).")
+                        if volume_h1_usd < 100000: # Removed price_change_h1 filter
+                            logger.info(f"❌ Par {pair_name} ({pair_address}) eliminado: Volume insuficiente (Volume: {volume_h1_usd:,.2f} USD).")
                             continue
+
 
                         filtered_pairs.append(dex_pair_details)
                         print(f"✅ Moeda em tendência encontrada e validada na Solana: {dex_pair_details['baseToken']['symbol']} - Endereço: {pair_address}")
@@ -560,7 +564,7 @@ async def execute_buy_order(amount, price, pair_details, manual=False, reason="S
         buy_fail_count = 0
         log_message = (f"✅ COMPRA REALIZADA: {amount} SOL para {pair_details['baseToken']['symbol']}\n"
                        f"Motivo: {reason}\n"
-                       f"Entrada (USD): ${price:.10f} | Alvo (USD): ${price * (1 + parameters['take_profit_percent']/100)::.10f} | "
+                       f"Entrada (USD): ${price:.10f} | Alvo (USD): ${price * (1 + parameters['take_profit_percent']/100):.10f} | "
                        f"Stop (USD): ${price * (1 - parameters['stop_loss_percent']/100):.10f}\n"
                        f"Slippage Usado: {slippage_bps/100:.2f}%\n"
                        f"Taxa de Prioridade: {parameters.get('priority_fee')} micro-lamports\n"
