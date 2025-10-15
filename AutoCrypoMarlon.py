@@ -560,7 +560,7 @@ async def execute_buy_order(amount, price, pair_details, manual=False, reason="S
         buy_fail_count = 0
         log_message = (f"✅ COMPRA REALIZADA: {amount} SOL para {pair_details['baseToken']['symbol']}\n"
                        f"Motivo: {reason}\n"
-                       f"Entrada (USD): ${price:.10f} | Alvo (USD): ${price * (1 + parameters['take_profit_percent']/100):.10f} | "
+                       f"Entrada (USD): ${price:.10f} | Alvo (USD): ${price * (1 + parameters['take_profit_percent']/100)::.10f} | "
                        f"Stop (USD): ${price * (1 - parameters['stop_loss_percent']/100):.10f}\n"
                        f"Slippage Usado: {slippage_bps/100:.2f}%\n"
                        f"Taxa de Prioridade: {parameters.get('priority_fee')} micro-lamports\n"
@@ -680,7 +680,7 @@ async def execute_sell_order(reason="", sell_price=None):
         logger.error(f"Erro crítico ao vender {symbol}: {e}")
         # Increment sell_fail_count for unhandled exceptions in manage_position
         sell_fail_count += 1
-        await send_telegram_message(f"⚠️ Erro crítico ao vender {symbol}: {e}. Tentativa {sell_fail_count}/100. O bot permanecerá em posição.")
+        await send_telegram_message(f"⚠️ Erro em manage_position para {symbol}: {e}. Tentativa {sell_fail_count}/100. O bot permanecerá em posição.")
         if sell_fail_count >= 100: # Check limit AFTER incrementing
              logger.error(f"ATINGIDO LIMITE DE {sell_fail_count} ERROS EM manage_position. RESETANDO POSIÇÃO.")
              await send_telegram_message(f"⚠️ Limite de {sell_fail_count} erros em manage_position para **{symbol}** atingido. Posição abandonada.")
@@ -688,7 +688,7 @@ async def execute_sell_order(reason="", sell_price=None):
              entry_price = 0.0
              automation_state["position_opened_timestamp"] = 0
              if automation_state.get('current_target_pair_address'):
-                 automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 100 # Penalize heavily on critical error leading to abandonment
+                 automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 100 # Penalize heavily on final failure
                  await send_telegram_message(f"⚠️ **{symbol}** foi penalizada por 100 ciclos após {sell_fail_count} erros em manage_position.")
              automation_state["current_target_pair_address"] = None
              sell_fail_count = 0 # Reset fail count after abandoning
@@ -949,8 +949,8 @@ async def autonomous_loop():
                             best_score = score
                             best_pair_details = pair_details
 
-                    # If the best coin has a score above 60 and is not in the penalty box, set it as target
-                    if best_pair_details and best_score >= 60:
+                    # If the best coin has a score above 50 and is not in the penalty box, set it as target
+                    if best_pair_details and best_score >= 50:
                         automation_state["current_target_pair_details"] = best_pair_details
                         automation_state["current_target_pair_address"] = best_pair_details["pairAddress"]
                         automation_state["target_selected_timestamp"] = now
@@ -960,7 +960,7 @@ async def autonomous_loop():
                         logger.info(msg.replace("**", ""))
                         await send_telegram_message(msg)
                     else:
-                        msg = f"⚠️ Nenhuma moeda alcançou a pontuação mínima de 60 ou as moedas elegíveis estão penalizadas. Reiniciando caça."
+                        msg = f"⚠️ Nenhuma moeda alcançou a pontuação mínima de 50 ou as moedas elegíveis estão penalizadas. Reiniciando caça."
                         logger.info(msg)
 
                 else:
