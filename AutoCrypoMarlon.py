@@ -306,12 +306,13 @@ import requests
 from datetime import datetime
 
 async def discover_and_filter_pairs(pages_to_scan=1):
-    print(f"Iniciando a busca por novas moedas na rede Solana, escaneando {pages_to_scan} página(s)...")
+    print(f"Iniciando a busca por moedas em tendência na rede Solana, escaneando {pages_to_scan} página(s)...") # Updated message
 
     filtered_pairs = []
 
     for page in range(1, pages_to_scan + 1):
-        url = f"https://api.geckoterminal.com/api/v2/networks/solana/new_pools?page={page}"
+        # Updated API endpoint to trending_pools
+        url = f"https://api.geckoterminal.com/api/v2/networks/solana/trending_pools?page={page}"
         headers = {'Content-Type': 'application/json'}
 
         try:
@@ -322,7 +323,7 @@ async def discover_and_filter_pairs(pages_to_scan=1):
             gecko_pairs = data.get('data', [])
 
             if not gecko_pairs:
-                print(f"Nenhum par novo encontrado na página {page}. Encerrando a busca...")
+                print(f"Nenhum par em tendência encontrado na página {page}. Encerrando a busca...") # Updated message
                 break
 
             for gecko_pair in gecko_pairs:
@@ -332,51 +333,57 @@ async def discover_and_filter_pairs(pages_to_scan=1):
                 pair_name = attributes.get('name', 'N/A')
                 pair_address = attributes['address']
 
-                # --- LÓGICA DE FILTRAGEM (MANTIDA) ---
-                created_at_str = attributes['pool_created_at']
-                if created_at_str is None or attributes.get('reserve_in_usd') is None or attributes.get('transactions') is None:
-                    print(f"❌ Par {pair_name} ({pair_address}) eliminado: Dados essenciais faltando.")
-                    continue
-
-                created_at_ts = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
-                age_seconds = (datetime.now(created_at_ts.tzinfo) - created_at_ts).total_seconds()
-
-                if not (60 <= age_seconds <= 660): # Adjusted to allow for 600s (10 mins) for testing
-                    #print(f"❌ Par {pair_name} ({pair_address}) eliminado: Fora da janela de idade (Idade: {age_seconds:.2f}s).")
-                    continue
-
-                try:
-                    liquidity_usd = float(attributes['reserve_in_usd'])
-                    txns_h1_buys = attributes['transactions']['h1']['buys']
-                    txns_h1_sells = attributes['transactions']['h1']['sells']
-                    price_change_h1 = float(attributes['price_change_percentage']['h1'])
-                    volume_h1_usd = float(attributes['volume_usd']['h1'])
-                except (KeyError, TypeError, ValueError):
-                    print(f"❌ Par {pair_name} ({pair_address}) eliminado: Erro ao converter dados.")
-                    continue
-
-                if liquidity_usd < 50000:
-                    # print(f"❌ Par {pair_name} ({pair_address}) eliminado: Baixa liquidez (USD: {liquidity_usd:,.2f}).") # Removed this line
-                    continue
-
-                if txns_h1_buys > 0 and (txns_h1_sells / txns_h1_buys) > 0.5:
-                    #print(f"❌ Par {pair_name} ({pair_address}) eliminado: Proporção de vendas muito alta ({txns_h1_sells} vendas, {txns_h1_buys} compras).")
-                    continue
-
-                if volume_h1_usd < 100000 or price_change_h1 < 20:
-                    #print(f"❌ Par {pair_name} ({pair_address}) eliminado: Volume/Variação insuficientes (Volume: {volume_h1_usd:,.2f} USD, Variação: {price_change_h1:.2f}%).")
-                    continue
-
-                # --- CORREÇÃO AQUI ---
-                # A função discover_and_filter_pairs agora é assíncrona,
-                # então a chamada à Dexscreener também deve ser com await
+                # --- LÓGICA DE FILTRAGEM (Ajustada para trending_pools) ---
+                # trending_pools não tem 'pool_created_at', 'reserve_in_usd', 'transactions' na mesma estrutura que new_pools
+                # Precisaremos buscar detalhes adicionais ou usar critérios diferentes
+                # Por enquanto, vamos apenas buscar os detalhes na Dexscreener para cada par em tendência encontrado
                 dex_pair_details = await get_pair_details(pair_address)
 
                 if dex_pair_details:
-                    filtered_pairs.append(dex_pair_details)
-                    print(f"✅ Nova moeda encontrada e validada na Solana: {dex_pair_details['baseToken']['symbol']} - Endereço: {pair_address}")
+                     # Adding basic filters from the old logic, adapted for Dexscreener data
+                    try:
+                        liquidity_usd = float(dex_pair_details.get('liquidity', {}).get('usd', 0))
+                        txns_h1 = dex_pair_details.get('txns', {}).get('h1', {'buys': 0, 'sells': 0})
+                        txns_h1_buys = txns_h1.get('buys', 0)
+                        txns_h1_sells = txns_h1.get('sells', 0)
+                        volume_h1_usd = float(dex_pair_details.get('volume', {}).get('h1', 0))
+                        price_change_h1 = float(dex_pair_details.get('priceChange', {}).get('h1', 0))
+
+                        # Check if the pair is older than 1 hour
+                        created_at = dex_pair_details.get('pairCreatedAt')
+                        if created_at:
+                            # Convert milliseconds to seconds
+                            created_at_timestamp = created_at / 1000
+                            current_timestamp = time.time()
+                            age_in_seconds = current_timestamp - created_at_timestamp
+                            if age_in_seconds < 3600:  # 3600 seconds = 1 hour
+                                logger.info(f"❌ Par {pair_name} ({pair_address}) eliminado: Muito novo ({age_in_seconds:.0f}s).")
+                                continue
+                        else:
+                             logger.info(f"⚠️ Não foi possível obter o timestamp de criação para {pair_name} ({pair_address}). Pulando filtro de idade.")
+
+
+                        if liquidity_usd < 50000:
+                             # print(f"❌ Par {pair_name} ({pair_address}) eliminado: Baixa liquidez (USD: {liquidity_usd:,.2f}).") # Removed this line
+                            continue
+
+                        if txns_h1_buys > 0 and (txns_h1_sells / txns_h1_buys) > 0.5:
+                            #print(f"❌ Par {pair_name} ({pair_address}) eliminado: Proporção de vendas muito alta ({txns_h1_sells} vendas, {txns_h1_buys} compras).")
+                            continue
+
+                        if volume_h1_usd < 100000 or price_change_h1 < 20:
+                            #print(f"❌ Par {pair_name} ({pair_address}) eliminado: Volume/Variação insuficientes (Volume: {volume_h1_usd:,.2f} USD, Variação: {price_change_h1:.2f}%).")
+                            continue
+
+                        filtered_pairs.append(dex_pair_details)
+                        print(f"✅ Moeda em tendência encontrada e validada na Solana: {dex_pair_details['baseToken']['symbol']} - Endereço: {pair_address}")
+                    except (KeyError, TypeError, ValueError) as e:
+                         print(f"❌ Par {pair_name} ({pair_address}) eliminado: Erro ao processar dados da Dexscreener: {e}")
+                         continue
+
                 else:
-                    print(f"⚠️ Par {pair_name} ({pair_address}) eliminado: Não encontrado na Dexscreener.")
+                    print(f"⚠️ Par {pair_name} ({pair_address}) eliminado: Não encontrado na Dexscreener ou dados insuficientes.")
+
 
         except requests.exceptions.RequestException as e:
             print(f"Erro na requisição para a API do GeckoTerminal (Página {page}): {e}")
@@ -418,6 +425,8 @@ def analyze_and_score_coin(pair_details):
             price_change_score = 20
         elif price_change_h1 >= 30:
             price_change_score = 10
+        elif price_change_h1 >= 5:
+             price_change_score = 5 
 
         # Pontuação 3: Compras vs. Vendas
         buys_sells_score = 0
@@ -430,7 +439,7 @@ def analyze_and_score_coin(pair_details):
                     buys_sells_score = 30
                 elif buy_ratio >= 0.7: # 80% ou mais de compras
                     buys_sells_score = 20
-                elif buy_ratio >= 0.6: # 70% ou mais de compras
+                elif buy_ratio >= 0.5: # 50% ou mais de compras
                     buys_sells_score = 10
             # If txns_h1_buys is 0 but txns_h1_sells >= 100, buy_ratio remains 0 and score is 0, which is correct.
         else:
@@ -669,19 +678,18 @@ async def execute_sell_order(reason="", sell_price=None):
 
     except Exception as e:
         logger.error(f"Erro crítico ao vender {symbol}: {e}")
-        # Increment fail count and notify, but don't abandon position immediately on critical error
+        # Increment sell_fail_count for unhandled exceptions in manage_position
         sell_fail_count += 1
         await send_telegram_message(f"⚠️ Erro crítico ao vender {symbol}: {e}. Tentativa {sell_fail_count}/100. O bot permanecerá em posição.")
-        # Abandon position and penalize only if critical errors also hit the limit
-        if sell_fail_count >= 100:
-             logger.error(f"ATINGIDO LIMITE DE {sell_fail_count} FALHAS DE VENDA. RESETANDO POSIÇÃO.")
-             await send_telegram_message(f"⚠️ Limite de {sell_fail_count} falhas de venda para **{symbol}** atingido. Posição abandonada.")
+        if sell_fail_count >= 100: # Check limit AFTER incrementing
+             logger.error(f"ATINGIDO LIMITE DE {sell_fail_count} ERROS EM manage_position. RESETANDO POSIÇÃO.")
+             await send_telegram_message(f"⚠️ Limite de {sell_fail_count} erros em manage_position para **{symbol}** atingido. Posição abandonada.")
              in_position = False
              entry_price = 0.0
              automation_state["position_opened_timestamp"] = 0
-             if pair_address:
-                 automation_state["penalty_box"][pair_address] = 100 # Penalize heavily on critical error leading to abandonment
-                 await send_telegram_message(f"⚠️ **{symbol}** foi penalizada por 100 ciclos após {sell_fail_count} falhas de venda.")
+             if automation_state.get('current_target_pair_address'):
+                 automation_state["penalty_box"][automation_state["current_target_pair_address"]] = 100 # Penalize heavily on critical error leading to abandonment
+                 await send_telegram_message(f"⚠️ **{symbol}** foi penalizada por 100 ciclos após {sell_fail_count} erros em manage_position.")
              automation_state["current_target_pair_address"] = None
              sell_fail_count = 0 # Reset fail count after abandoning
 
@@ -720,26 +728,26 @@ async def check_velocity_strategy():
 
 
     try:
-        # Puxa os dados das últimas 5 velas de 1 minuto
-        df_1m = await fetch_geckoterminal_ohlcv(target_address, "1m", limit=5)
+        # Puxa os dados das últimas 10 velas de 1 minuto para calcular a EMA de 10
+        df_1m = await fetch_geckoterminal_ohlcv(target_address, "1m", limit=10)
 
-        if df_1m is None or df_1m.empty or len(df_1m) < 5:
-            logger.warning(f"Dados OHLCV insuficientes para {symbol} (necessário 5 velas). Tentando novamente.")
+        if df_1m is None or df_1m.empty or len(df_1m) < 10: # Need at least 10 candles for EMA 10
+            logger.warning(f"Dados OHLCV insuficientes para {symbol} (necessário 10 velas para EMA 10). Tentando novamente.")
             return
 
-        # Verifica se as últimas 5 velas de 1 minuto são positivas (fechamento > abertura)
-        # Check if all of the last 5 candles are positive
-        all_positive_candles = all(df_1m['close'].iloc[-5:] > df_1m['open'].iloc[-5:])
+        # Calculate EMA 10
+        df_1m['EMA10'] = df_1m['close'].ewm(span=10, adjust=False).mean()
 
+        # Get the current price (closing price of the last candle)
+        current_price = df_1m['close'].iloc[-1]
+        ema10 = df_1m['EMA10'].iloc[-1]
 
-        # Loga a análise para visibilidade
-        logger.info(f"🕵️ Monitorando {symbol}: Últimas 5 velas de 1 minuto estão {'todas positivas' if all_positive_candles else 'nem todas positivas'}.")
+        # Log the analysis for visibility
+        logger.info(f"🕵️ Monitorando {symbol}: Preço Atual: {current_price:.8f} | EMA 10: {ema10:.8f}")
 
-
-        # Se todas as 5 velas forem positivas, dispara o gatilho de compra
-        if all_positive_candles:
-            # Obtém o preço da última vela de 1 minuto para usar na compra
-            # Use priceUsd for buy price
+        # New buy condition: Price > EMA 10
+        if current_price > ema10:
+            # Obtém o preço atual em USD para usar na compra
             _, price_usd = await fetch_dexscreener_real_time_price(target_address)
 
             if price_usd is None or price_usd == 0:
@@ -747,21 +755,17 @@ async def check_velocity_strategy():
                  return
 
             price = price_usd # Use USD price for entry_price
-            reason = "Gatilho de 5 velas positivas de 1m"
+            reason = "Gatilho: Preço acima da EMA 10 (1m)"
 
-            msg = f"✅ GATILHO ATINGIDO para **{symbol}**! Cinco velas positivas de 1m confirmadas. Executando ordem de compra..."
+            msg = f"✅ GATILHO ATINGIDO para **{symbol}**! Preço ({current_price:.8f}) acima da EMA 10 ({ema10:.8f}). Executando ordem de compra..."
             logger.info(msg.replace("**",""))
             await send_telegram_message(msg)
 
-            # --- AQUI ESTÁ A CORREÇÃO FINAL ---
             # Chama a função de compra com todos os argumentos necessários
             await execute_buy_order(parameters["amount"], price, pair_details, reason=reason)
 
-            # Define o estado do bot para "em posição" para parar de comprar
-            # in_position is set in execute_buy_order
-
         else:
-            logger.info(f"❌ Sinal para {symbol} não encontrado (necessita 5 velas positivas). Continuará monitorando.")
+            logger.info(f"❌ Condição de compra (Preço > EMA 10) NÃO atendida para {symbol}. Continuará monitorando.")
 
     except Exception as e:
         logger.error(f"Erro em check_velocity_strategy: {e}", exc_info=True)
@@ -920,6 +924,7 @@ async def autonomous_loop():
             # ------------------------------------------------------------------
             if not automation_state.get("current_target_pair_address"):
                 logger.info("Iniciando ciclo de caça...")
+                # Updated function call
                 gecko_approved_pairs = await discover_and_filter_pairs(pages_to_scan=10)
 
                 if gecko_approved_pairs:
@@ -959,7 +964,7 @@ async def autonomous_loop():
                         logger.info(msg)
 
                 else:
-                    logger.warning("Nenhum par novo passou nos filtros iniciais nesta rodada de caça.")
+                    logger.warning("Nenhum par em tendência passou nos filtros iniciais nesta rodada de caça.") # Updated message
 
                 # Aguarda o intervalo de caça
                 await asyncio.sleep(TRADE_INTERVAL_SECONDS)
